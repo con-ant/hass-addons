@@ -2,13 +2,13 @@ ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 # Labels
-LABEL maintainer="Robson Felix"
+LABEL maintainer="con-ant"
 LABEL io.hass.version="0.1.0"
 LABEL io.hass.type="addon"
 LABEL io.hass.arch="amd64,aarch64"
 LABEL org.opencontainers.image.title="Playwright Browser for Home Assistant"
 LABEL org.opencontainers.image.description="Headless Chromium with CDP endpoint for browser automation"
-LABEL org.opencontainers.image.source="https://github.com/robsonfelix/robsonfelix-hass-addons"
+LABEL org.opencontainers.image.source="https://github.com/con-ant/hass-addons"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # jq is already available in the Playwright image (Ubuntu-based)

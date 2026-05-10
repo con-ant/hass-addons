@@ -124,5 +124,5 @@ automation:
 
 ## Support
 
-- [GitHub Issues](https://github.com/robsonfelix/robsonfelix-hass-addons/issues)
+- [GitHub Issues](https://github.com/con-ant/hass-addons/issues)
 - [Monocle Forums](https://forum.monoclecam.com)

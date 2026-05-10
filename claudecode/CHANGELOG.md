@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.1] - 2026-05-10
+
+### Added
+- `default_permission_mode` option to set Claude Code's default permission mode on startup
+- Defaults to `auto` (classifier-based approve/deny, requires Claude Code v2.1.83+ on Max/Team/Enterprise/API plan with Sonnet 4.6+/Opus 4.6+); falls back silently to `default` if requirements aren't met
+- All five modes selectable: `default`, `auto`, `acceptEdits`, `plan`, `bypassPermissions`
+- Applied unconditionally (independent of `enable_mcp`) by patching `~/.claude/settings.json` at container start
+
 ## [1.2.63] - 2026-02-23
 
 ### Fixed

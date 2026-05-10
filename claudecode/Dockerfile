@@ -2,10 +2,10 @@ ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 # Labels
-LABEL maintainer="Robson Felix"
+LABEL maintainer="con-ant"
 LABEL org.opencontainers.image.title="Claude Code for Home Assistant"
 LABEL org.opencontainers.image.description="Claude Code CLI with web terminal and HA integration"
-LABEL org.opencontainers.image.source="https://github.com/robsonfelix/robsonfelix-hass-addons"
+LABEL org.opencontainers.image.source="https://github.com/con-ant/hass-addons"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Environment setup
@@ -253,6 +253,11 @@ CMD ["/bin/bash", "-c", "\
   else \
     echo '[INFO] Playwright MCP disabled'; \
   fi && \
+  DEFAULT_MODE=$(jq -r '.default_permission_mode // \"auto\"' /data/options.json) && \
+  SETTINGS_FILE=/root/.claude/settings.json && \
+  [ -f \"$SETTINGS_FILE\" ] || echo '{}' > \"$SETTINGS_FILE\" && \
+  jq --arg mode \"$DEFAULT_MODE\" '.permissions.defaultMode = $mode' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
+  echo \"[INFO] Default permission mode: $DEFAULT_MODE\" && \
   if [ \"$THEME\" = \"dark\" ]; then \
     COLORS='background=#1e1e2e,foreground=#cdd6f4,cursor=#f5e0dc'; \
   else \
