@@ -108,6 +108,16 @@ claude --continue
 | `auto_launch_claude` | Auto-run Claude when the terminal opens: `off` (bash prompt), `new` (`claude`), or `continue` (`claude --continue`). Drops to a login shell when Claude exits | continue |
 | `enable_remote_control` | Pass `--remote-control` to all Claude launches so [Remote Control](https://code.claude.com/docs/en/remote-control) is on by default. Requires Claude Code v2.1.51+, claude.ai OAuth login (not API key), and a Pro/Max/Team/Enterprise plan — leave off if you authenticate with an API key | false |
 
+### Playwright MCP setup
+
+If you set `enable_playwright_mcp: true`:
+
+1. Install and **start** the [Playwright Browser](../playwright-browser/) add-on **before** starting Claude Code. The hostname is auto-detected from the Supervisor API at startup; if Playwright Browser isn't running yet, detection silently falls back to a literal that won't resolve.
+2. If you install Playwright Browser after Claude Code is already running, **restart Claude Code** so detection re-runs.
+3. To pin the hostname (e.g. across renames or repos), set `playwright_cdp_host` to the value reported by `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons | jq -r '.data.addons[] | select(.slug | test("playwright-browser")) | .hostname'`.
+
+The add-on logs a `[WARN]` block with these instructions if auto-detect fails.
+
 ## File Locations
 
 | Path | Description | Access |

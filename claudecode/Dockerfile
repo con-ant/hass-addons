@@ -76,9 +76,11 @@ RUN apk add --no-cache --virtual .build-deps \
     && apk del .build-deps \
     && apk add --no-cache libmodbus
 
-# Pre-cache Playwright MCP server (npx cache avoids /usr/local/bin/mcp conflict with hass-mcp)
-ENV NPM_CONFIG_CACHE=/root/.npm
-RUN npx @playwright/mcp --version || true
+# Install @playwright/mcp into a non-default prefix. A normal global install
+# would write its `mcp` binary to /usr/local/bin/mcp and collide with hass-mcp
+# (Python). We install under /opt and invoke the binary by absolute path in
+# the MCP config below — no PATH conflict, no brittle npx --no-install dance.
+RUN npm install -g --prefix=/opt/playwright-mcp @playwright/mcp
 
 # Install Home Assistant CLI (ha command)
 RUN case "${BUILD_ARCH}" in \
@@ -236,7 +238,10 @@ CMD ["/bin/bash", "-c", "\
     if [ -n \"$PLAYWRIGHT_HOST\" ] && [ \"$PLAYWRIGHT_HOST\" != \"null\" ]; then \
       echo \"[INFO] Found Playwright Browser: $PLAYWRIGHT_HOST\"; \
     else \
-      echo '[WARN] Playwright Browser add-on not found, using default hostname'; \
+      echo '[WARN] Playwright Browser add-on not found via Supervisor API.'; \
+      echo '[WARN]   - If you just installed it, restart this add-on so detection re-runs.'; \
+      echo '[WARN]   - Or set the playwright_cdp_host option to its hostname.'; \
+      echo '[WARN] Falling back to literal \"playwright-browser\" (likely will not resolve).'; \
       PLAYWRIGHT_HOST=\"playwright-browser\"; \
     fi; \
   fi && \
@@ -258,7 +263,7 @@ CMD ["/bin/bash", "-c", "\
     echo '[INFO] MCP disabled'; \
   fi && \
   if [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
-    claude mcp add-json playwright \"{\\\"command\\\":\\\"npx\\\",\\\"args\\\":[\\\"--no-install\\\",\\\"@playwright/mcp\\\",\\\"--cdp-endpoint\\\",\\\"http://${PLAYWRIGHT_HOST}:9222\\\"]}\" -s user && \
+    claude mcp add-json playwright \"{\\\"command\\\":\\\"/opt/playwright-mcp/bin/mcp\\\",\\\"args\\\":[\\\"--cdp-endpoint\\\",\\\"http://${PLAYWRIGHT_HOST}:9222\\\"]}\" -s user && \
     echo \"[INFO] Playwright MCP enabled (CDP: http://${PLAYWRIGHT_HOST}:9222)\"; \
     echo '[INFO] Make sure the Playwright Browser add-on is installed and running'; \
   else \
