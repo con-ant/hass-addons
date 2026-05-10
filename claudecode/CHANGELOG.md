@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.2] - 2026-05-10
+
+### Added
+- `auto_launch_claude` option (`off` | `new` | `continue`, default `continue`): runs `claude` (or `claude --continue`) automatically when the terminal opens, falling back to a bash login shell when Claude exits
+- `enable_remote_control` option (default `false`): when true, appends `--remote-control` to all Claude launches (auto-launch + the `c`/`cc` aliases) so [Claude Code Remote Control](https://code.claude.com/docs/en/remote-control) is on by default. Requires Claude Code v2.1.51+, claude.ai OAuth login (not API key), and a Pro/Max/Team/Enterprise plan
+- `/usr/local/bin/claude-auto-launch` wrapper script: refreshes the MCP token, runs Claude with runtime flags, then drops to bash on exit
+
 ## [1.2.63-con.1] - 2026-05-10
 
 ### Added
