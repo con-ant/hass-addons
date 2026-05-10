@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Installing Playwright Browser after Claude Code no longer requires restarting Claude Code
 - `@playwright/mcp` binary name is `playwright-mcp`, not `mcp` — fixes `/opt/playwright-mcp/bin/mcp: not found` reported in MCP server output (regression introduced in 1.2.63-con.4)
 - Playwright wrapper and binary are now in `/usr/local/bin` (`playwright-mcp-launch` and `playwright-mcp` symlink). Claude Code's `auto` permission classifier was flagging `/opt` paths as unusual, blocking manual Bash-tool tests of the binary. The npm install still lives under `/opt/playwright-mcp` to avoid the `/usr/local/bin/mcp` collision with `hass-mcp`
+- AppArmor profile now grants `ixmr` on `/opt/playwright-mcp/**`. AppArmor resolves symlinks before checking, so executing `/usr/local/bin/playwright-mcp` was being denied at the `/opt/...` target without this rule
 
 ### Changed
 - New `/opt/playwright-mcp/launch.sh` wrapper does the discovery on each MCP spawn. The `playwright_cdp_host` add-on option is forwarded as the `PLAYWRIGHT_CDP_HOST` env var on the MCP server config; the wrapper prefers it over auto-detect when set
