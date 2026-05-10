@@ -98,7 +98,7 @@ if [ -z "$HOST" ] || [ "$HOST" = "null" ]; then
   echo "[playwright-launch] Install/start it, or set the playwright_cdp_host option." >&2
   exit 1
 fi
-exec /opt/playwright-mcp/bin/mcp --cdp-endpoint "http://$HOST:9222" "$@"
+exec /opt/playwright-mcp/bin/playwright-mcp --cdp-endpoint "http://$HOST:9222" "$@"
 EOF
 RUN chmod +x /opt/playwright-mcp/launch.sh
 
