@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.11-con.1] - 2026-05-10
+
+### Fixed
+- Build failure on HA Supervisor: `apt-get: not found` when Supervisor falls back to the Alpine `ghcr.io/home-assistant/base:latest` because `mcr.microsoft.com/playwright` isn't on its `build_from` allowlist
+- Reverted to a hardcoded `FROM mcr.microsoft.com/playwright:v1.57.0-noble` and removed `build.yaml` (same fix as 0.1.1, which 0.1.11 unintentionally regressed by re-adding the `BUILD_FROM` ARG pattern). Multi-arch (amd64 + arm64) still works via Docker manifest resolution
+
 ## [0.1.11] - 2026-02-23
 
 ### Added

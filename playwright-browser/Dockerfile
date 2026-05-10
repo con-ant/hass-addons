@@ -1,5 +1,8 @@
-ARG BUILD_FROM
-FROM ${BUILD_FROM}
+# Hardcoded base: HA Supervisor's build_from allowlist rejects mcr.microsoft.com,
+# so a build.yaml with BUILD_FROM=mcr.microsoft.com/playwright:... silently falls
+# back to ghcr.io/home-assistant/base:latest (Alpine) and apt-get breaks. The
+# Microsoft image is multi-arch so Docker resolves amd64/arm64 from the manifest.
+FROM mcr.microsoft.com/playwright:v1.57.0-noble
 
 # Labels
 LABEL maintainer="con-ant"
