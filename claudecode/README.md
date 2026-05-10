@@ -112,11 +112,10 @@ claude --continue
 
 If you set `enable_playwright_mcp: true`:
 
-1. Install and **start** the [Playwright Browser](../playwright-browser/) add-on **before** starting Claude Code. The hostname is auto-detected from the Supervisor API at startup; if Playwright Browser isn't running yet, detection silently falls back to a literal that won't resolve.
-2. If you install Playwright Browser after Claude Code is already running, **restart Claude Code** so detection re-runs.
-3. To pin the hostname (e.g. across renames or repos), set `playwright_cdp_host` to the value reported by `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons | jq -r '.data.addons[] | select(.slug | test("playwright-browser")) | .hostname'`.
+1. Install and start the [Playwright Browser](../playwright-browser/) add-on. Order doesn't matter — the hostname is resolved every time Claude spawns the MCP server, so installing Playwright Browser after Claude Code is fine (no restart needed).
+2. To pin the hostname (e.g. force a specific Playwright Browser instance), set `playwright_cdp_host` to the value reported by `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons | jq -r '.data.addons[] | select(.slug | test("playwright-browser")) | .hostname'`. When set, this overrides auto-detection.
 
-The add-on logs a `[WARN]` block with these instructions if auto-detect fails.
+If Claude reports the playwright MCP server failing to start, check the `[playwright-launch]` lines in Claude's MCP error log — the wrapper exits with a clear message if Playwright Browser isn't installed.
 
 ## File Locations
 
