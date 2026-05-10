@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.3] - 2026-05-10
+
+### Fixed
+- Supervisor warning "App has full device access, and selective device access in the configuration": dropped `uart: true` since `full_access: true` (added in 1.2.61) already grants UART access
+- Supervisor warning "App config 'arch' uses deprecated values ['armv7', 'armhf', 'i386']": removed those archs from `config.yaml`, leaving `amd64` and `aarch64`
+
 ## [1.2.63-con.2] - 2026-05-10
 
 ### Added
