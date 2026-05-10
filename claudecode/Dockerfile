@@ -125,14 +125,25 @@ update_mcp_token() {
 
 # Aliases
 alias ll='ls -la'
-alias c='update_mcp_token && claude'
-alias cc='update_mcp_token && claude --continue'
+alias c='update_mcp_token && claude $CLAUDE_FLAGS'
+alias cc='update_mcp_token && claude --continue $CLAUDE_FLAGS'
 alias ha-config='cd /homeassistant'
 alias ha-logs='cat /homeassistant/home-assistant.log 2>/dev/null || echo "Log not found"'
 EOF
 
 # Ensure .bashrc is sourced for login shells too
 RUN echo 'source ~/.bashrc' > /root/.profile
+
+# Auto-launch wrapper: refresh MCP token, run claude with runtime flags,
+# fall back to a login shell on exit so users can keep working.
+RUN cat > /usr/local/bin/claude-auto-launch << 'EOF'
+#!/bin/bash
+source /root/.bashrc 2>/dev/null
+update_mcp_token 2>/dev/null
+claude $AUTO_LAUNCH_ARGS
+exec bash --login
+EOF
+RUN chmod +x /usr/local/bin/claude-auto-launch
 
 # Set up PATH
 ENV PATH="/root/.local/bin:${PATH}"
@@ -263,10 +274,29 @@ CMD ["/bin/bash", "-c", "\
   else \
     COLORS='background=#eff1f5,foreground=#4c4f69,cursor=#dc8a78'; \
   fi && \
+  AUTO_LAUNCH=$(jq -r '.auto_launch_claude // \"continue\"' /data/options.json) && \
+  ENABLE_RC=$(jq -r '.enable_remote_control // false' /data/options.json) && \
+  CLAUDE_FLAGS=\"\" && \
+  if [ \"$ENABLE_RC\" = \"true\" ]; then CLAUDE_FLAGS=\"--remote-control\"; fi && \
+  case \"$AUTO_LAUNCH\" in \
+    continue) AUTO_LAUNCH_ARGS=\"--continue $CLAUDE_FLAGS\" ;; \
+    new) AUTO_LAUNCH_ARGS=\"$CLAUDE_FLAGS\" ;; \
+    *) AUTO_LAUNCH_ARGS=\"\" ;; \
+  esac && \
+  export CLAUDE_FLAGS AUTO_LAUNCH_ARGS && \
+  echo \"[INFO] Auto-launch: $AUTO_LAUNCH; remote-control: $ENABLE_RC\" && \
   if [ \"$SESSION_PERSIST\" = \"true\" ]; then \
-    SHELL_CMD='tmux new-session -A -s claude'; \
+    if [ \"$AUTO_LAUNCH\" != \"off\" ]; then \
+      SHELL_CMD='tmux new-session -A -s claude /usr/local/bin/claude-auto-launch'; \
+    else \
+      SHELL_CMD='tmux new-session -A -s claude'; \
+    fi; \
   else \
-    SHELL_CMD='bash --login'; \
+    if [ \"$AUTO_LAUNCH\" != \"off\" ]; then \
+      SHELL_CMD='/usr/local/bin/claude-auto-launch'; \
+    else \
+      SHELL_CMD='bash --login'; \
+    fi; \
   fi && \
   cd /homeassistant && \
   exec ttyd --port 7681 --writable --ping-interval 30 --max-clients 5 \
