@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.4] - 2026-05-10
+
+### Fixed
+- Playwright MCP server failing to start with a misleading "Permission denied" error: the previous `npx --no-install @playwright/mcp` approach relied on an npx cache that wasn't actually populated at build time. Now installs `@playwright/mcp` to `/opt/playwright-mcp` and invokes `/opt/playwright-mcp/bin/mcp` by absolute path — no PATH conflict with `hass-mcp`'s `/usr/local/bin/mcp`, no npx surprises
+- Playwright Browser hostname auto-detect fallback was silent. When detection fails it now logs explicit guidance ("restart this add-on after installing playwright-browser, or set `playwright_cdp_host`") instead of just falling through to a literal that won't resolve
+
+### Documentation
+- README notes that Playwright Browser must be installed *and running* before claudecode starts; restart claudecode if installed afterward
+
 ## [1.2.63-con.3] - 2026-05-10
 
 ### Fixed
