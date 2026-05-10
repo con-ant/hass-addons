@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.2.64] - 2026-05-10
+## [1.2.63-con.1] - 2026-05-10
 
 ### Added
 - `default_permission_mode` option to set Claude Code's default permission mode on startup
