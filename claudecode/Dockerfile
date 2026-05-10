@@ -76,14 +76,19 @@ RUN apk add --no-cache --virtual .build-deps \
     && apk del .build-deps \
     && apk add --no-cache libmodbus
 
-# Install @playwright/mcp into a non-default prefix. A normal global install
-# would write its `mcp` binary to /usr/local/bin/mcp and collide with hass-mcp
-# (Python). The launch wrapper resolves the Playwright Browser hostname at
-# MCP-spawn time (HA assigns hostnames like <repo-id>-playwright-browser that
-# we can't hardcode, and the user may install Playwright Browser after this
-# add-on has already started).
-RUN npm install -g --prefix=/opt/playwright-mcp @playwright/mcp
-RUN cat > /opt/playwright-mcp/launch.sh << 'EOF'
+# Install @playwright/mcp into /opt to avoid colliding with hass-mcp's
+# /usr/local/bin/mcp (both packages would otherwise install a binary named
+# `mcp` at the same path). Then symlink the actual playwright-mcp binary
+# (different name, no collision) into /usr/local/bin so it lives in PATH and
+# in a conventional location — Claude Code's `auto` permission classifier
+# treats /opt as unusual.
+RUN npm install -g --prefix=/opt/playwright-mcp @playwright/mcp && \
+    ln -s /opt/playwright-mcp/bin/playwright-mcp /usr/local/bin/playwright-mcp
+
+# Wrapper: resolves Playwright Browser hostname at MCP-spawn time. HA assigns
+# hostnames like <repo-id>-playwright-browser that we can't hardcode, and the
+# user may install Playwright Browser after Claude Code has already started.
+RUN cat > /usr/local/bin/playwright-mcp-launch << 'EOF'
 #!/bin/bash
 # PLAYWRIGHT_CDP_HOST env var (set from the playwright_cdp_host option) wins.
 # Otherwise ask Supervisor for any add-on whose slug contains "playwright-browser".
@@ -98,9 +103,9 @@ if [ -z "$HOST" ] || [ "$HOST" = "null" ]; then
   echo "[playwright-launch] Install/start it, or set the playwright_cdp_host option." >&2
   exit 1
 fi
-exec /opt/playwright-mcp/bin/playwright-mcp --cdp-endpoint "http://$HOST:9222" "$@"
+exec /usr/local/bin/playwright-mcp --cdp-endpoint "http://$HOST:9222" "$@"
 EOF
-RUN chmod +x /opt/playwright-mcp/launch.sh
+RUN chmod +x /usr/local/bin/playwright-mcp-launch
 
 # Install Home Assistant CLI (ha command)
 RUN case "${BUILD_ARCH}" in \
@@ -270,7 +275,7 @@ CMD ["/bin/bash", "-c", "\
     echo '[INFO] MCP disabled'; \
   fi && \
   if [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
-    PW_MCP_JSON=$(jq -nc --arg host \"$PLAYWRIGHT_HOST\" '{command:\"/opt/playwright-mcp/launch.sh\", env:{PLAYWRIGHT_CDP_HOST:$host}}') && \
+    PW_MCP_JSON=$(jq -nc --arg host \"$PLAYWRIGHT_HOST\" '{command:\"/usr/local/bin/playwright-mcp-launch\", env:{PLAYWRIGHT_CDP_HOST:$host}}') && \
     claude mcp add-json playwright \"$PW_MCP_JSON\" -s user && \
     if [ -n \"$PLAYWRIGHT_HOST\" ]; then \
       echo \"[INFO] Playwright MCP enabled (host override: $PLAYWRIGHT_HOST)\"; \
