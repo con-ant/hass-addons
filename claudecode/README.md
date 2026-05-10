@@ -2,6 +2,8 @@
 
 Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Anthropic's AI-powered coding assistant, directly in your Home Assistant sidebar with full access to your configuration.
 
+> Fork of [robsonfelix/robsonfelix-hass-addons](https://github.com/robsonfelix/robsonfelix-hass-addons). Fork-only releases use a `-con.N` suffix on the upstream version (e.g. `1.2.63-con.1`).
+
 ## Quick Start
 
 ```bash
@@ -94,12 +96,15 @@ claude --continue
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `enable_mcp` | Enable HA integration | true |
+| `enable_mcp` | Enable HA integration via hass-mcp | true |
+| `enable_playwright_mcp` | Enable Playwright MCP (requires the [Playwright Browser](../playwright-browser/) add-on) | false |
+| `playwright_cdp_host` | Override Playwright Browser hostname (auto-detected from Supervisor when blank) | "" |
 | `terminal_font_size` | Font size (10-24) | 14 |
 | `terminal_theme` | dark or light | dark |
 | `working_directory` | Start directory | /homeassistant |
 | `session_persistence` | Use tmux for persistent sessions | true |
 | `auto_update_claude` | Auto-update Claude Code on startup | true |
+| `default_permission_mode` | Default Claude Code permission mode: `default`, `auto`, `acceptEdits`, `plan`, or `bypassPermissions`. `auto` uses a classifier to approve/deny prompts (Claude Code v2.1.83+, Max/Team/Enterprise/API plan, Sonnet 4.6+/Opus 4.6+); falls back silently to `default` if requirements aren't met | auto |
 
 ## File Locations
 
@@ -223,5 +228,5 @@ After changing configuration:
 
 ## Support
 
-- [GitHub Issues](https://github.com/robsonfelix/robsonfelix-hass-addons/issues)
+- [GitHub Issues (fork)](https://github.com/con-ant/hass-addons/issues)
 - [Home Assistant Community](https://community.home-assistant.io/)

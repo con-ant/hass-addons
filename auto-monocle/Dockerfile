@@ -2,10 +2,10 @@ ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 # Labels
-LABEL maintainer="Robson Felix"
+LABEL maintainer="con-ant"
 LABEL org.opencontainers.image.title="Auto-Monocle for Home Assistant"
 LABEL org.opencontainers.image.description="Auto-discover HA cameras and expose to Alexa via Monocle Gateway"
-LABEL org.opencontainers.image.source="https://github.com/robsonfelix/robsonfelix-hass-addons"
+LABEL org.opencontainers.image.source="https://github.com/con-ant/hass-addons"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Install dependencies
