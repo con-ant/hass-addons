@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.5] - 2026-05-10
+
+### Fixed
+- Playwright Browser hostname is now resolved each time the MCP server starts, not once at container boot. The previous startup-time auto-detect failed silently if Playwright Browser wasn't running yet, and the literal `playwright-browser` fallback never resolves on HA's network (real hostnames look like `<repo-id>-playwright-browser`)
+- Installing Playwright Browser after Claude Code no longer requires restarting Claude Code
+
+### Changed
+- New `/opt/playwright-mcp/launch.sh` wrapper does the discovery on each MCP spawn. The `playwright_cdp_host` add-on option is forwarded as the `PLAYWRIGHT_CDP_HOST` env var on the MCP server config; the wrapper prefers it over auto-detect when set
+- Removed the startup-time auto-detect block in the CMD; the wrapper handles it dynamically
+
 ## [1.2.63-con.4] - 2026-05-10
 
 ### Fixed

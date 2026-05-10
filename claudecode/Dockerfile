@@ -78,9 +78,29 @@ RUN apk add --no-cache --virtual .build-deps \
 
 # Install @playwright/mcp into a non-default prefix. A normal global install
 # would write its `mcp` binary to /usr/local/bin/mcp and collide with hass-mcp
-# (Python). We install under /opt and invoke the binary by absolute path in
-# the MCP config below — no PATH conflict, no brittle npx --no-install dance.
+# (Python). The launch wrapper resolves the Playwright Browser hostname at
+# MCP-spawn time (HA assigns hostnames like <repo-id>-playwright-browser that
+# we can't hardcode, and the user may install Playwright Browser after this
+# add-on has already started).
 RUN npm install -g --prefix=/opt/playwright-mcp @playwright/mcp
+RUN cat > /opt/playwright-mcp/launch.sh << 'EOF'
+#!/bin/bash
+# PLAYWRIGHT_CDP_HOST env var (set from the playwright_cdp_host option) wins.
+# Otherwise ask Supervisor for any add-on whose slug contains "playwright-browser".
+HOST="$PLAYWRIGHT_CDP_HOST"
+if [ -z "$HOST" ]; then
+  HOST=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons \
+    | jq -r '.data.addons[] | select(.slug | test("playwright-browser")) | .hostname' \
+    | head -1)
+fi
+if [ -z "$HOST" ] || [ "$HOST" = "null" ]; then
+  echo "[playwright-launch] Playwright Browser add-on not found via Supervisor API." >&2
+  echo "[playwright-launch] Install/start it, or set the playwright_cdp_host option." >&2
+  exit 1
+fi
+exec /opt/playwright-mcp/bin/mcp --cdp-endpoint "http://$HOST:9222" "$@"
+EOF
+RUN chmod +x /opt/playwright-mcp/launch.sh
 
 # Install Home Assistant CLI (ha command)
 RUN case "${BUILD_ARCH}" in \
@@ -232,19 +252,6 @@ CMD ["/bin/bash", "-c", "\
   ENABLE_MCP=$(jq -r '.enable_mcp // true' /data/options.json) && \
   ENABLE_PLAYWRIGHT=$(jq -r '.enable_playwright_mcp // false' /data/options.json) && \
   PLAYWRIGHT_HOST=$(jq -r '.playwright_cdp_host // \"\"' /data/options.json) && \
-  if [ -z \"$PLAYWRIGHT_HOST\" ] && [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
-    echo '[INFO] Auto-detecting Playwright Browser hostname...' && \
-    PLAYWRIGHT_HOST=$(curl -s -H \"Authorization: Bearer $SUPERVISOR_TOKEN\" http://supervisor/addons | jq -r '.data.addons[] | select(.slug | endswith(\"playwright-browser\") or endswith(\"_playwright-browser\")) | .hostname' | head -1) && \
-    if [ -n \"$PLAYWRIGHT_HOST\" ] && [ \"$PLAYWRIGHT_HOST\" != \"null\" ]; then \
-      echo \"[INFO] Found Playwright Browser: $PLAYWRIGHT_HOST\"; \
-    else \
-      echo '[WARN] Playwright Browser add-on not found via Supervisor API.'; \
-      echo '[WARN]   - If you just installed it, restart this add-on so detection re-runs.'; \
-      echo '[WARN]   - Or set the playwright_cdp_host option to its hostname.'; \
-      echo '[WARN] Falling back to literal \"playwright-browser\" (likely will not resolve).'; \
-      PLAYWRIGHT_HOST=\"playwright-browser\"; \
-    fi; \
-  fi && \
   AUTO_UPDATE=$(jq -r '.auto_update_claude // true' /data/options.json) && \
   if [ \"$AUTO_UPDATE\" = \"true\" ]; then \
     echo '[INFO] Checking for Claude Code updates...' && \
@@ -263,9 +270,13 @@ CMD ["/bin/bash", "-c", "\
     echo '[INFO] MCP disabled'; \
   fi && \
   if [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
-    claude mcp add-json playwright \"{\\\"command\\\":\\\"/opt/playwright-mcp/bin/mcp\\\",\\\"args\\\":[\\\"--cdp-endpoint\\\",\\\"http://${PLAYWRIGHT_HOST}:9222\\\"]}\" -s user && \
-    echo \"[INFO] Playwright MCP enabled (CDP: http://${PLAYWRIGHT_HOST}:9222)\"; \
-    echo '[INFO] Make sure the Playwright Browser add-on is installed and running'; \
+    PW_MCP_JSON=$(jq -nc --arg host \"$PLAYWRIGHT_HOST\" '{command:\"/opt/playwright-mcp/launch.sh\", env:{PLAYWRIGHT_CDP_HOST:$host}}') && \
+    claude mcp add-json playwright \"$PW_MCP_JSON\" -s user && \
+    if [ -n \"$PLAYWRIGHT_HOST\" ]; then \
+      echo \"[INFO] Playwright MCP enabled (host override: $PLAYWRIGHT_HOST)\"; \
+    else \
+      echo '[INFO] Playwright MCP enabled (hostname auto-detected each time the MCP server starts)'; \
+    fi; \
   else \
     echo '[INFO] Playwright MCP disabled'; \
   fi && \
