@@ -172,8 +172,9 @@ exec bash --login
 EOF
 RUN chmod +x /usr/local/bin/claude-auto-launch
 
-# Set up PATH
-ENV PATH="/root/.local/bin:${PATH}"
+# Set up PATH. The extra_npm_packages install dir is on the persistent HA
+# volume so user-installed MCP servers survive add-on rebuilds.
+ENV PATH="/root/.local/bin:/homeassistant/.claudecode/npm-global/bin:${PATH}"
 
 # Set working directory
 WORKDIR /homeassistant
@@ -261,6 +262,13 @@ CMD ["/bin/bash", "-c", "\
   if [ \"$AUTO_UPDATE\" = \"true\" ]; then \
     echo '[INFO] Checking for Claude Code updates...' && \
     npm update -g @anthropic-ai/claude-code 2>/dev/null || echo '[WARN] Update check failed, continuing...'; \
+  fi && \
+  EXTRA_NPM_PREFIX=/homeassistant/.claudecode/npm-global && \
+  EXTRA_PKGS=$(jq -r '.extra_npm_packages // [] | join(\" \")' /data/options.json) && \
+  if [ -n \"$EXTRA_PKGS\" ]; then \
+    mkdir -p \"$EXTRA_NPM_PREFIX\" && \
+    echo \"[INFO] Installing extra_npm_packages: $EXTRA_PKGS\" && \
+    npm install -g --prefix=\"$EXTRA_NPM_PREFIX\" $EXTRA_PKGS 2>&1 | tail -5 || echo '[WARN] Some extra_npm_packages failed to install'; \
   fi && \
   claude mcp remove homeassistant -s user 2>/dev/null || true && \
   claude mcp remove playwright -s user 2>/dev/null || true && \
