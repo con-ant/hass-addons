@@ -39,6 +39,13 @@ profile claudecode flags=(attach_disconnected,mediate_deleted) {
   /usr/local/** ixr,
   /usr/libexec/** ixr,
 
+  # npm runtime updates (`claude update`, the `auto_update_claude` startup
+  # hook, any `npm install -g`) need write access to these paths to rename
+  # the existing package dir into a `.claude-code-*` shadow and swap in the
+  # new version. Without `w`+`l`, the operation fails with EACCES.
+  /usr/local/lib/node_modules/** rwlk,
+  /usr/local/bin/** rwlk,
+
   # Add-on data
   /data/** rwk,
 
