@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.6] - 2026-05-10
+
+### Fixed
+- `claude update` and the `auto_update_claude` startup hook were both failing with `EACCES` because the AppArmor profile granted only read+exec on `/usr/local/**`. npm needs write+lock to rename the existing package dir into a `.claude-code-*` shadow before swapping in the new version. The startup version was hidden by `2>/dev/null` in the CMD. Profile now grants `rwlk` on `/usr/local/lib/node_modules/**` and `/usr/local/bin/**`.
+
 ## [1.2.63-con.5] - 2026-05-10
 
 ### Fixed
