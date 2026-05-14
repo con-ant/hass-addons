@@ -6,9 +6,10 @@ You are running inside a **Docker container** that is a **Home Assistant OS
 add-on** — NOT on the HA host, and NOT inside Home Assistant Core's container.
 You are in a separate, sandboxed container.
 
-- The container's own filesystem (`/root`, `/usr`, `/etc`, globally installed
-  packages) is **ephemeral** — rebuilt from scratch on every add-on update.
-  Don't expect changes there to persist.
+- The container's own filesystem (`/usr`, `/etc`, most of `/root`, globally
+  installed packages) is **ephemeral** — rebuilt from scratch on every add-on
+  update. Don't expect changes there to persist. The exception is the
+  symlinked `~/.claude*` paths — see the next bullet.
 - Only **mapped directories** persist across rebuilds: `/homeassistant`,
   `/share`, `/media`, `/ssl`, `/backup`, `/addon_configs`. Your own config
   persists because `~/.claude` is symlinked into `/homeassistant/.claudecode`.
@@ -34,21 +35,33 @@ Paths here differ from HA Core and most documentation:
 | `/homeassistant` | HA configuration | read-write |
 | `/share` | Shared folder | read-write |
 | `/media` | Media files | read-write |
-| `/addon_configs` | Per-add-on config directories | read-write |
+| `/addon_configs` | This add-on's own config directory | read-write |
 | `/ssl` | SSL certificates | read-only |
 | `/backup` | Backups | read-only |
 
 ## Interacting with Home Assistant
 
-You cannot touch HA Core's process directly — it runs in a different
-container. To interact with HA:
+HA Core runs in a separate container. You **must not** try to manage its
+process directly (even though `docker` access exists) — interact with it
+through the proper interfaces:
 
-- **`homeassistant` MCP server** — query entity states, call services, read
-  history and the error log. Preferred for anything entity/service related.
+- **`homeassistant` MCP server** (present when `enable_mcp` is on — the
+  default) — query entity states, call services, read history and the error
+  log. Preferred for anything entity/service related.
 - **`ha` CLI** — Supervisor-level operations: `ha core restart`,
   `ha core check`, `ha core logs`, `ha core info`, `ha addons ...`.
 - To **restart or reload** HA, use `ha core restart` or the MCP server / API.
   Never try to kill or signal processes.
+
+## Available tools
+
+Beyond the standard Alpine userland, these are pre-installed:
+
+- `gh` — GitHub CLI
+- `docker` — Docker CLI (the add-on has Docker socket access)
+- `jq`, `rg` (ripgrep), `7z`, `socat` — common utilities
+- `mbpoll`, plus Python `pymodbus` / `pyserial` — Modbus / serial device tools
+- `vim`, `nano` — editors
 
 ## Reading Home Assistant logs
 
