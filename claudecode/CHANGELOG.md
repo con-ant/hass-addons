@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.8] - 2026-05-10
+
+### Added
+- `~/.claude/CLAUDE.user.md` — a user-managed instructions file, created once on first start and never overwritten by the add-on. It's imported by the add-on-managed `~/.claude/CLAUDE.md`, so anything you put there loads into every Claude Code session and survives restarts and add-on rebuilds.
+
+### Changed
+- The add-on-managed `~/.claude/CLAUDE.md` is now a static `CLAUDE.addon.md` file copied into the image, instead of a ~45-line escaped `printf` inside the Dockerfile `CMD`. Easier to maintain and review.
+- Rewrote `CLAUDE.md` content: added a "Where you are running" section so Claude Code knows it's in a sandboxed HAOS add-on container (ephemeral filesystem, Alpine, AppArmor, mapped vs. non-persistent paths), and an "Interacting with Home Assistant" section covering the `homeassistant` MCP server and `ha` CLI. Existing path-mapping and log sections retained.
+
 ## [1.2.63-con.7] - 2026-05-10
 
 ### Added
