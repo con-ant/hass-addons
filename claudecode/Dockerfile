@@ -94,9 +94,14 @@ RUN cat > /usr/local/bin/playwright-mcp-launch << 'EOF'
 # Otherwise ask Supervisor for any add-on whose slug contains "playwright-browser".
 HOST="$PLAYWRIGHT_CDP_HOST"
 if [ -z "$HOST" ]; then
-  HOST=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons \
-    | jq -r '.data.addons[] | select(.slug | test("playwright-browser")) | .hostname' \
+  # The /addons list endpoint exposes .slug but not .hostname — hostname only
+  # lives on /addons/{slug}/info. HA add-on hostnames are deterministic: the
+  # slug with underscores replaced by hyphens. Derive it locally so this works
+  # without needing per-add-on info access.
+  SLUG=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons \
+    | jq -r '.data.addons[] | select(.slug | test("playwright-browser")) | .slug' \
     | head -1)
+  [ -n "$SLUG" ] && HOST=$(echo "$SLUG" | tr '_' '-')
 fi
 if [ -z "$HOST" ] || [ "$HOST" = "null" ]; then
   echo "[playwright-launch] Playwright Browser add-on not found via Supervisor API." >&2
