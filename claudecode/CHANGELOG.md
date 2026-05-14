@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.9] - 2026-05-14
+
+### Fixed
+- Playwright Browser hostname discovery: the launcher read `.hostname` from the Supervisor `/addons` list endpoint, but that endpoint never returns `hostname` (it only lives on `/addons/{slug}/info`), so auto-detect always failed. It now reads `.slug` from the list and derives the hostname locally by replacing underscores with hyphens — HA add-on hostnames are deterministic, so no extra permissions or per-add-on info access are needed. The `playwright_cdp_host` override still takes precedence.
+
 ## [1.2.63-con.8] - 2026-05-10
 
 ### Added
