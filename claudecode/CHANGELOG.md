@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.7] - 2026-05-10
+
+### Added
+- `extra_npm_packages` option: list of npm package specs to install on every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). Bin directory is on `PATH`. Use to add custom MCP servers without forking the Dockerfile.
+
+### Documentation
+- README: new "Authenticating the browser to Home Assistant" subsection covering HA `trusted_networks` setup. Playwright sessions start unauthenticated; without this, Claude only sees the HA login screen.
+- README: new "Custom MCP servers (`extra_npm_packages`)" section documenting install workflow, MCP registration, and caveats.
+
 ## [1.2.63-con.6] - 2026-05-10
 
 ### Fixed

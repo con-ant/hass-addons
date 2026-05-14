@@ -107,6 +107,7 @@ claude --continue
 | `default_permission_mode` | Default Claude Code permission mode: `default`, `auto`, `acceptEdits`, `plan`, or `bypassPermissions`. `auto` uses a classifier to approve/deny prompts (Claude Code v2.1.83+, Max/Team/Enterprise/API plan, Sonnet 4.6+/Opus 4.6+); falls back silently to `default` if requirements aren't met | auto |
 | `auto_launch_claude` | Auto-run Claude when the terminal opens: `off` (bash prompt), `new` (`claude`), or `continue` (`claude --continue`). Drops to a login shell when Claude exits | continue |
 | `enable_remote_control` | Pass `--remote-control` to all Claude launches so [Remote Control](https://code.claude.com/docs/en/remote-control) is on by default. Requires Claude Code v2.1.51+, claude.ai OAuth login (not API key), and a Pro/Max/Team/Enterprise plan — leave off if you authenticate with an API key | false |
+| `extra_npm_packages` | List of npm package specs to install at every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). Bin dir is on `PATH`. Use to add custom MCP servers without forking the Dockerfile. | `[]` |
 
 ### Playwright MCP setup
 
@@ -116,6 +117,59 @@ If you set `enable_playwright_mcp: true`:
 2. To pin the hostname (e.g. force a specific Playwright Browser instance), set `playwright_cdp_host` to the value reported by `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons | jq -r '.data.addons[] | select(.slug | test("playwright-browser")) | .hostname'`. When set, this overrides auto-detection.
 
 If Claude reports the playwright MCP server failing to start, check the `[playwright-launch]` lines in Claude's MCP error log — the wrapper exits with a clear message if Playwright Browser isn't installed.
+
+#### Authenticating the browser to Home Assistant
+
+A fresh Playwright session has no HA login cookies, so navigating to `http://homeassistant:8123/` lands on the login screen. You won't see the dashboard until the browser is authenticated.
+
+The cleanest fix is HA's `trusted_networks` auth provider — it skips the login flow for requests coming from the add-on Docker subnet (where Playwright Browser runs). Add to `configuration.yaml`:
+
+```yaml
+homeassistant:
+  auth_providers:
+    - type: homeassistant
+    - type: trusted_networks
+      trusted_networks:
+        - 172.30.32.0/23   # HA add-on network
+      trusted_users:
+        172.30.32.0/23:
+          - <your-user-id>  # from Settings > People (Users) > click the user > ID at the bottom
+      allow_bypass_login: true
+```
+
+Restart HA. Now every request from the playwright-browser container is silently authenticated as that user — Claude can navigate the dashboard, take screenshots, exercise frontend JS, etc.
+
+**Security note:** this trusts *every* add-on on that subnet. Fine on a single-user HA where you control all the add-ons; reconsider if you run untrusted add-ons.
+
+If you only need API access (entity state, service calls, history), the existing `hass-mcp` server already handles that with the `SUPERVISOR_TOKEN` — no browser, no trusted_networks.
+
+### Custom MCP servers (`extra_npm_packages`)
+
+Add-on updates rebuild the container and wipe anything you `npm install -g` manually. `extra_npm_packages` re-installs a list of packages on every container start, to a persistent path on the HA volume.
+
+**Install:**
+
+1. Add packages to the option in the add-on Configuration tab:
+   ```yaml
+   extra_npm_packages:
+     - "@modelcontextprotocol/server-filesystem"
+     - "some-other-mcp@1.4.2"
+     - "@vendor/mcp"
+   ```
+2. Restart the add-on. Watch the log for `[INFO] Installing extra_npm_packages: ...`.
+3. Open a terminal in Claude Code and register the MCP server:
+   ```bash
+   claude mcp remove filesystem -s user 2>/dev/null
+   claude mcp add-json filesystem '{"command":"mcp-server-filesystem","args":["/homeassistant"]}' -s user
+   ```
+   The binary lives at `/homeassistant/.claudecode/npm-global/bin/<bin-name>` and that directory is on `PATH`, so referencing it by name works.
+
+The MCP registration itself is persistent (stored in `~/.claude/settings.json`, which is symlinked to the HA volume), so step 3 is one-time.
+
+**Caveats:**
+- Re-installs on every container start; unpinned packages get the latest each time.
+- A bad package name logs `[WARN]` but doesn't stop the add-on.
+- Don't know the binary name? Run `ls /homeassistant/.claudecode/npm-global/bin/` after install.
 
 ## File Locations
 
