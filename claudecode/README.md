@@ -181,6 +181,18 @@ The MCP registration itself is persistent (stored in `~/.claude/settings.json`, 
 | `/ssl` | SSL certificates | read-only |
 | `/backup` | Backups | read-only |
 
+## Customizing Claude's instructions
+
+The add-on writes `~/.claude/CLAUDE.md` on every start with container-specific
+context (path mapping, how to reach Home Assistant, log commands). **It is
+regenerated each restart — don't edit it directly.**
+
+For your own persistent instructions, edit **`~/.claude/CLAUDE.user.md`**. The
+add-on creates this file once and never overwrites it; it's imported by
+`~/.claude/CLAUDE.md`, so anything you put there loads into every Claude Code
+session and survives restarts and add-on updates. Good for project
+conventions, frequently-referenced entity IDs, or reminders about your setup.
+
 ## Session Persistence
 
 When `session_persistence` is enabled, the add-on uses tmux to maintain your terminal session. This means:
