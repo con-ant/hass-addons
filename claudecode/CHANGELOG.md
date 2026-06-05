@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.63-con.10] - 2026-06-05
+
+### Changed
+- Image size: the global npm installs (`@anthropic-ai/claude-code` and
+  `@playwright/mcp`) now run `npm cache clean --force` and remove `/root/.npm`
+  and `/tmp` in the SAME `RUN` layer, so ~100MB+ of npm cache is no longer baked
+  into the image. Claude Code is still installed at build time as the latest
+  published version (rebuilding the add-on picks up new releases).
+- `auto_update_claude` now defaults to `false`. The on-boot `npm update -g
+  @anthropic-ai/claude-code` re-extracted the ~240MB native binary into the
+  container's writable layer on every start (~694MB of runtime bloat). It is now
+  opt-in; the CLI shipped in the image is used as-is unless you turn it back on.
+
+### Added
+- `.dockerignore` to keep the build context to just the Dockerfile and
+  `CLAUDE.addon.md` (excludes docs, assets, translations, and metadata).
+
 ## [1.2.63-con.9] - 2026-05-14
 
 ### Fixed

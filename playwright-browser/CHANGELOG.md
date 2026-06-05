@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.11-con.2] - 2026-06-05
+
+### Changed
+- Image size: replaced the ~2.7GB `mcr.microsoft.com/playwright` base (which
+  bundles Chromium + Firefox + WebKit) with a multi-stage build on
+  `node:20-bookworm-slim`. A builder stage downloads Chromium ONLY (Firefox and
+  WebKit are never installed; headless-shell and ffmpeg builds are dropped), and
+  the slim runtime stage carries just the browser plus its runtime libraries,
+  nginx, jq, and curl. apt lists and npm cache are cleaned in the same RUN layer
+  as the install that created them. Expected image ~520MB (~80% smaller).
+- `FROM` stays hardcoded so HA Supervisor doesn't fall back to the Alpine base;
+  `node:*-slim` is multi-arch, so amd64 + aarch64 still resolve from the manifest.
+
+### Added
+- `.dockerignore` to keep the build context to just the Dockerfile and `run.sh`.
+
 ## [0.1.11-con.1] - 2026-05-10
 
 ### Fixed
