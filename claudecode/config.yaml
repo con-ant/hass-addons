@@ -1,6 +1,6 @@
 name: Claude Code
 description: Run Claude Code AI assistant inside Home Assistant to create automations, debug issues, and manage your smart home configuration
-version: "1.2.63-con.9"
+version: "1.2.63-con.10"
 slug: claudecode
 url: https://github.com/con-ant/hass-addons
 arch:
@@ -35,7 +35,7 @@ options:
   terminal_theme: dark
   working_directory: /homeassistant
   session_persistence: true
-  auto_update_claude: true
+  auto_update_claude: false
   default_permission_mode: auto
   auto_launch_claude: continue
   enable_remote_control: false

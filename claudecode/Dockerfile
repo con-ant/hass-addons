@@ -54,8 +54,15 @@ RUN case "${BUILD_ARCH}" in \
     curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${TTYD_ARCH}" -o /usr/bin/ttyd && \
     chmod +x /usr/bin/ttyd
 
-# Install Claude Code via npm
-RUN npm install -g @anthropic-ai/claude-code
+# Install Claude Code via npm (always the latest published version at build time).
+# The package is a thin launcher that pulls a ~240MB platform-native binary via
+# optional deps, so clean the npm cache and temp dirs in the SAME layer —
+# otherwise ~100MB+ of cache gets baked into the image. Rebuilding the add-on
+# picks up the newest release; the writable-layer bloat came from the runtime
+# self-update (now opt-in, default off), not from installing here.
+RUN npm install -g @anthropic-ai/claude-code \
+    && npm cache clean --force \
+    && rm -rf /root/.npm /tmp/*
 
 # Install hass-mcp for Home Assistant integration and pymodbus for Modbus operations
 RUN pip3 install --no-cache-dir --break-system-packages hass-mcp pymodbus pyserial
@@ -83,7 +90,9 @@ RUN apk add --no-cache --virtual .build-deps \
 # in a conventional location — Claude Code's `auto` permission classifier
 # treats /opt as unusual.
 RUN npm install -g --prefix=/opt/playwright-mcp @playwright/mcp && \
-    ln -s /opt/playwright-mcp/bin/playwright-mcp /usr/local/bin/playwright-mcp
+    ln -s /opt/playwright-mcp/bin/playwright-mcp /usr/local/bin/playwright-mcp && \
+    npm cache clean --force && \
+    rm -rf /root/.npm /tmp/*
 
 # Wrapper: resolves Playwright Browser hostname at MCP-spawn time. HA assigns
 # hostnames like <repo-id>-playwright-browser that we can't hardcode, and the
@@ -220,9 +229,9 @@ CMD ["/bin/bash", "-c", "\
   ENABLE_MCP=$(jq -r '.enable_mcp // true' /data/options.json) && \
   ENABLE_PLAYWRIGHT=$(jq -r '.enable_playwright_mcp // false' /data/options.json) && \
   PLAYWRIGHT_HOST=$(jq -r '.playwright_cdp_host // \"\"' /data/options.json) && \
-  AUTO_UPDATE=$(jq -r '.auto_update_claude // true' /data/options.json) && \
+  AUTO_UPDATE=$(jq -r '.auto_update_claude // false' /data/options.json) && \
   if [ \"$AUTO_UPDATE\" = \"true\" ]; then \
-    echo '[INFO] Checking for Claude Code updates...' && \
+    echo '[INFO] Checking for Claude Code updates (opt-in; writes to the container layer)...' && \
     npm update -g @anthropic-ai/claude-code 2>/dev/null || echo '[WARN] Update check failed, continuing...'; \
   fi && \
   EXTRA_NPM_PREFIX=/homeassistant/.claudecode/npm-global && \
