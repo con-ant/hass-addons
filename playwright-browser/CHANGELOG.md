@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.11-con.3] - 2026-06-09
+
+### Fixed
+- Rolled back the 0.1.11-con.2 multi-stage slim image: it broke the add-on
+  build. Back to the known-good hardcoded
+  `mcr.microsoft.com/playwright:v1.57.0-noble` base and single-stage
+  Dockerfile from 0.1.11-con.1 (image is large again, but it builds). The
+  `.dockerignore` added in -con.2 is removed along with the rest of that
+  change. The claudecode size optimisations are unaffected.
+
 ## [0.1.11-con.2] - 2026-06-05
 
 ### Changed
