@@ -2,9 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.2.64] - 2026-05-22
+## [1.2.64] - 2026-06-28
 
 ### Added
+- New `enable_remote_control` option to automatically start Claude Code with Remote Control enabled for every session, allowing the session to be viewed and steered from claude.ai/code or the Claude mobile app
+- New `remote_control_session_prefix` option to set the prefix for auto-generated Remote Control session names (via `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX`), defaults to "HomeAssistant"
 - French translation (fr) for Claude Code add-on configuration
 
 ## [1.2.63] - 2026-02-23

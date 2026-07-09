@@ -230,6 +230,8 @@ CMD ["/bin/bash", "-c", "\
     fi; \
   fi && \
   AUTO_UPDATE=$(jq -r '.auto_update_claude // true' /data/options.json) && \
+  REMOTE_CONTROL=$(jq -r '.enable_remote_control // false' /data/options.json) && \
+  RC_SESSION_PREFIX=$(jq -r '.remote_control_session_prefix // \"HomeAssistant\"' /data/options.json) && \
   if [ \"$AUTO_UPDATE\" = \"true\" ]; then \
     echo '[INFO] Checking for Claude Code updates...' && \
     npm update -g @anthropic-ai/claude-code 2>/dev/null || echo '[WARN] Update check failed, continuing...'; \
@@ -253,6 +255,15 @@ CMD ["/bin/bash", "-c", "\
   else \
     echo '[INFO] Playwright MCP disabled'; \
   fi && \
+  SETTINGS_FILE=/root/.claude/settings.json && \
+  if [ ! -f \"$SETTINGS_FILE\" ]; then echo '{}' > \"$SETTINGS_FILE\"; fi && \
+  if [ \"$REMOTE_CONTROL\" = \"true\" ]; then \
+    jq '.remoteControlAtStartup = true' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
+    echo '[INFO] Remote Control enabled - Claude Code will auto-start with remote control'; \
+  else \
+    jq 'del(.remoteControlAtStartup)' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\"; \
+    echo '[INFO] Remote Control auto-start disabled'; \
+  fi && \
   if [ \"$THEME\" = \"dark\" ]; then \
     COLORS='background=#1e1e2e,foreground=#cdd6f4,cursor=#f5e0dc'; \
   else \
@@ -263,6 +274,7 @@ CMD ["/bin/bash", "-c", "\
   else \
     SHELL_CMD='bash --login'; \
   fi && \
+  if [ \"$REMOTE_CONTROL\" = \"true\" ]; then export CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX=\"$RC_SESSION_PREFIX\"; fi && \
   cd /homeassistant && \
   exec ttyd --port 7681 --writable --ping-interval 30 --max-clients 5 \
     -t fontSize=$FONT_SIZE \
