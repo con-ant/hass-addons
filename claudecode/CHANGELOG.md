@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65] - 2026-07-08
+
+### Security
+- The Supervisor token is no longer written to `settings.json`. `update_mcp_token()` in `.bashrc` wrote `$SUPERVISOR_TOKEN` into `/homeassistant/.claudecode/settings.json` on every `c`/`cc`, persisting a live credential into the HA config directory — which is included in every backup. The key was also dead: `hass-mcp` reads `HA_TOKEN` from the environment, which the add-on already exports, and never reads `HASS_TOKEN`. The function is removed and any previously persisted token is scrubbed once on startup
+- The token was also interpolated unescaped into a `jq` filter string; removing the function eliminates that too
+- AppArmor now grants write access only to `/usr/local/bin/**` and `/usr/local/lib/node_modules/**` — the two subtrees npm needs — instead of all of `/usr/local/**`
+
+### Fixed
+- Add-on failed to start on hosts whose CPU lacks AVX (#24). Claude Code 2.1.113 replaced the JavaScript entrypoint with a Bun-compiled native binary, and Bun's JavaScriptCore requires AVX. On a VM exposing the generic `kvm64` CPU model, every `claude` invocation hangs — including `claude --version` (see anthropics/claude-code#19981, #50270). The hang blocked the startup chain at `claude mcp remove`, so `ttyd` never bound port 7681 and the add-on stayed unhealthy with a near-empty log
+
+  Fix this at the hypervisor: set the VM's CPU type to `host` (Proxmox) or enable host CPU passthrough, then stop and start the VM. Verify with `grep -o -m1 avx2 /proc/cpuinfo`. Versions <= 2.1.112 still run without AVX because they execute as JavaScript under Node.
+
+- `auto_update_claude` never worked (#22). AppArmor granted `/usr/local/** ixr`, so npm's global prefix was not writable and `npm -g` failed with `EACCES` on rename even as root. The cause is AppArmor, not a read-only OverlayFS layer, and `2>/dev/null` hid the error on every boot
+- Build failed with `dockerfile parse error: unknown instruction: set` (#19). The `.tmux.conf` and `.bashrc` heredocs (`RUN cat > file << 'EOF'`) need BuildKit plus a `# syntax=docker/dockerfile:1.4` directive; they are now plain `COPY` of files under `rootfs/`, which every builder supports
+- Build aborted on a transient DNS failure while downloading the Home Assistant CLI, `curl` exit 6 (#23). The `ha` and `ttyd` downloads now retry (`--retry 5 --retry-delay 2 --retry-all-errors`)
+- Build failed on armv7/armhf/i386 with a 404: the Home Assistant CLI publishes only `amd64` and `aarch64` binaries. Those arches now skip the CLI with a warning instead of failing the build
+- `settings.json` is bootstrapped with `{}` when missing, so the pre-authorized tool list is actually applied on fresh installs instead of the `jq` merge failing silently
+- Turning off `enable_mcp` or `session_persistence` had no effect. Both were read with `jq -r '.option // true'`, and jq's `//` falls back on `false` as well as `null`, so a disabled option resolved back to `true`. Both now use an explicit null check
+
+### Added
+- `install-claude.sh`: resolves the newest Claude Code release that passes a `claude --version` smoke test. Takes `latest` when `latest` works, binary-searches for the newest working release when it does not, and fails the build if none do. No version is hardcoded, so an AVX-less host still gets a working add-on (2.1.112) while an AVX host gets the current release
+- Startup health gate: if the CLI does not respond within 30s, MCP setup is skipped and the terminal starts anyway, so a broken CLI no longer presents as "add-on won't start"
+- Automatic rollback to the build-verified version when `auto_update_claude` installs a release that cannot run
+- Startup warns when the CPU lacks AVX and explains the hypervisor fix
+- Persistent tmux overrides (#25). `/root/.tmux.conf` now ends with `source-file -q /homeassistant/.claudecode/tmux.conf`, so anything you put in that file survives restarts, rebuilds and reinstalls and takes precedence over the shipped defaults. For example, `echo 'set -g mouse off' > /homeassistant/.claudecode/tmux.conf` to get native copy/paste while keeping tmux
+
+### Changed
+- The unpinned `npm install -g @anthropic-ai/claude-code` is replaced by the resolver above; a rebuild can no longer silently swap in a release that does not run
+- Home Assistant CLI pinned to 5.2.0 instead of tracking `latest`
+- `claude mcp` calls are wrapped in `timeout`; a hang can no longer block startup (`|| true` guards non-zero exits, not hangs)
+- Startup no longer discards npm's stderr with `2>/dev/null`
+
 ## [1.2.64] - 2026-06-28
 
 ### Added

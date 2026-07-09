@@ -95,11 +95,21 @@ claude --continue
 | Option | Description | Default |
 |--------|-------------|---------|
 | `enable_mcp` | Enable HA integration | true |
+| `enable_playwright_mcp` | Enable browser automation via the Playwright Browser add-on | false |
+| `playwright_cdp_host` | Override the Playwright Browser hostname (auto-detected when empty) | "" |
 | `terminal_font_size` | Font size (10-24) | 14 |
 | `terminal_theme` | dark or light | dark |
 | `working_directory` | Start directory | /homeassistant |
 | `session_persistence` | Use tmux for persistent sessions | true |
-| `auto_update_claude` | Auto-update Claude Code on startup | true |
+| `auto_update_claude` | Auto-update Claude Code on startup (rolls back automatically if the new release cannot run) | true |
+| `enable_remote_control` | View and steer the session from claude.ai/code or the Claude mobile app. See the security note below | false |
+| `remote_control_session_prefix` | Prefix for auto-generated Remote Control session names | HomeAssistant |
+
+### Remote Control
+
+With `enable_remote_control`, sessions can be driven from `claude.ai/code` or the Claude mobile app (requires a Pro, Max, Team, or Enterprise subscription; API keys are not supported).
+
+**Security note:** this add-on runs as root with full access to your Home Assistant host. Anyone who can sign in to the linked Claude account can control it. Leave this off unless you need it.
 
 ## File Locations
 
@@ -129,6 +139,16 @@ If you're new to tmux:
 | `Ctrl+b [` | Enter scroll/copy mode (use arrow keys) |
 | Mouse wheel | Scroll up/down (auto-enters copy mode) |
 | `q` | Exit scroll/copy mode |
+
+### Customizing tmux
+
+Anything you put in `/homeassistant/.claudecode/tmux.conf` is loaded last and overrides the defaults. That file lives in your config directory, so it survives restarts, rebuilds and reinstalls:
+
+```bash
+echo 'set -g mouse off' > /homeassistant/.claudecode/tmux.conf
+```
+
+Turning the mouse off restores native browser selection and copy/paste while keeping persistent sessions. Alternatively set `session_persistence: false` to drop tmux entirely.
 
 ### Copy and Paste in tmux
 
@@ -182,9 +202,10 @@ If clicking the link doesn't work, hold `Ctrl+Shift` while selecting the URL wit
 - This is more secure than storing keys in Home Assistant's configuration
 
 ### Container Security
-- The Supervisor token is automatically managed and not exposed
+- The Supervisor token is passed in via the environment and is not written to disk. Versions before 1.2.65 persisted it into `settings.json` inside your config directory, which is included in Home Assistant backups; 1.2.65 scrubs it on startup
+- Claude Code's credentials live in `/homeassistant/.claudecode/`, part of your config directory and therefore included in backups. Treat HA backups as secrets
 - File access is limited to mapped directories
-- The add-on runs in an isolated container
+- The add-on runs as root with `full_access`, Docker socket access, and the Supervisor API. Anything that can drive Claude Code here can control your Home Assistant host
 
 ## Troubleshooting
 
@@ -202,6 +223,26 @@ Claude Code manages its own authentication. If you have issues:
 1. Verify `enable_mcp` is true in configuration
 2. Check add-on logs for connection errors
 3. Restart the add-on after configuration changes
+
+### Add-on won't start, or the log stops after "Checking for Claude Code updates"
+
+Your CPU probably doesn't expose **AVX**. Since 2.1.113, Claude Code is a Bun-compiled native binary whose JavaScript engine requires it, and every `claude` command — even `claude --version` — hangs without it. That blocks startup before the terminal server binds its port, so Home Assistant reports the add-on as unhealthy.
+
+This is common on virtual machines using a generic CPU model. Check from any terminal on the host:
+
+```bash
+grep -o -m1 avx2 /proc/cpuinfo   # no output means AVX2 is missing
+```
+
+Fix it at the hypervisor, not in the add-on:
+
+- **Proxmox**: VM → Hardware → Processor → Type: `host` (or `x86-64-v3`)
+- **libvirt / virt-manager**: CPU model → *Copy host CPU configuration*
+- **ESXi / UnRAID**: enable host CPU passthrough
+
+Then fully **stop and start** the VM — a reboot alone doesn't re-negotiate the CPU model.
+
+Until you do, the add-on still works: the build automatically falls back to Claude Code 2.1.112, the last release that runs without AVX, and startup prints a warning explaining this.
 
 ### Terminal not loading
 

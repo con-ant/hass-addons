@@ -48,7 +48,9 @@ configuration:
       Automatically start Claude Code with Remote Control enabled for every session.
       Allows you to view and steer your local Claude Code session from claude.ai/code
       or the Claude mobile app. Requires a claude.ai Pro, Max, Team, or Enterprise
-      subscription (API keys are not supported).
+      subscription (API keys are not supported). Security note: this add-on runs as
+      root with full access to your Home Assistant host, so anyone who can sign in to
+      the linked Claude account can control it. Leave this off unless you need it.
   remote_control_session_prefix:
     name: Remote Control Session Name Prefix
     description: >-
