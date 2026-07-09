@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.64] - 2026-05-22
+
+### Added
+- French translation (fr) for Claude Code add-on configuration
+
 ## [1.2.63] - 2026-02-23
 
 ### Fixed
@@ -179,7 +184,8 @@ All notable changes to this project will be documented in this file.
 ## [1.2.36] - 2026-01-14
 
 ### Fixed
-- Reverted `/config` symlink that caused 502 startup errors
+- Restored config reading for font size, theme, and session persistence
+- ttyd now applies terminal_font_size, terminal_theme, and session_persistence settings
 
 ## [1.2.35] - 2026-01-14
 

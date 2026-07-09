@@ -1,0 +1,53 @@
+configuration:
+  enable_mcp:
+    name: Activer Home Assistant MCP
+    description: >-
+      Activez le serveur Home Assistant MCP pour l'interaction directe avec les
+      entités et les services à partir de Claude Code. Permet à Claude de
+      interroger les états, d'appeler des services et d'interagir avec votre
+      maison intelligente.
+  enable_playwright_mcp:
+    name: Activer Playwright MCP
+    description: >-
+      Activez le serveur Playwright MCP pour l'automatisation du navigateur.
+      Nécessite que le module complémentaire "Playwright Browser" soit installé
+      et en cours d'exécution. Permet à Claude de naviguer sur les pages web,
+      de remplir les formulaires, de cliquer sur les éléments et de prendre
+      des captures d'écran.
+  playwright_cdp_host:
+    name: Hôte Playwright CDP
+    description: >-
+      Nom d'hôte du module complémentaire Playwright Browser pour la connexion
+      CDP. Laissez vide pour le défaut (playwright-browser). Si la connexion
+      échoue, vérifiez le nom d'hôte du conteneur Playwright Browser
+      (par exemple, 1016f397-playwright-browser).
+  terminal_font_size:
+    name: Taille de la Police du Terminal
+    description: >-
+      Taille de la police pour le terminal web en pixels (10-24).
+      Ajustez pour une meilleure lisibilité sur votre affichage.
+  terminal_theme:
+    name: Thème du Terminal
+    description: >-
+      Thème de couleur pour le terminal web.
+      Choisissez « dark » pour les fonds sombres ou « light » pour les fonds clairs.
+  working_directory:
+    name: Répertoire de Travail
+    description: >-
+      Le répertoire de travail par défaut au démarrage de Claude Code.
+      Utilisez /homeassistant pour un accès direct aux fichiers de configuration HA.
+  session_persistence:
+    name: Persistance de Session
+    description: >-
+      Activez la persistance de la session tmux. Lorsqu'elle est activée, votre
+      session de terminal survit aux actualisations du navigateur et aux
+      déconnexions. Recommandé pour les tâches longues.
+  auto_update_claude:
+    name: Mise à Jour Automatique de Claude Code
+    description: >-
+      Vérifiez et installez automatiquement les mises à jour de Claude Code au
+      démarrage du module complémentaire. Garde Claude Code à jour sans nécessiter
+      de changements de version du module complémentaire.
+
+network:
+  7681/tcp: Terminal Web (ttyd)
