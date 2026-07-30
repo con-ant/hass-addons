@@ -134,6 +134,12 @@ COPY CLAUDE.addon.md /usr/share/claudecode/CLAUDE.addon.md
 COPY rootfs/ /
 RUN chmod +x /usr/local/bin/playwright-mcp-launch /usr/local/bin/claude-auto-launch
 
+# Helper to pull the OAuth login URL out of the tmux session and save it to a
+# file, working around ttyd/xterm.js not supporting OSC 52 clipboard writes
+# and its link detector only scanning one wrapped row at a time.
+COPY rootfs/usr/local/bin/claude-login-url /usr/local/bin/claude-login-url
+RUN chmod +x /usr/local/bin/claude-login-url
+
 # Ensure .bashrc is sourced for login shells too
 RUN echo 'source ~/.bashrc' > /root/.profile
 
