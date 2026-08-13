@@ -155,7 +155,7 @@ CMD ["/bin/bash", "-c", "\
   export HA_TOKEN=\"$SUPERVISOR_TOKEN\" && \
   export HA_URL=\"http://supervisor/core\" && \
   PERSIST_DIR=/homeassistant/.claudecode && \
-  mkdir -p $PERSIST_DIR/config /root/.config && \
+  mkdir -p $PERSIST_DIR/config $PERSIST_DIR/gh /root/.config && \
   cp /usr/share/claudecode/CLAUDE.addon.md $PERSIST_DIR/CLAUDE.md && \
   if [ ! -f $PERSIST_DIR/CLAUDE.user.md ]; then \
     printf '%s\n' \
@@ -171,6 +171,7 @@ CMD ["/bin/bash", "-c", "\
   if [ ! -L /root/.claude ]; then rm -rf /root/.claude; ln -s $PERSIST_DIR /root/.claude; fi && \
   if [ ! -L /root/.config/claude-code ]; then rm -rf /root/.config/claude-code; ln -s $PERSIST_DIR/config /root/.config/claude-code; fi && \
   if [ ! -L /root/.claude.json ]; then touch $PERSIST_DIR/.claude.json; rm -f /root/.claude.json; ln -s $PERSIST_DIR/.claude.json /root/.claude.json; fi && \
+  if [ ! -L /root/.config/gh ]; then rm -rf /root/.config/gh; ln -s $PERSIST_DIR/gh /root/.config/gh; fi && \
   FONT_SIZE=$(jq -r '.terminal_font_size // 14' /data/options.json) && \
   THEME=$(jq -r '.terminal_theme // \"dark\"' /data/options.json) && \
   SESSION_PERSIST=$(jq -r 'if .session_persistence == null then true else .session_persistence end' /data/options.json) && \

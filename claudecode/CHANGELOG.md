@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **GitHub CLI authentication now persists across restarts and rebuilds.**
+  `github-cli` is installed in the image, but `~/.config/gh` lived in the
+  container's ephemeral filesystem, so `gh auth login` had to be repeated after
+  every restart or add-on update. It is now symlinked into
+  `/homeassistant/.claudecode/gh`, following the same pattern already used for
+  `~/.claude`, `~/.claude.json`, and `~/.config/claude-code`.
+
 ## [1.2.65-con.1] - 2026-08-13
 
 Imports the worthwhile fixes from upstream v1.2.64 and v1.2.65
