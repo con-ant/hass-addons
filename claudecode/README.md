@@ -103,10 +103,11 @@ claude --continue
 | `terminal_theme` | dark or light | dark |
 | `working_directory` | Start directory | /homeassistant |
 | `session_persistence` | Use tmux for persistent sessions | true |
-| `auto_update_claude` | Auto-update Claude Code on startup | true |
+| `auto_update_claude` | Auto-update Claude Code on startup (rolls back automatically if the new release cannot run on this host). Writes to the container layer — see changelog 1.2.63-con.10 | false |
 | `default_permission_mode` | Default Claude Code permission mode: `default`, `auto`, `acceptEdits`, `plan`, or `bypassPermissions`. `auto` uses a classifier to approve/deny prompts (Claude Code v2.1.83+, Max/Team/Enterprise/API plan, Sonnet 4.6+/Opus 4.6+); falls back silently to `default` if requirements aren't met | auto |
 | `auto_launch_claude` | Auto-run Claude when the terminal opens: `off` (bash prompt), `new` (`claude`), or `continue` (`claude --continue`). Drops to a login shell when Claude exits | continue |
-| `enable_remote_control` | Pass `--remote-control` to all Claude launches so [Remote Control](https://code.claude.com/docs/en/remote-control) is on by default. Requires Claude Code v2.1.51+, claude.ai OAuth login (not API key), and a Pro/Max/Team/Enterprise plan — leave off if you authenticate with an API key | false |
+| `enable_remote_control` | Turn on [Remote Control](https://code.claude.com/docs/en/remote-control) for all Claude sessions (sets `remoteControlAtStartup` in settings.json and passes `--remote-control` to auto-launches) so you can view and steer sessions from claude.ai/code or the Claude mobile app. Requires Claude Code v2.1.51+, claude.ai OAuth login (not API key), and a Pro/Max/Team/Enterprise plan. See the security note below | false |
+| `remote_control_session_prefix` | Prefix for auto-generated Remote Control session names shown in claude.ai/code and the mobile app (e.g. `HomeAssistant-graceful-unicorn`). Only applies when `enable_remote_control` is on | HomeAssistant |
 | `extra_npm_packages` | List of npm package specs to install at every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). Bin dir is on `PATH`. Use to add custom MCP servers without forking the Dockerfile. | `[]` |
 
 ### Playwright MCP setup
@@ -212,6 +213,16 @@ If you're new to tmux:
 | Mouse wheel | Scroll up/down (auto-enters copy mode) |
 | `q` | Exit scroll/copy mode |
 
+### Customizing tmux
+
+Anything you put in `/homeassistant/.claudecode/tmux.conf` is loaded last and overrides the defaults. That file lives in your config directory, so it survives restarts, rebuilds and reinstalls:
+
+```bash
+echo 'set -g mouse off' > /homeassistant/.claudecode/tmux.conf
+```
+
+Turning the mouse off restores native browser selection and copy/paste while keeping persistent sessions. Alternatively set `session_persistence: false` to drop tmux entirely.
+
 ### Copy and Paste in tmux
 
 Since tmux captures mouse events, copy/paste works differently:
@@ -264,11 +275,28 @@ If clicking the link doesn't work, hold `Ctrl+Shift` while selecting the URL wit
 - This is more secure than storing keys in Home Assistant's configuration
 
 ### Container Security
-- The Supervisor token is automatically managed and not exposed
+- The Supervisor token is passed in via the environment and is not written to disk. Versions before 1.2.65-con.1 persisted it into `settings.json` inside your config directory, which is included in Home Assistant backups; 1.2.65-con.1 scrubs it on startup
+- Claude Code's credentials live in `/homeassistant/.claudecode/`, part of your config directory and therefore included in backups. Treat HA backups as secrets
 - File access is limited to mapped directories
-- The add-on runs in an isolated container
+- The add-on runs as root with `full_access`, Docker socket access, and the Supervisor API. Anything that can drive Claude Code here can control your Home Assistant host
+
+### Remote Control
+
+With `enable_remote_control`, sessions can be driven from `claude.ai/code` or the Claude mobile app (requires a Pro, Max, Team, or Enterprise subscription; API keys are not supported).
+
+**Security note:** this add-on runs as root with full access to your Home Assistant host. Anyone who can sign in to the linked Claude account can control it. Leave this off unless you need it.
 
 ## Troubleshooting
+
+### Add-on won't start, or `claude` hangs (no AVX)
+
+Claude Code 2.1.113+ ships as a Bun-compiled native binary whose JavaScript engine requires the AVX CPU instruction set. On hosts without it — typically VMs exposing the generic `kvm64` CPU model (Proxmox default) — every `claude` invocation hangs or dies, including `claude --version`.
+
+Mitigations already built in:
+- The image build installs the newest Claude Code release that actually runs on the build host (`install-claude.sh` smoke-tests candidates), so a rebuild on an AVX-less host still produces a working add-on.
+- At startup, all `claude` calls are wrapped in timeouts, so a broken binary can't block the terminal from starting; a `[WARN]` in the log tells you AVX is missing.
+
+The real fix is at the hypervisor: on Proxmox set the VM CPU type to `host` (or `x86-64-v3`), then fully stop and start the VM. Verify inside the add-on with `grep -o -m1 avx2 /proc/cpuinfo`.
 
 ### Authentication issues
 

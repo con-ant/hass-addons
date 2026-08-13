@@ -2,6 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.1] - 2026-08-13
+
+Imports the worthwhile fixes from upstream v1.2.64 and v1.2.65
+(robsonfelix/robsonfelix-hass-addons), adapted to this fork's feature set.
+
+### Security
+- **Supervisor token no longer written to disk.** The `update_mcp_token()`
+  shell function (run by the `c`/`cc` aliases and the auto-launch wrapper)
+  wrote `$SUPERVISOR_TOKEN` into `settings.json`, which lives under
+  `/homeassistant/.claudecode/` and therefore ships inside every Home
+  Assistant backup. hass-mcp never read that key — it reads `HA_TOKEN` from
+  the environment, which the add-on already exports. The function is removed
+  and any token persisted by older versions is scrubbed from `settings.json`
+  on startup.
+
+### Fixed
+- **AVX-less hosts (upstream #24):** Claude Code 2.1.113+ is a Bun-compiled
+  native binary that requires AVX; on VMs exposing the generic kvm64 CPU model
+  every `claude` invocation hangs, which used to block startup. The build now
+  uses upstream's `install-claude.sh` to install the newest release that
+  passes a smoke test, startup wraps every `claude` call in a timeout behind a
+  `claude --version` health gate (the terminal always starts, MCP setup and
+  auto-launch are skipped with a `[WARN]`/`[ERROR]` instead of hanging), and a
+  startup warning plus README section explain the hypervisor-level fix.
+- `auto_update_claude` now verifies the updated CLI still runs and rolls back
+  to the build-time version (recorded in `/etc/claude-code-version`) if not.
+- `enable_mcp: false` and `session_persistence: false` were silently ignored:
+  jq's `// true` default treats an explicit `false` like "unset". Now read
+  with an explicit null check (upstream fix).
+- Pre-authorized MCP tools now apply on the very first start: `settings.json`
+  is bootstrapped before the MCP configuration step instead of after it
+  (previously the allowlist merge silently failed until the second start).
+- Build robustness (upstream #19/#23): shell/tmux config and helper scripts
+  moved from Dockerfile heredocs (which require BuildKit heredoc support) to
+  `COPY rootfs/`; ttyd and Home Assistant CLI downloads retry on transient
+  network errors; the `ha` CLI is pinned to 5.2.0 instead of `latest`.
+
+### Added
+- `remote_control_session_prefix` option (upstream #34): sets
+  `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX` (default "HomeAssistant") for
+  Remote Control session names. `enable_remote_control` now also writes
+  `remoteControlAtStartup: true` into `settings.json` (and removes it when
+  disabled), so manually started `claude` sessions get Remote Control too, in
+  addition to the existing `--remote-control` flag on auto-launches.
+- French translation (upstream #27), extended to the Remote Control options;
+  Remote Control entries added to the en/es/pt-BR translations.
+- tmux user overrides: `/homeassistant/.claudecode/tmux.conf` is sourced last
+  (survives rebuilds), e.g. `set -g mouse off` to restore native copy/paste.
+- README: Remote Control blast-radius security note, honest Container
+  Security section (root, `full_access`, backups contain credentials), AVX
+  troubleshooting section, tmux customization section.
+
 ## [1.2.63-con.10] - 2026-06-05
 
 ### Changed

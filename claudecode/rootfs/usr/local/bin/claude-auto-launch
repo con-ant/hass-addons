@@ -1,0 +1,9 @@
+#!/bin/bash
+# Auto-launch wrapper: run claude with runtime flags, fall back to a login
+# shell on exit so users can keep working. (The update_mcp_token call that
+# used to be here persisted $SUPERVISOR_TOKEN into settings.json on the HA
+# volume — a token leak into backups; hass-mcp reads HA_TOKEN from the
+# environment instead. Removed.)
+source /root/.bashrc 2>/dev/null
+claude $AUTO_LAUNCH_ARGS
+exec bash --login

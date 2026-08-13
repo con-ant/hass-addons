@@ -51,16 +51,23 @@ RUN case "${BUILD_ARCH}" in \
         i386) TTYD_ARCH="i686" ;; \
         *) TTYD_ARCH="x86_64" ;; \
     esac && \
-    curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${TTYD_ARCH}" -o /usr/bin/ttyd && \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+        "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${TTYD_ARCH}" -o /usr/bin/ttyd && \
     chmod +x /usr/bin/ttyd
 
-# Install Claude Code via npm (always the latest published version at build time).
-# The package is a thin launcher that pulls a ~240MB platform-native binary via
-# optional deps, so clean the npm cache and temp dirs in the SAME layer —
-# otherwise ~100MB+ of cache gets baked into the image. Rebuilding the add-on
-# picks up the newest release; the writable-layer bloat came from the runtime
-# self-update (now opt-in, default off), not from installing here.
-RUN npm install -g @anthropic-ai/claude-code \
+# Install Claude Code.
+# 2.1.113 replaced the JS entrypoint with a Bun-compiled native binary, whose
+# JavaScriptCore requires AVX. Hosts that lack it - notably VMs exposing the
+# generic kvm64 CPU model - cannot run 2.1.113+ (it deadlocks or dies with
+# SIGILL). Fix that at the hypervisor (Proxmox CPU type "host"), not here.
+# No version is hardcoded: take latest when it runs, otherwise the newest
+# release that passes a smoke test, so the add-on still builds on such hosts.
+# The package pulls a ~240MB platform-native binary via optional deps, so clean
+# the npm cache and temp dirs in the SAME layer - otherwise ~100MB+ of cache
+# gets baked into the image.
+COPY install-claude.sh /usr/local/bin/install-claude.sh
+RUN chmod +x /usr/local/bin/install-claude.sh \
+    && /usr/local/bin/install-claude.sh \
     && npm cache clean --force \
     && rm -rf /root/.npm /tmp/*
 
@@ -94,43 +101,21 @@ RUN npm install -g --prefix=/opt/playwright-mcp @playwright/mcp && \
     npm cache clean --force && \
     rm -rf /root/.npm /tmp/*
 
-# Wrapper: resolves Playwright Browser hostname at MCP-spawn time. HA assigns
-# hostnames like <repo-id>-playwright-browser that we can't hardcode, and the
-# user may install Playwright Browser after Claude Code has already started.
-RUN cat > /usr/local/bin/playwright-mcp-launch << 'EOF'
-#!/bin/bash
-# PLAYWRIGHT_CDP_HOST env var (set from the playwright_cdp_host option) wins.
-# Otherwise ask Supervisor for any add-on whose slug contains "playwright-browser".
-HOST="$PLAYWRIGHT_CDP_HOST"
-if [ -z "$HOST" ]; then
-  # The /addons list endpoint exposes .slug but not .hostname — hostname only
-  # lives on /addons/{slug}/info. HA add-on hostnames are deterministic: the
-  # slug with underscores replaced by hyphens. Derive it locally so this works
-  # without needing per-add-on info access.
-  SLUG=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons \
-    | jq -r '.data.addons[] | select(.slug | test("playwright-browser")) | .slug' \
-    | head -1)
-  [ -n "$SLUG" ] && HOST=$(echo "$SLUG" | tr '_' '-')
-fi
-if [ -z "$HOST" ] || [ "$HOST" = "null" ]; then
-  echo "[playwright-launch] Playwright Browser add-on not found via Supervisor API." >&2
-  echo "[playwright-launch] Install/start it, or set the playwright_cdp_host option." >&2
-  exit 1
-fi
-exec /usr/local/bin/playwright-mcp --cdp-endpoint "http://$HOST:9222" "$@"
-EOF
-RUN chmod +x /usr/local/bin/playwright-mcp-launch
-
 # Install Home Assistant CLI (ha command)
+# Pinned and retried: a transient DNS failure used to abort the whole build
+# (curl exit 6), and "releases/latest" could silently change under us. Upstream
+# publishes only amd64 and aarch64 (the only arches this add-on builds for);
+# anything else skips the CLI with a warning instead of failing on a 404.
+ARG HA_CLI_VERSION=5.2.0
 RUN case "${BUILD_ARCH}" in \
-        amd64) HA_ARCH="amd64" ;; \
-        aarch64) HA_ARCH="aarch64" ;; \
-        armv7|armhf) HA_ARCH="armhf" ;; \
-        i386) HA_ARCH="i386" ;; \
-        *) HA_ARCH="amd64" ;; \
-    esac && \
-    curl -fsSL "https://github.com/home-assistant/cli/releases/latest/download/ha_${HA_ARCH}" -o /usr/local/bin/ha && \
-    chmod +x /usr/local/bin/ha
+        amd64|aarch64) \
+            curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+                "https://github.com/home-assistant/cli/releases/download/${HA_CLI_VERSION}/ha_${BUILD_ARCH}" \
+                -o /usr/local/bin/ha && \
+            chmod +x /usr/local/bin/ha ;; \
+        *) \
+            echo "[WARN] Home Assistant CLI is not published for ${BUILD_ARCH}; the 'ha' command will be unavailable" ;; \
+    esac
 
 # Create necessary directories (NOT /root/.claude - will be symlinked at runtime)
 RUN mkdir -p \
@@ -141,53 +126,16 @@ RUN mkdir -p \
 # Add-on-managed CLAUDE.md (copied to the persistent dir at runtime)
 COPY CLAUDE.addon.md /usr/share/claudecode/CLAUDE.addon.md
 
-# Configure tmux with large scrollback buffer and scroll support
-RUN cat > /root/.tmux.conf << 'EOF'
-set -g history-limit 20000
-# Disable alternate screen buffer to allow terminal scrollback
-set -ga terminal-overrides ',xterm*:smcup@:rmcup@'
-# Enable mouse support for scrolling (but may affect copy/paste)
-set -g mouse on
-# Bind mouse wheel to scroll through history in copy mode
-bind -n WheelUpPane if-shell -F -t = "#{mouse_any_flag}" "send-keys -M" "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'select-pane -t=; copy-mode -e; send-keys -M'"
-bind -n WheelDownPane select-pane -t= \; send-keys -M
-EOF
-
-# Configure bash with aliases and prompt
-RUN cat > /root/.bashrc << 'EOF'
-export TERM=xterm-256color
-export LANG=C.UTF-8
-PS1='\[\033[1;36m\]claude-code\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
-
-# Function to update MCP token before starting Claude
-update_mcp_token() {
-  local SETTINGS_FILE=/root/.claude/settings.json
-  if [ -f "$SETTINGS_FILE" ] && [ -n "$SUPERVISOR_TOKEN" ]; then
-    jq ".mcpServers.homeassistant.env.HASS_TOKEN = \"$SUPERVISOR_TOKEN\"" "$SETTINGS_FILE" > /tmp/settings.tmp 2>/dev/null && mv /tmp/settings.tmp "$SETTINGS_FILE"
-  fi
-}
-
-# Aliases
-alias ll='ls -la'
-alias c='update_mcp_token && claude $CLAUDE_FLAGS'
-alias cc='update_mcp_token && claude --continue $CLAUDE_FLAGS'
-alias ha-config='cd /homeassistant'
-alias ha-logs='cat /homeassistant/home-assistant.log 2>/dev/null || echo "Log not found"'
-EOF
+# Shell config, tmux config, and helper scripts.
+# These were heredocs (RUN cat > file << 'EOF'), which require BuildKit and a
+# `# syntax=docker/dockerfile:1.4` directive. Builders without heredoc support
+# parsed the body as Dockerfile instructions ("unknown instruction: set").
+# COPY works on every builder and needs no syntax image.
+COPY rootfs/ /
+RUN chmod +x /usr/local/bin/playwright-mcp-launch /usr/local/bin/claude-auto-launch
 
 # Ensure .bashrc is sourced for login shells too
 RUN echo 'source ~/.bashrc' > /root/.profile
-
-# Auto-launch wrapper: refresh MCP token, run claude with runtime flags,
-# fall back to a login shell on exit so users can keep working.
-RUN cat > /usr/local/bin/claude-auto-launch << 'EOF'
-#!/bin/bash
-source /root/.bashrc 2>/dev/null
-update_mcp_token 2>/dev/null
-claude $AUTO_LAUNCH_ARGS
-exec bash --login
-EOF
-RUN chmod +x /usr/local/bin/claude-auto-launch
 
 # Set up PATH. The extra_npm_packages install dir is on the persistent HA
 # volume so user-installed MCP servers survive add-on rebuilds.
@@ -225,14 +173,35 @@ CMD ["/bin/bash", "-c", "\
   if [ ! -L /root/.claude.json ]; then touch $PERSIST_DIR/.claude.json; rm -f /root/.claude.json; ln -s $PERSIST_DIR/.claude.json /root/.claude.json; fi && \
   FONT_SIZE=$(jq -r '.terminal_font_size // 14' /data/options.json) && \
   THEME=$(jq -r '.terminal_theme // \"dark\"' /data/options.json) && \
-  SESSION_PERSIST=$(jq -r '.session_persistence // true' /data/options.json) && \
-  ENABLE_MCP=$(jq -r '.enable_mcp // true' /data/options.json) && \
+  SESSION_PERSIST=$(jq -r 'if .session_persistence == null then true else .session_persistence end' /data/options.json) && \
+  ENABLE_MCP=$(jq -r 'if .enable_mcp == null then true else .enable_mcp end' /data/options.json) && \
   ENABLE_PLAYWRIGHT=$(jq -r '.enable_playwright_mcp // false' /data/options.json) && \
   PLAYWRIGHT_HOST=$(jq -r '.playwright_cdp_host // \"\"' /data/options.json) && \
   AUTO_UPDATE=$(jq -r '.auto_update_claude // false' /data/options.json) && \
+  SETTINGS_FILE=/root/.claude/settings.json && \
+  [ -f \"$SETTINGS_FILE\" ] || echo '{}' > \"$SETTINGS_FILE\" && \
+  if jq -e '.mcpServers.homeassistant.env.HASS_TOKEN' \"$SETTINGS_FILE\" > /dev/null 2>&1; then \
+    jq 'del(.mcpServers.homeassistant.env.HASS_TOKEN)' \"$SETTINGS_FILE\" > /tmp/settings.tmp && \
+    mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
+    echo '[INFO] Removed a Supervisor token that older versions persisted into settings.json'; \
+    echo '[INFO] That file lives in your HA config dir and is included in backups'; \
+  fi && \
+  if ! grep -qw avx /proc/cpuinfo 2>/dev/null; then \
+    echo '[WARN] This CPU does not expose AVX. Claude Code 2.1.113+ is a Bun-compiled'; \
+    echo '[WARN] binary that requires it, so this add-on is running an older release.'; \
+    echo '[WARN] On Proxmox set the VM CPU type to \"host\" (or x86-64-v3), then fully'; \
+    echo '[WARN] stop and start the VM. Verify with: grep -o -m1 avx2 /proc/cpuinfo'; \
+  fi && \
+  BUILT_VERSION=$(cat /etc/claude-code-version 2>/dev/null || echo unknown) && \
   if [ \"$AUTO_UPDATE\" = \"true\" ]; then \
-    echo '[INFO] Checking for Claude Code updates (opt-in; writes to the container layer)...' && \
-    npm update -g @anthropic-ai/claude-code 2>/dev/null || echo '[WARN] Update check failed, continuing...'; \
+    echo \"[WARN] auto_update_claude=true; the build verified $BUILT_VERSION, an update may install a release that cannot run (and writes to the container layer)\" && \
+    timeout 300 npm update -g @anthropic-ai/claude-code || echo '[WARN] Update failed; keeping the installed version'; \
+    if ! timeout 30 claude --version < /dev/null > /dev/null 2>&1; then \
+      echo \"[ERROR] The updated Claude Code does not run here; rolling back to $BUILT_VERSION\" && \
+      timeout 300 npm install -g @anthropic-ai/claude-code@$BUILT_VERSION || echo '[ERROR] Rollback failed'; \
+    fi; \
+  else \
+    echo \"[INFO] Claude Code $BUILT_VERSION (verified at build time)\"; \
   fi && \
   EXTRA_NPM_PREFIX=/homeassistant/.claudecode/npm-global && \
   EXTRA_PKGS=$(jq -r '.extra_npm_packages // [] | join(\" \")' /data/options.json) && \
@@ -241,41 +210,59 @@ CMD ["/bin/bash", "-c", "\
     echo \"[INFO] Installing extra_npm_packages: $EXTRA_PKGS\" && \
     npm install -g --prefix=\"$EXTRA_NPM_PREFIX\" $EXTRA_PKGS 2>&1 | tail -5 || echo '[WARN] Some extra_npm_packages failed to install'; \
   fi && \
-  claude mcp remove homeassistant -s user 2>/dev/null || true && \
-  claude mcp remove playwright -s user 2>/dev/null || true && \
-  if [ \"$ENABLE_MCP\" = \"true\" ]; then \
-    claude mcp add-json homeassistant '{\"command\":\"hass-mcp\"}' -s user && \
-    SETTINGS_FILE=/root/.claude/settings.json && \
+  if timeout 30 claude --version < /dev/null > /dev/null 2>&1; then \
+    CLAUDE_OK=true; \
+  else \
+    CLAUDE_OK=false; \
+    echo '[ERROR] claude CLI did not respond within 30s - skipping MCP setup and auto-launch'; \
+    echo '[ERROR] The terminal will still start so you can debug from inside the add-on'; \
+  fi && \
+  if [ \"$CLAUDE_OK\" = \"true\" ]; then \
+    timeout 30 claude mcp remove homeassistant -s user > /dev/null 2>&1 || true; \
+    timeout 30 claude mcp remove playwright -s user > /dev/null 2>&1 || true; \
+  fi && \
+  if [ \"$CLAUDE_OK\" = \"true\" ] && [ \"$ENABLE_MCP\" = \"true\" ]; then \
+    timeout 30 claude mcp add-json homeassistant '{\"command\":\"hass-mcp\"}' -s user && \
     ALLOWED_TOOLS='[\"mcp__homeassistant__get_version\",\"mcp__homeassistant__get_entity\",\"mcp__homeassistant__list_entities\",\"mcp__homeassistant__search_entities_tool\",\"mcp__homeassistant__domain_summary_tool\",\"mcp__homeassistant__list_automations\",\"mcp__homeassistant__get_history\",\"mcp__homeassistant__get_error_log\",\"Read(/homeassistant/**)\",\"Read(/config/**)\",\"Read(/share/**)\",\"Read(/media/**)\",\"Glob(/homeassistant/**)\",\"Glob(/config/**)\",\"Grep(/homeassistant/**)\",\"Grep(/config/**)\"]' && \
     jq --argjson tools \"$ALLOWED_TOOLS\" '.permissions.allow = ($tools + (.permissions.allow // []) | unique)' $SETTINGS_FILE > /tmp/settings.tmp && mv /tmp/settings.tmp $SETTINGS_FILE && \
     echo '[INFO] MCP configured with Home Assistant integration'; \
     echo '[INFO] Pre-authorized read-only MCP tools'; \
+  elif [ \"$ENABLE_MCP\" = \"true\" ]; then \
+    echo '[WARN] MCP is enabled but was skipped: the claude CLI is not responding'; \
   else \
     echo '[INFO] MCP disabled'; \
   fi && \
-  if [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
+  if [ \"$CLAUDE_OK\" = \"true\" ] && [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
     PW_MCP_JSON=$(jq -nc --arg host \"$PLAYWRIGHT_HOST\" '{command:\"/usr/local/bin/playwright-mcp-launch\", env:{PLAYWRIGHT_CDP_HOST:$host}}') && \
-    claude mcp add-json playwright \"$PW_MCP_JSON\" -s user && \
+    timeout 30 claude mcp add-json playwright \"$PW_MCP_JSON\" -s user && \
     if [ -n \"$PLAYWRIGHT_HOST\" ]; then \
       echo \"[INFO] Playwright MCP enabled (host override: $PLAYWRIGHT_HOST)\"; \
     else \
       echo '[INFO] Playwright MCP enabled (hostname auto-detected each time the MCP server starts)'; \
     fi; \
+  elif [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
+    echo '[WARN] Playwright MCP is enabled but was skipped: the claude CLI is not responding'; \
   else \
     echo '[INFO] Playwright MCP disabled'; \
   fi && \
   DEFAULT_MODE=$(jq -r '.default_permission_mode // \"auto\"' /data/options.json) && \
-  SETTINGS_FILE=/root/.claude/settings.json && \
-  [ -f \"$SETTINGS_FILE\" ] || echo '{}' > \"$SETTINGS_FILE\" && \
   jq --arg mode \"$DEFAULT_MODE\" '.permissions.defaultMode = $mode' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
   echo \"[INFO] Default permission mode: $DEFAULT_MODE\" && \
+  ENABLE_RC=$(jq -r '.enable_remote_control // false' /data/options.json) && \
+  RC_PREFIX=$(jq -r '.remote_control_session_prefix // \"HomeAssistant\"' /data/options.json) && \
+  if [ \"$ENABLE_RC\" = \"true\" ]; then \
+    jq '.remoteControlAtStartup = true' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
+    export CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX=\"$RC_PREFIX\"; \
+  else \
+    jq 'del(.remoteControlAtStartup)' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\"; \
+  fi && \
   if [ \"$THEME\" = \"dark\" ]; then \
     COLORS='background=#1e1e2e,foreground=#cdd6f4,cursor=#f5e0dc'; \
   else \
     COLORS='background=#eff1f5,foreground=#4c4f69,cursor=#dc8a78'; \
   fi && \
   AUTO_LAUNCH=$(jq -r '.auto_launch_claude // \"continue\"' /data/options.json) && \
-  ENABLE_RC=$(jq -r '.enable_remote_control // false' /data/options.json) && \
+  if [ \"$CLAUDE_OK\" != \"true\" ]; then AUTO_LAUNCH=off; fi && \
   CLAUDE_FLAGS=\"\" && \
   if [ \"$ENABLE_RC\" = \"true\" ]; then CLAUDE_FLAGS=\"--remote-control\"; fi && \
   case \"$AUTO_LAUNCH\" in \
