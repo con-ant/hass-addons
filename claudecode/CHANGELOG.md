@@ -2,7 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.2.65-con.2] - 2026-08-14
+
+### Added
+- **Working clipboard integration (OSC 52) in the web terminal.** The web
+  client embedded in the ttyd 1.7.7 binary bundles xterm.js 5.4 without the
+  clipboard addon, so OSC 52 writes were silently dropped — the Claude CLI's
+  "press `c` to copy" hint did nothing, and tmux copies never reached the
+  system clipboard. ttyd now serves a newer web client (xterm.js 5.5 +
+  `@xterm/addon-clipboard`) via `--index`; the 1.7.7 binary is unchanged.
+  The client is compiled in a Dockerfile build stage from a pinned ttyd main
+  commit (2922cb8), with yarn honoring the upstream lockfile — the build is
+  reproducible (byte-identical output across runs).
+  tmux is configured with `set-clipboard on` plus an `Ms` terminal-override
+  pinned to the `c` selection (tmux fills `%p1` with `""` for its own copies
+  and `c` for programs; the clipboard addon drops anything that isn't exactly
+  `c`, so the override prints `%p1` with zero precision and hardcodes `c`).
+  Verified against the shipped 1.7.7 binary with a headless Chromium: typing,
+  resize, window title, program-initiated OSC 52 (the "press `c`" path), and
+  tmux buffer/copy-mode copies all work. Because tmux stores wrapped output
+  as one logical line, copy-mode copies of the wrapped login URL come out
+  intact — the problem PR #15 worked around, now solved at the root.
+  Limitations: browsers only allow programmatic clipboard writes over HTTPS
+  or localhost (plain-HTTP setups keep the Shift/Option-drag gestures, which
+  still work); the main-branch client on a 1.7.7 server is an unreleased
+  pairing, so the build stage and `--index` flag should be dropped when the
+  next ttyd release ships. README updated (copy table, authentication flow,
+  trade-offs list).
 
 ### Fixed
 - **GitHub CLI authentication now persists across restarts and rebuilds.**
@@ -11,7 +37,7 @@ All notable changes to this project will be documented in this file.
   every restart or add-on update. It is now symlinked into
   `/homeassistant/.claudecode/gh`, following the same pattern already used for
   `~/.claude`, `~/.claude.json`, and `~/.config/claude-code`.
-- Copying text from the web terminal was impossible on macOS whenever the program in the pane enabled mouse tracking - which is the normal state of this add-on: tmux runs with `mouse on`, and Claude Code's fullscreen renderer captures the mouse too. ttyd's copy path is client-side (a native xterm.js selection is auto-copied with a brief scissors overlay), but xterm.js only allows bypassing application mouse-tracking with Shift+drag on Windows/Linux; on macOS the gesture is Option+drag and it is additionally gated behind the `macOptionClickForcesSelection` client option, which defaults to false. Mac users therefore had no working copy gesture at all. ttyd now starts with `-t macOptionClickForcesSelection=true`, so Option+drag makes a native selection that lands on the system clipboard. Verified against the shipped ttyd 1.7.7 binary and web client. A full fix (OSC 52, letting tmux and CLI apps write the clipboard directly) needs a newer xterm.js than any released ttyd bundles: 1.7.7 (2024-03) is still the latest release; ttyd's main branch has `@xterm/addon-clipboard` and could be served via `ttyd --index` in a future change
+- Copying text from the web terminal was impossible on macOS whenever the program in the pane enabled mouse tracking - which is the normal state of this add-on: tmux runs with `mouse on`, and Claude Code's fullscreen renderer captures the mouse too. ttyd's copy path is client-side (a native xterm.js selection is auto-copied with a brief scissors overlay), but xterm.js only allows bypassing application mouse-tracking with Shift+drag on Windows/Linux; on macOS the gesture is Option+drag and it is additionally gated behind the `macOptionClickForcesSelection` client option, which defaults to false. Mac users therefore had no working copy gesture at all. ttyd now starts with `-t macOptionClickForcesSelection=true`, so Option+drag makes a native selection that lands on the system clipboard. Verified against the shipped ttyd 1.7.7 binary and web client. A full fix (OSC 52, letting tmux and CLI apps write the clipboard directly) needs a newer xterm.js than any released ttyd bundles: 1.7.7 (2025-03) is still the latest release; ttyd's main branch has `@xterm/addon-clipboard` and could be served via `ttyd --index` in a future change
   (ported from upstream robsonfelix/robsonfelix-hass-addons#37 by @ahalekelly)
 
 ### Changed

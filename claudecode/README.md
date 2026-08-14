@@ -229,10 +229,13 @@ Since tmux captures mouse events, copy/paste works differently:
 
 | Action | How to do it |
 |--------|--------------|
+| **Copy (tmux copy-mode)** | Scroll up (enters copy-mode), select, then copy — lands directly on your clipboard¹ |
 | **Copy (macOS)** | Hold `Option (⌥)` while selecting text with the mouse |
 | **Copy (Windows/Linux)** | Hold `Shift` while selecting text with the mouse |
 | **Paste** | `Shift+Insert` or middle-click |
 | **Alternative paste** | `Ctrl+Shift+V` (browser dependent) |
+
+¹ Clipboard integration (OSC 52) requires accessing Home Assistant over **HTTPS or localhost** — browsers block programmatic clipboard writes on plain HTTP. On plain HTTP, use the modifier-key gestures below instead. A bonus of OSC 52: copy-mode copies wrapped lines as one logical line, so long URLs come out intact.
 
 Holding the modifier makes the browser terminal handle the selection natively instead of passing the mouse to tmux; the selection is copied to your clipboard automatically the moment you release the button — watch for the brief ✂ icon as confirmation.
 
@@ -240,7 +243,9 @@ Holding the modifier makes the browser terminal handle the selection natively in
 
 #### Authenticating Claude Code (first launch)
 
-The authentication URL can be long and may wrap across multiple lines. To handle this:
+If you access Home Assistant over **HTTPS** (or localhost), the CLI's own **press `c` to copy** hint works — the login URL lands directly on your clipboard via OSC 52. Paste it into a new tab, authenticate, copy the auth code, and **paste** it back into the terminal with `Shift+Insert` or `Ctrl+Shift+V`.
+
+On plain HTTP the browser blocks programmatic clipboard writes, so fall back to the manual route — the URL is long and may wrap across multiple lines:
 
 1. **Zoom out** your browser (`Ctrl + -` or `Cmd + -`) until the URL fits on a single line
 2. **Click the link** — it should open in a new tab
@@ -258,6 +263,7 @@ If clicking the link doesn't work, hold `Shift` (`Option` on macOS) while select
 - ✅ Mouse wheel scrolling works (enters copy mode automatically)
 - ✅ 20,000 line scrollback buffer
 - ✅ Copy by holding `Shift` (Windows/Linux) or `Option ⌥` (macOS) while selecting
+- ✅ Copy-mode copies and `claude`'s "press `c` to copy" go straight to your clipboard (HTTPS/localhost only)
 - ⚠️ Use middle-click or Shift+Insert to paste (right-click paste may not work)
 
 **Without tmux (`session_persistence: false`):**
