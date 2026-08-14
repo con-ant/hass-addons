@@ -23,6 +23,14 @@ All notable changes to this project will be documented in this file.
   tmux buffer/copy-mode copies all work. Because tmux stores wrapped output
   as one logical line, copy-mode copies of the wrapped login URL come out
   intact — the problem PR #15 worked around, now solved at the root.
+  The newer client also helps plain-HTTP setups: its link detector follows
+  URLs across soft-wrapped rows, so a wrapped login URL printed as flowing
+  output is clickable as one complete link (verified: full URL, any origin),
+  and a Shift/Option-drag selection over it copies as one unbroken line via
+  `execCommand` (no secure context needed). Limitation, also verified: rows
+  painted by full-screen UIs with per-row cursor positioning carry no wrap
+  metadata, so there click and drag still see one row at a time — that case
+  needs `press c`/OSC 52 (HTTPS) or the browser zoom-out fallback.
   Limitations: browsers only allow programmatic clipboard writes over HTTPS
   or localhost (plain-HTTP setups keep the Shift/Option-drag gestures, which
   still work); the main-branch client on a 1.7.7 server is an unreleased
