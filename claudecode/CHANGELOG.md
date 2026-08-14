@@ -25,18 +25,18 @@ All notable changes to this project will be documented in this file.
   intact — the problem PR #15 worked around, now solved at the root.
   The newer client also helps plain-HTTP setups: its link detector follows
   URLs across soft-wrapped rows, so a wrapped login URL printed as flowing
-  output is clickable as one complete link (verified: full URL, any origin),
-  and a Shift/Option-drag selection over it copies as one unbroken line via
-  `execCommand` (no secure context needed). Limitation, also verified: rows
-  painted by full-screen UIs with per-row cursor positioning carry no wrap
-  metadata, so there click and drag still see one row at a time — that case
-  needs `press c`/OSC 52 (HTTPS) or the browser zoom-out fallback.
-  Limitations: browsers only allow programmatic clipboard writes over HTTPS
-  or localhost (plain-HTTP setups keep the Shift/Option-drag gestures, which
-  still work); the main-branch client on a 1.7.7 server is an unreleased
-  pairing, so the build stage and `--index` flag should be dropped when the
-  next ttyd release ships. README updated (copy table, authentication flow,
-  trade-offs list).
+  output is clickable as one complete link, and a Shift/Option-drag
+  selection over it copies as one unbroken line via `execCommand` — both
+  verified with the async clipboard API unavailable, as it is on plain HTTP.
+  Limitations, also verified: OSC 52 itself needs HTTPS or localhost —
+  on plain HTTP the write is dropped harmlessly and the drag gestures
+  remain the copy path; and rows painted by full-screen UIs with per-row
+  cursor positioning carry no wrap metadata, so click and drag there see
+  one row at a time (covered by `c`/OSC 52 on HTTPS, or the browser
+  zoom-out fallback). The main-branch client on a 1.7.7 server is an
+  unreleased pairing; the build stage and `--index` flag should be dropped
+  when the next ttyd release ships. README updated (copy table,
+  authentication flow, trade-offs list).
 
 ### Fixed
 - **GitHub CLI authentication now persists across restarts and rebuilds.**
