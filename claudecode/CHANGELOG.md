@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.71] - 2026-08-17
+
+### Added
+- `auto_launch_claude` option: start Claude Code automatically when the web terminal opens — `off` (plain shell, the default and previous behavior), `new` (fresh session), or `continue` (resume the most recent session via `claude --continue`). When Claude Code exits, the wrapper drops into a login shell so the terminal stays usable. Auto-launch is skipped (with the existing health-gate warning) when the `claude` CLI is not responding, and picks up `--remote-control` automatically when `enable_remote_control` is on — as do the `c`/`cc` aliases
+
 ## [1.2.70] - 2026-08-17
 
 ### Added
