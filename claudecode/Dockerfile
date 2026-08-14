@@ -5,7 +5,12 @@ ARG BUILD_FROM
 # so startup serves this one via --index instead. Built from a pinned ttyd
 # main commit with yarn (via corepack, fetched from the npm registry) so
 # yarn.lock is honored - a plain npm install resolves newer transitive deps
-# and fails type-checking. Drop this stage and the --index flag once a ttyd
+# and fails type-checking. Everything is pinned (ttyd commit, corepack, and
+# the lockfile-resolved deps) so the output is reproducible and nothing
+# drifts between builds. COREPACK_INTEGRITY_KEYS=0 keeps a pinned corepack
+# working across npm signing-key rotations (which have broken pinned
+# corepacks before); transport is TLS and dependency integrity comes from
+# the yarn.lock checksums. Drop this stage and the --index flag once a ttyd
 # release newer than 1.7.7 ships and the download below is bumped.
 FROM ${BUILD_FROM} AS ttyd-client
 RUN apk add --no-cache curl nodejs npm
@@ -15,8 +20,9 @@ RUN curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
         | tar xz && mv "ttyd-${TTYD_CLIENT_COMMIT}" /ttyd
 WORKDIR /ttyd/html
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-    COREPACK_NPM_REGISTRY=https://registry.npmjs.org
-RUN npm install -g corepack && corepack enable && \
+    COREPACK_NPM_REGISTRY=https://registry.npmjs.org \
+    COREPACK_INTEGRITY_KEYS=0
+RUN npm install -g corepack@0.35.0 && corepack enable && \
     yarn install --immutable && yarn run inline
 
 FROM ${BUILD_FROM}
