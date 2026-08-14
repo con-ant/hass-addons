@@ -156,22 +156,24 @@ Since tmux captures mouse events, copy/paste works differently:
 
 | Action | How to do it |
 |--------|--------------|
+| **Copy (tmux copy-mode)** | Scroll up (enters copy-mode), select, then copy — lands directly on your clipboard¹ |
 | **Copy** | Hold `Ctrl+Shift` while selecting text with mouse |
 | **Paste** | `Shift+Insert` or middle-click |
 | **Alternative paste** | `Ctrl+Shift+V` (browser dependent) |
+
+¹ Clipboard integration (OSC 52) requires accessing Home Assistant over **HTTPS or localhost** — browsers block programmatic clipboard writes on plain HTTP. On plain HTTP, use the modifier-key gesture instead. A bonus of OSC 52: copy-mode copies wrapped lines as one logical line, so long URLs come out intact.
 
 **Note**: Regular right-click paste and simple mouse selection won't work because tmux intercepts these events for scrolling.
 
 #### Authenticating Claude Code (first launch)
 
-The authentication URL can be long and may wrap across multiple lines. To handle this:
+If you access Home Assistant over **HTTPS** (or localhost), the CLI's own **press `c` to copy** hint works — the login URL lands directly on your clipboard via OSC 52. Paste it into a new tab, authenticate, copy the auth code, and **paste** it back into the terminal with `Shift+Insert` or `Ctrl+Shift+V`.
 
-1. **Zoom out** your browser (`Ctrl + -` or `Cmd + -`) until the URL fits on a single line
-2. **Click the link** — it should open in a new tab
-3. Complete authentication in the browser and **copy the auth code**
-4. Click back on the terminal and **paste** with `Shift+Insert` or `Ctrl+Shift+V`
+On plain HTTP the browser blocks programmatic clipboard writes, so `c` won't work — but the terminal's link detection follows URLs across wrapped lines, so usually you can simply **click the URL** even when it spans several rows, or hold `Ctrl+Shift` and select it with the mouse — the selection is copied as one unbroken line.
 
-If clicking the link doesn't work, hold `Ctrl+Shift` while selecting the URL with your mouse to copy it, then paste it into your browser's address bar.
+If clicking or selecting only picks up part of the URL (this can happen when a full-screen UI redraws the screen row by row instead of letting text flow), **zoom out** your browser (`Ctrl + -` or `Cmd + -`) until the URL fits on a single line and click or select it there.
+
+Either way: complete authentication in the browser, **copy the auth code**, click back on the terminal, and **paste** it with `Shift+Insert` or `Ctrl+Shift+V`.
 
 ### Scrolling and Session Persistence Trade-offs
 
@@ -181,6 +183,7 @@ If clicking the link doesn't work, hold `Ctrl+Shift` while selecting the URL wit
 - ✅ Long-running Claude tasks continue in background
 - ✅ Mouse wheel scrolling works (enters copy mode automatically)
 - ✅ 20,000 line scrollback buffer
+- ✅ Copy-mode copies and `claude`'s "press `c` to copy" go straight to your clipboard (HTTPS/localhost only)
 - ⚠️ Use middle-click or Shift+Insert to paste (right-click paste may not work)
 
 **Without tmux (`session_persistence: false`):**

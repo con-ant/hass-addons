@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.66] - 2026-08-14
+
+### Added
+- **Working clipboard integration (OSC 52) in the web terminal.** The web
+  client embedded in the ttyd 1.7.7 binary bundles xterm.js 5.4 without the
+  clipboard addon, so OSC 52 writes were silently dropped — the Claude CLI's
+  "press `c` to copy" hint did nothing, and tmux copies never reached the
+  system clipboard. ttyd now serves a newer web client (xterm.js 5.5 +
+  `@xterm/addon-clipboard`) via `--index`; the 1.7.7 binary is unchanged.
+  The client is compiled in a Dockerfile build stage from a pinned ttyd main
+  commit (2922cb8), with yarn honoring the upstream lockfile — the build is
+  reproducible (byte-identical output across runs) and every input is
+  pinned, so nothing drifts between builds.
+  tmux is configured with `set-clipboard on` plus an `Ms` terminal-override
+  pinned to the `c` selection (tmux fills `%p1` with `""` for its own copies
+  and `c` for programs; the clipboard addon drops anything that isn't exactly
+  `c`, so the override prints `%p1` with zero precision and hardcodes `c`).
+  Verified with a headless Chromium against the shipped 1.7.7 binary,
+  including end-to-end from a full amd64 image build: typing, resize, window
+  title, program-initiated OSC 52 (the "press `c`" path), and tmux
+  buffer/copy-mode copies all work. Because tmux stores wrapped output as
+  one logical line, copy-mode copies of the wrapped login URL come out
+  intact — the problem #38 works around, solved at the root.
+  The newer client also helps plain-HTTP setups: its link detector follows
+  URLs across soft-wrapped rows, so a wrapped login URL printed as flowing
+  output is clickable as one complete link, and a `Ctrl+Shift`-drag
+  selection over it copies as one unbroken line via `execCommand` — both
+  verified with the async clipboard API unavailable, as it is on plain HTTP.
+  Limitations, also verified: OSC 52 itself needs HTTPS or localhost —
+  on plain HTTP the write is dropped harmlessly and the drag gestures
+  remain the copy path; and rows painted by full-screen UIs with per-row
+  cursor positioning carry no wrap metadata, so click and drag there see
+  one row at a time (covered by `c`/OSC 52 on HTTPS, or the browser
+  zoom-out fallback). The main-branch client on a 1.7.7 server is an
+  unreleased pairing; the build stage and `--index` flag should be dropped
+  when the next ttyd release ships. README updated (copy table,
+  authentication flow, trade-offs list).
+
 ## [1.2.65] - 2026-07-08
 
 ### Security
