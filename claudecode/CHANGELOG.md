@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.69] - 2026-08-17
+
+### Fixed
+- Playwright Browser hostname auto-detection never worked: startup read `.hostname` from the Supervisor `/addons` list endpoint, but that endpoint doesn't return `hostname` (it only exists on `/addons/{slug}/info`), so detection always fell through to the literal `playwright-browser` fallback — which never resolves on HA's network (real add-on hostnames look like `<repo-id>-playwright-browser`). The hostname is now derived from the add-on `.slug` (underscores → hyphens; HA add-on hostnames are deterministic) by a small launcher script that runs each time the MCP server starts — so it also works when Playwright Browser is installed or started *after* Claude Code, without restarting this add-on. The `playwright_cdp_host` override still takes precedence
+- `@playwright/mcp` is now installed at build time under `/opt/playwright-mcp` (with a `playwright-mcp` symlink in `/usr/local/bin`) instead of relying on a pre-seeded npx cache. The `/opt` prefix avoids the `/usr/local/bin/mcp` binary-name collision with `hass-mcp`, the npm cache no longer ships in the image, and the MCP server no longer depends on npx cache state at runtime
+
 ## [1.2.68] - 2026-08-17
 
 ### Added
