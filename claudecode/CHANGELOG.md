@@ -20,7 +20,9 @@ All notable changes to this project will be documented in this file.
   `c`, so the override prints `%p1` with zero precision and hardcodes `c`).
   Verified against the shipped 1.7.7 binary with a headless Chromium: typing,
   resize, window title, program-initiated OSC 52 (the "press `c`" path), and
-  tmux buffer/copy-mode copies all work. Because tmux stores wrapped output
+  tmux buffer/copy-mode copies all work — including end-to-end from a full
+  amd64 image build (both clipboard paths driven in a browser against ttyd
+  running out of the built container). Because tmux stores wrapped output
   as one logical line, copy-mode copies of the wrapped login URL come out
   intact — the problem PR #15 worked around, now solved at the root.
   The newer client also helps plain-HTTP setups: its link detector follows
