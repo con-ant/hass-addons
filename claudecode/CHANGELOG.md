@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.70] - 2026-08-17
+
+### Added
+- `extra_npm_packages` option: list of npm package specs to install on every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). The bin directory is on `PATH`. Use it to add custom MCP servers without forking the Dockerfile; a failed install logs a `[WARN]` but never blocks startup
+
 ## [1.2.69] - 2026-08-17
 
 ### Fixed

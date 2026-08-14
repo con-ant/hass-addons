@@ -165,8 +165,9 @@ RUN chmod +x /usr/local/bin/playwright-mcp-launch
 # Ensure .bashrc is sourced for login shells too
 RUN echo 'source ~/.bashrc' > /root/.profile
 
-# Set up PATH
-ENV PATH="/root/.local/bin:${PATH}"
+# Set up PATH. The extra_npm_packages install dir is on the persistent HA
+# volume so user-installed MCP servers survive add-on rebuilds.
+ENV PATH="/root/.local/bin:/homeassistant/.claudecode/npm-global/bin:${PATH}"
 
 # Set working directory
 WORKDIR /homeassistant
@@ -221,6 +222,13 @@ CMD ["/bin/bash", "-c", "\
     fi; \
   else \
     echo \"[INFO] Claude Code $BUILT_VERSION (verified at build time)\"; \
+  fi && \
+  EXTRA_NPM_PREFIX=/homeassistant/.claudecode/npm-global && \
+  EXTRA_PKGS=$(jq -r '.extra_npm_packages // [] | join(\" \")' /data/options.json) && \
+  if [ -n \"$EXTRA_PKGS\" ]; then \
+    mkdir -p \"$EXTRA_NPM_PREFIX\" && \
+    echo \"[INFO] Installing extra_npm_packages: $EXTRA_PKGS\" && \
+    npm install -g --prefix=\"$EXTRA_NPM_PREFIX\" $EXTRA_PKGS 2>&1 | tail -5 || echo '[WARN] Some extra_npm_packages failed to install'; \
   fi && \
   if timeout 30 claude --version < /dev/null > /dev/null 2>&1; then \
     CLAUDE_OK=true; \
