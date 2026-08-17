@@ -2,28 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-
-### Added
-- `docs/DESIGN-claude-tasks.md` — design v3 of the scheduled-tasks proposal
-  (docs only, nothing built). Supersedes the v2 draft from the design-review
-  PR: settings/memory isolation via `--setting-sources ""` plus a composed
-  settings file, a per-run token broker instead of an inherited Supervisor
-  token, per-task `paths:` read grants over an image-shipped deny baseline,
-  native `--json-schema` structured output for the result contract, a
-  republish subsystem with a registry-backed anchor sensor, a stop path that
-  winds down in-flight runs inside the Supervisor deadline, action buttons
-  deferred to v1.1 behind nonce provenance, and Tier B (crond) cut from v1.
-  Default task model changed from Opus to Fable per user decision.
-  Revised after an install-side review (each suggestion independently
-  verified before folding): git-backed-config token guard via
-  `.git/info/exclude` with an already-tracked check, task-transcript
-  retention, a fail-closed CLI preflight for `auto_update_claude` drift,
-  `paths:` allowed-roots validation plus `.git`/`addon_configs`/rendered-
-  package deny entries, a verb-subcommand CLI (`run`/`disable` auto-allowed
-  interactively, `enable`/`force-run`/`token` always prompt), and entity
-  renames (`claude_tasks_attention` anchor, `claude_tasks_cost_raw` canary).
-
 ## [1.2.65-con.6] - 2026-08-17
 
 ### Fixed
