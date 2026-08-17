@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
   republish subsystem with a registry-backed anchor sensor, a stop path that
   winds down in-flight runs inside the Supervisor deadline, action buttons
   deferred to v1.1 behind nonce provenance, and Tier B (crond) cut from v1.
+  Default task model changed from Opus to Fable per user decision.
 
 ## [1.2.65-con.6] - 2026-08-17
 

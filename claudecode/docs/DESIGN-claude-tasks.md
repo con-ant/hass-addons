@@ -32,7 +32,7 @@ Five decisions were settled with the user before v2 and stay settled:
 - Home Assistant triggers tasks over HTTP into the add-on (now defended on an honest comparison against `hassio.addon_stdin` — §6.1).
 - The Claude-driven energy report *replaces* the existing Python one.
 - Scheduled tasks are **read-only**: they observe and propose; acting requires a human tap (the tap arrives in v1.1 with nonce provenance — §6.5).
-- The default model is Opus (as the CLI alias `opus`).
+- The default model is Fable (as the CLI alias `fable` if the installed CLI resolves it [verify]; otherwise the full ID `claude-fable-5`).
 - Tasks live in *this* add-on, not a second one — one login, one credential store, one thing to keep alive (§6.2).
 
 ## 1 · Problem
@@ -186,9 +186,12 @@ The task's **name is its filename stem**; a `name:` key is rejected with the hin
 description: Daily health check; reports anything a human should look at.
   # REQUIRED · string · 1..200 chars. Shown in --list and the entity friendly_name.
 
-model: opus
-  # OPTIONAL · default: add-on option task_default_model (ships "opus").
-  # MUST be in allowed_task_models (add-on option, default [opus, sonnet, haiku]).
+model: fable
+  # OPTIONAL · default: add-on option task_default_model (ships "fable").
+  # MUST be in allowed_task_models (add-on option, default
+  # [fable, opus, sonnet, haiku]). [verify: the installed CLI resolves the
+  # alias `fable`; if not, the shipped default and allow-list entry are the
+  # full ID `claude-fable-5` instead — the validator treats both as one model.]
   # Aliases only in shipped examples; operators may append full model IDs to the option.
 
 timeout: 600
@@ -615,7 +618,7 @@ Terminal publish of `sensor.claude_task_<slug>`: state ∈ `ok|info|warning|crit
 2. `rest:` → the `sensor.claude_tasks` anchor (60 s poll of `GET /tasks`; summary attributes only — never the per-task array, which would put every headline into recorder every minute)
 3. `template:` → `sensor.claude_tasks_monthly_cost`
 4. `automation:` — republish-on-HA-start; the combined alarm (below); (v1.1: the action forwarder)
-5. the commented-out recorder exclusion; a commented-out example schedule (commented because shipping a live daily-Opus schedule is a spend decision only the user may make)
+5. the commented-out recorder exclusion; a commented-out example schedule (commented because shipping a live daily schedule on the default model is a spend decision only the user may make)
 
 The **one remaining manual step**, per-install and never per-task: add `homeassistant: packages: claudecode_tasks: !include claudecode_tasks.yaml` to `configuration.yaml` and restart HA once.
 
@@ -684,7 +687,7 @@ For: one OAuth login and one `.credentials.json` on one refresh clock (a second 
 
 > **Decision:** no crond, no in-addon scheduler in v1. Tier B existed for one task — `ha-alive`, "is HA answering" — and the review established that when Core is down, `mobile`/`persistent`/`notify_default` are all Core services: the out-of-box Tier B was a watchdog that detects an outage and tells nobody (only an optional webhook survives). Separately, the proposed busybox crond incantation was wrong on four counts (spool format, syslog, empty job env, TZ). The mature answer to dead-man monitoring of HA itself is an **external check** — a healthchecks.io/ntfy dead-man URL pinged by an ordinary HA automation, so silence alerts — shipped as a DOCS.md recipe with zero add-on machinery.
 >
-> **Re-entry conditions, recorded so return needs no design round:** if a real incident brings Tier B back, it returns as an interval-only sleep-loop scheduler (`task-scheduler`, a bash child of `claudecode-start`, reading `_schedule.yaml` `{name, every_min}` entries — no cron expressions, so no TZ question; PID-tracked and stopped by `on_stop`), **and** the validator refuses any Tier-B task whose `critical`/`error` severities don't resolve to at least one egress channel. A frontmatter `global_lock: false` opt-out (so a watchdog never queues behind a long Opus run) is part of that future shape, not v1.
+> **Re-entry conditions, recorded so return needs no design round:** if a real incident brings Tier B back, it returns as an interval-only sleep-loop scheduler (`task-scheduler`, a bash child of `claudecode-start`, reading `_schedule.yaml` `{name, every_min}` entries — no cron expressions, so no TZ question; PID-tracked and stopped by `on_stop`), **and** the validator refuses any Tier-B task whose `critical`/`error` severities don't resolve to at least one egress channel. A frontmatter `global_lock: false` opt-out (so a watchdog never queues behind a long default-model run) is part of that future shape, not v1.
 
 ### 6.4 Token placement in HA: baked into the generated package
 
@@ -791,14 +794,14 @@ The rule behind the table: **no failure leaves the surface silent.** Either the 
 
 ## 10 · Cost
 
-Opus is the default by decision, so cadence is the lever:
+Fable is the default by decision — the top-tier model, so cadence is the lever, and the estimates below are the floor, not the number:
 
 | Task | Cadence | Model | Est. per run | Est. per month |
 |---|---|---|---|---|
-| health-check | daily 07:00 | opus | $0.40 – $1.20 | $12 – $36 |
-| energy-report | daily 07:30 | opus | $0.30 – $0.90 | $9 – $27 |
+| health-check | daily 07:00 | fable | $0.40 – $1.20+ | $12 – $36+ |
+| energy-report | daily 07:30 | fable | $0.30 – $0.90+ | $9 – $27+ |
 
-Guards, now all hard or visible: `--max-budget-usd` stops a run mid-flight at `max_cost_usd` [probed 2.1.233]; `--max-turns` bounds loops; the endpoint's `min_interval` stops a misfiring automation from multiplying runs; the global semaphore keeps concurrent Opus processes at 1 by default; and the monthly rollup (`sensor.claude_tasks_monthly_cost`, statistics-grade) is where cadence × model becomes a visible budget decision. Estimates derive from one Haiku probe and typical multi-turn runs; PR 1 logs `total_cost_usd` per run — revise after a week of real data.
+The ranges were derived for Opus-class runs (one Haiku probe extrapolated to typical multi-turn runs); Fable prices at or above Opus, so treat them as lower bounds until real envelopes land — PR 1 logs `total_cost_usd` per run, and the defaults (`max_cost_usd: 1.00`, cap 5.00) may need raising for Fable-sized runs [verify: a real health-check run's `total_cost_usd` on Fable before shipping the default cap]. Guards, now all hard or visible: `--max-budget-usd` stops a run mid-flight at `max_cost_usd` [probed 2.1.233]; `--max-turns` bounds loops; the endpoint's `min_interval` stops a misfiring automation from multiplying runs; the global semaphore keeps concurrent Claude processes at 1 by default; and the monthly rollup (`sensor.claude_tasks_monthly_cost`, statistics-grade) is where cadence × model becomes a visible budget decision. Per-task `model:` overrides remain the cost lever for tasks that don't need Fable's judgment — a mechanical report can run on `sonnet` or `haiku` at a fraction of the cost.
 
 ## 11 · Delivery as pull requests
 
@@ -842,6 +845,8 @@ Everything **[probed 2.1.233]** in §2 has live evidence but from a non-containe
 | Compound-command evasion: `Bash(ha core logs:*)` vs `ha core logs; cat /homeassistant/secrets.yaml` | assumed denied; probe |
 | Scope of auto-approved "safe" commands with zero allow rules | partially probed; enumerate |
 | Adversarial non-conforming `structured_output` (API rejects vs CLI passes through); `success` with null SO; `is_error` with populated SO | handled either way by rows 9/10; probe reachability |
+| `--model fable` alias resolves on the installed CLI; fallback: ship the full ID `claude-fable-5` as the default and allow-list entry | assumed; probe |
+| One real health-check run on Fable: `total_cost_usd` vs the shipped `max_cost_usd` default (1.00) — raise the default before release if it trips | unmeasured; probe |
 | Task transcripts stay out of the interactive `--continue` with cwd `/data/claude-tasks/project` | mechanism verified (cwd-scoped); confirm with new cwd |
 
 **PR 2 (notifier) — one live pass on an iOS + Android pair:**
