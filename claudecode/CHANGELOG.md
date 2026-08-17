@@ -15,6 +15,14 @@ All notable changes to this project will be documented in this file.
   winds down in-flight runs inside the Supervisor deadline, action buttons
   deferred to v1.1 behind nonce provenance, and Tier B (crond) cut from v1.
   Default task model changed from Opus to Fable per user decision.
+  Revised after an install-side review (each suggestion independently
+  verified before folding): git-backed-config token guard via
+  `.git/info/exclude` with an already-tracked check, task-transcript
+  retention, a fail-closed CLI preflight for `auto_update_claude` drift,
+  `paths:` allowed-roots validation plus `.git`/`addon_configs`/rendered-
+  package deny entries, a verb-subcommand CLI (`run`/`disable` auto-allowed
+  interactively, `enable`/`force-run`/`token` always prompt), and entity
+  renames (`claude_tasks_attention` anchor, `claude_tasks_cost_raw` canary).
 
 ## [1.2.65-con.6] - 2026-08-17
 
