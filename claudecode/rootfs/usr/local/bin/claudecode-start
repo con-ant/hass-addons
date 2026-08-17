@@ -17,26 +17,102 @@ OPTS=/data/options.json
 # ---------------------------------------------------------------------------
 # The guarantee: always end in ttyd.
 # ---------------------------------------------------------------------------
+# Seconds a running Claude gets to exit after SIGTERM before the tmux server
+# is killed. Must fit inside config.yaml's `timeout:` (30) together with the
+# ttyd teardown below; the README/CHANGELOG quote this number.
+STOP_GRACE_SECS=10
+
+cd_work() { cd /homeassistant 2>/dev/null || cd /; }
+
+# ttyd is not exec'd: this script stays PID 1's child so a Supervisor stop
+# reaches it (see on_stop) and can wind Claude down before the container is
+# torn down. It still exits with ttyd's status, so ttyd dying ends the
+# container exactly as before. The subshell resets INT/QUIT, which bash
+# ignores in background jobs; ttyd's ptys would otherwise inherit that.
 start_ttyd() {
-  cd /homeassistant 2>/dev/null || cd /
+  cd_work
   # shellcheck disable=SC2086  # SHELL_CMD is intentionally word-split
-  exec ttyd --port 7681 --writable --ping-interval 30 --max-clients 5 \
+  ( trap - INT QUIT; exec ttyd --port 7681 --writable --ping-interval 30 --max-clients 5 \
     --index /usr/share/ttyd/index.html \
     -t "fontSize=${FONT_SIZE:-14}" \
     -t fontFamily=Monaco,Consolas,monospace \
     -t scrollback=20000 \
     -t macOptionClickForcesSelection=true \
     -t "theme=${COLORS:-background=#1e1e2e,foreground=#cdd6f4,cursor=#f5e0dc}" \
-    ${SHELL_CMD:-bash --login}
+    ${SHELL_CMD:-bash --login} ) &
+  TTYD_PID=$!
+  wait "$TTYD_PID"
+  exit $?
 }
 on_abort() {
   echo "[ERROR] Startup aborted (exit $1); starting a bare terminal so you can debug from inside the add-on"
   trap - EXIT
   start_ttyd
 }
-# A Supervisor stop/restart mid-startup must end the container, not start a
-# terminal: bash runs the EXIT trap on an untrapped SIGTERM, so clear it first.
-trap 'trap - EXIT; exit 143' TERM INT HUP
+
+# Stop: with init:true only this process gets the Supervisor's SIGTERM. A
+# Claude running under tmux (pre-started at boot or opened from the terminal)
+# or directly under ttyd would otherwise be SIGKILLed when the container is
+# torn down - mid tool call, with its Remote Control session left dangling.
+#
+# Every terminal - a tmux pane or a ttyd pty - is rooted at claude-auto-launch
+# (or a shell); claude and anything it spawned are that root's descendants.
+# Signal the descendants, never the root: killing the root closes the pty and
+# SIGHUPs claude the instant after its SIGTERM. The wrapper sees claude exit
+# 143 and drops to a login shell, which tmux kill-server / ttyd's own teardown
+# clean up.
+descendants() {  # $1 = pid -> all descendant pids, depth first
+  local kid
+  for kid in $(pgrep -P "$1" 2>/dev/null); do
+    echo "$kid"
+    descendants "$kid"
+  done
+}
+stop_sessions() {
+  local root pids="" pid alive i
+  for root in $(tmux list-panes -a -F '#{pane_pid}' 2>/dev/null) \
+              $([ -n "$TTYD_PID" ] && pgrep -P "$TTYD_PID" 2>/dev/null); do
+    pids="$pids $(descendants "$root")"
+  done
+  for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
+  # A browser (re)connecting now would spawn a fresh Claude that we then kill:
+  # stop ttyd first when tmux holds the sessions (its ttyd children are only
+  # tmux clients). Without tmux the pty IS the session, so ttyd waits.
+  local tmux_mode=""
+  if tmux has-session 2>/dev/null; then tmux_mode=1; stop_ttyd; fi
+  for ((i = 0; i < STOP_GRACE_SECS * 2; i++)); do
+    alive=""
+    for pid in $pids; do kill -0 "$pid" 2>/dev/null && alive=1; done
+    [ -n "$alive" ] || break
+    sleep 0.5
+  done
+  [ -n "$alive" ] && warn "Claude did not exit within ${STOP_GRACE_SECS}s; stopping anyway"
+  [ -n "$tmux_mode" ] && tmux kill-server 2>/dev/null
+  return 0
+}
+stop_ttyd() {
+  [ -n "$TTYD_PID" ] || return 0
+  kill -TERM "$TTYD_PID" 2>/dev/null
+  local i
+  for ((i = 0; i < 10; i++)); do
+    kill -0 "$TTYD_PID" 2>/dev/null || break
+    sleep 0.5
+  done
+  kill -KILL "$TTYD_PID" 2>/dev/null
+  wait "$TTYD_PID" 2>/dev/null
+  TTYD_PID=""
+}
+on_stop() {
+  trap - EXIT TERM INT HUP
+  stop_sessions
+  stop_ttyd
+  exit 143
+}
+# A Supervisor stop/restart must end the container, not start a terminal:
+# bash runs the EXIT trap on an untrapped SIGTERM, so on_stop clears it first.
+# (A SIGTERM that lands while a startup step is in the foreground is acted on
+# when that step returns; the steps are individually bounded by `timeout`.)
+trap on_stop TERM INT HUP
 trap 'on_abort $?' EXIT
 
 info() { echo "[INFO] $*"; }
@@ -290,18 +366,21 @@ build_shell_cmd() {
   export CLAUDE_FLAGS AUTO_LAUNCH_ARGS
   info "Auto-launch: $AUTO_LAUNCH; remote-control: $ENABLE_RC"
 
-  if [ "$SESSION_PERSIST" = "true" ]; then
-    if [ "$AUTO_LAUNCH" != "off" ]; then
-      SHELL_CMD='tmux new-session -A -s claude /usr/local/bin/claude-auto-launch'
-    else
-      SHELL_CMD='tmux new-session -A -s claude'
-    fi
+  # What each terminal runs; under tmux it is the pane command.
+  local pane_cmd
+  if [ "$AUTO_LAUNCH" != "off" ]; then
+    pane_cmd=/usr/local/bin/claude-auto-launch
   else
-    if [ "$AUTO_LAUNCH" != "off" ]; then
-      SHELL_CMD='/usr/local/bin/claude-auto-launch'
-    else
-      SHELL_CMD='bash --login'
-    fi
+    pane_cmd=""
+  fi
+  if [ "$SESSION_PERSIST" = "true" ]; then
+    # ttyd attaches (-A) to the `claude` session; prestart_session creates it
+    # detached (-d) with the same pane command.
+    SHELL_CMD="tmux new-session -A -s claude${pane_cmd:+ $pane_cmd}"
+    PRESTART_CMD="tmux new-session -d -s claude${pane_cmd:+ $pane_cmd}"
+  else
+    SHELL_CMD="${pane_cmd:-bash --login}"
+    PRESTART_CMD=""
   fi
 }
 
@@ -318,7 +397,34 @@ install_extra_npm_packages
 check_claude
 configure_mcp
 apply_settings
+# ttyd only spawns SHELL_CMD when a browser connects, so on a headless box
+# nothing runs after a restart until somebody opens the web terminal - and
+# Remote Control, whose whole point is running unattended, stays down. When
+# Remote Control is on, create the tmux session detached before ttyd starts;
+# ttyd's `tmux new-session -A` then attaches to it instead of creating it.
+#
+# This must run before ttyd: the first `new-session` starts the tmux server,
+# which takes its environment (HA_TOKEN, CLAUDE_FLAGS, AUTO_LAUNCH_ARGS, the
+# Remote Control prefix) from this process; later panes inherit the server's.
+prestart_session() {
+  [ "$ENABLE_RC" = "true" ] || return 0
+  [ "$AUTO_LAUNCH" != "off" ] || return 0
+  if [ "$SESSION_PERSIST" != "true" ]; then
+    warn "enable_remote_control is on but session_persistence is off: without tmux nothing can hold a Claude session, so Remote Control will not connect until the web terminal is opened"
+    return 0
+  fi
+  cd_work
+  local out
+  # shellcheck disable=SC2086  # PRESTART_CMD is intentionally word-split
+  if out=$($PRESTART_CMD 2>&1); then
+    info "Claude session started at boot; Remote Control does not wait for a browser"
+  else
+    warn "Could not pre-start the Claude session (${out:-no output}); it will start when the web terminal is opened"
+  fi
+}
+
 build_shell_cmd
+prestart_session
 
 trap - EXIT
 start_ttyd

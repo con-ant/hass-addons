@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.6] - 2026-08-17
+
+### Fixed
+- **With Remote Control on, the Claude session now starts with the container.**
+  ttyd only spawns its command when a browser connects, so after an add-on
+  restart nothing ran - no tmux session, no Claude, no Remote Control - until
+  somebody opened the web terminal. Confirmed on a live install: 2m05s of
+  `started` with the health check passing and Claude not existing. When
+  `enable_remote_control` is on (and `auto_launch_claude` is not `off`) the
+  startup script now creates the tmux session detached before handing off to
+  ttyd, and ttyd's `tmux new-session -A` attaches to it. This needs
+  `session_persistence: true`; if it is off a `[WARN]` says Remote Control
+  will wait for the terminal as before. Installs without Remote Control are
+  unchanged: nothing runs until the terminal is opened.
+- **Stopping or restarting the add-on now shuts Claude down cleanly.** With
+  `init: true` only the startup script receives the Supervisor's SIGTERM;
+  ttyd was `exec`'d in its place and a running Claude - under tmux or directly
+  under ttyd - was SIGKILLed when the container was torn down, mid tool call,
+  with its Remote Control session left dangling on claude.ai/code. ttyd now
+  runs as a child of the startup script, which on SIGTERM sends Claude (and
+  anything it spawned) a SIGTERM, waits up to 10s for it to exit, then tears
+  down tmux and ttyd. `config.yaml` sets `timeout: 30` so the Supervisor
+  allows that.
+
 ## [1.2.65-con.5] - 2026-08-17
 
 ### Changed
