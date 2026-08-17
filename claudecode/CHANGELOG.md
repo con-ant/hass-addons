@@ -107,6 +107,18 @@ All notable changes to this project will be documented in this file.
   stitches fragments with line breaks (they are separate lines; nothing to
   join) — the README now points to the click instead.
 
+## [Unreleased]
+
+### Changed
+- Recorded upstream `robsonfelix/robsonfelix-hass-addons` main (through
+  v1.2.65) as merged, using an "ours" merge that keeps this fork's tree
+  byte-for-byte unchanged. All upstream changes through v1.2.65 — the
+  remote-control options (v1.2.64), the AVX/AppArmor/token-leak fixes
+  (v1.2.65), the French translation, and the playwright-browser base-image
+  fix — were already incorporated and adapted in 1.2.65-con.1. This merge
+  only fixes the fork's ancestry so GitHub no longer reports main as
+  behind upstream. No functional changes; no release required.
+
 ## [1.2.65-con.2] - 2026-08-14
 
 ### Added
