@@ -2,6 +2,81 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.4] - 2026-08-17
+
+### Fixed
+- **Auto-launch now supervises Claude instead of running it once.** The wrapper
+  ran `claude $AUTO_LAUNCH_ARGS` and fell through to `exec bash --login` on any
+  exit. That is correct when the user types `/exit`, but it also meant a crash
+  or a dropped session quietly ended Remote Control: the add-on stayed
+  "started", ingress still served a terminal, and nothing reconnected until
+  somebody opened the web terminal and relaunched by hand — which defeats the
+  point of `auto_launch_claude: continue` on an unattended box. A non-zero exit
+  now relaunches with `--continue`, so the machine recovers its own session; a
+  clean exit still drops to the login shell exactly as before. Backoff doubles
+  from 2s to a 60s ceiling and resets once a run has lasted a minute, so a
+  genuine crash loop backs off while a long-lived session that dies once comes
+  back promptly. Relaunch always adds `--continue`, including when
+  `auto_launch_claude` is `new` — after an unexpected exit the conversation
+  that just died is the one worth resuming.
+  Relaunching is decided on the exit status, not merely on "non-zero": status 0
+  (`/exit`), 130 (SIGINT, Ctrl-C), 143 (SIGTERM, the supervisor stopping us) and
+  129 (SIGHUP, ttyd's configured close signal) are all somebody meaning it, and
+  hand over to the login shell. Without that, Ctrl-C could never reach a shell -
+  it would relaunch on the backoff forever - and a shutdown would spend its grace
+  period relaunching. 137 (SIGKILL) is deliberately treated as a crash: an OOM
+  kill is exactly the case worth recovering from, and during a real container
+  kill the loop dies with the container anyway.
+  SIGINT is trapped rather than fatal. In a fast crash loop the wrapper spends
+  nearly all its time in the backoff sleep, which is exactly when someone reaches
+  for Ctrl-C; an untrapped SIGINT there kills the script outright, so it never
+  reaches the login-shell handover and the respawn relaunches the failing claude -
+  leaving no shell precisely when a shell is what you need to recover (downgrade
+  the CLI, `/login`, repair settings). A `trap 'interrupted=1' INT` plus a check
+  after the sleep routes that to the same handover as the 130 case. While claude
+  itself runs the terminal is in raw mode, so the trap only fires during the sleep
+  and the exit-status paths are unaffected.
+  The loop also gives up on a claude that cannot start at all: five consecutive
+  runs that each died within 5s means it is failing deterministically (an unknown
+  flag after a CLI update, a corrupted install, an incompatible runtime), and no
+  amount of relaunching helps - but a shell does. It logs an ERROR and drops to
+  the login shell. Real crashes are long runs that die occasionally and never
+  accumulate consecutive fast failures, so unattended recovery is unaffected.
+  Without the cap the loop was unescapable in exactly the case where a shell is
+  needed to fix it.
+  Verified with a stubbed `claude` across every exit path: 0, 129, 130 and 143
+  reach the login shell without relaunching; 1 and 137 relaunch with `--continue`
+  at 2s, 4s, 8s. The Ctrl-C case was reproduced by delivering SIGINT to the
+  wrapper's process group mid-sleep, as a terminal does: without the trap the
+  login shell is never reached, with it the handover happens. The give-up cap
+  was verified in both directions: five instant failures reach the shell in
+  about a second; runs of 6s each that die twice relaunch normally and never
+  trip it.
+
+### Added
+- **Pre-flight login check with a reason in the log.** The claude.ai OAuth
+  *refresh* token does not slide forward when the access token renews — an
+  access-token refresh moves `expiresAt` while leaving `refreshTokenExpiresAt`
+  untouched — so the login lapses on a fixed date even on a box that never stops
+  running. Once it has, `claude --continue --remote-control` opens an
+  interactive login prompt that a Remote Control client cannot answer: the
+  session simply never connects and the log says nothing. The wrapper now reads
+  `refreshTokenExpiresAt` from `/root/.claude/.credentials.json` and logs an
+  ERROR when it has passed (naming `/login` as the fix) or a WARN inside five
+  days. Nothing is emitted unless that field is present and numeric, so
+  `ANTHROPIC_API_KEY` installs, a missing file, and a half-written file stay
+  silent — verified against `{}`, malformed JSON, a string-typed field, an
+  already-expired timestamp, and a live credentials file.
+  The check runs before EVERY launch, not only the first. On an unattended box
+  the token lapses mid-supervision, weeks after the wrapper started, and the
+  relaunch that follows is exactly the launch that strands; a one-shot check at
+  start would have passed back then and said nothing now. Verified by letting
+  the token expire during a stubbed run and then crashing it: the ERROR is
+  printed before the relaunch. And "expired" means a negative day count, not
+  zero: `floor()` turns 12 remaining hours into 0, which the previous `-le 0`
+  read as expired and reported as an ERROR on the one day it matters most that
+  the message be trusted. Zero now reads "expires today".
+
 ## [1.2.65-con.3] - 2026-08-17
 
 ### Fixed
