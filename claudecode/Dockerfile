@@ -215,19 +215,38 @@ CMD ["/bin/bash", "-c", "\
     echo '[INFO] Removed a Supervisor token that older versions persisted into settings.json'; \
     echo '[INFO] That file lives in your HA config dir and is included in backups'; \
   fi && \
-  if ! grep -qw avx /proc/cpuinfo 2>/dev/null; then \
-    echo '[WARN] This CPU does not expose AVX. Claude Code 2.1.113+ is a Bun-compiled'; \
-    echo '[WARN] binary that requires it, so this add-on is running an older release.'; \
-    echo '[WARN] On Proxmox set the VM CPU type to \"host\" (or x86-64-v3), then fully'; \
+  BUILT_VERSION=$(cat /etc/claude-code-version 2>/dev/null || echo unknown) && \
+  AVX_FALLBACK=false && \
+  if [ \"$(uname -m)\" = \"x86_64\" ] && ! grep -qw avx /proc/cpuinfo 2>/dev/null \
+     && [ \"$(printf '%s\n' \"$BUILT_VERSION\" 2.1.113 | sort -V | head -n 1)\" != \"2.1.113\" ]; then \
+    AVX_FALLBACK=true && \
+    echo '[WARN] This CPU does not expose AVX. Claude Code 2.1.113+ is a Bun-compiled' && \
+    echo \"[WARN] binary that requires it, so this add-on is running $BUILT_VERSION instead.\" && \
+    echo '[WARN] On Proxmox set the VM CPU type to \"host\" (or x86-64-v3), then fully' && \
     echo '[WARN] stop and start the VM. Verify with: grep -o -m1 avx2 /proc/cpuinfo'; \
   fi && \
-  BUILT_VERSION=$(cat /etc/claude-code-version 2>/dev/null || echo unknown) && \
   if [ \"$AUTO_UPDATE\" = \"true\" ]; then \
-    echo \"[WARN] auto_update_claude=true; the build verified $BUILT_VERSION, an update may install a release that cannot run (and writes to the container layer)\" && \
-    timeout 300 npm update -g @anthropic-ai/claude-code || echo '[WARN] Update failed; keeping the installed version'; \
-    if ! timeout 30 claude --version < /dev/null > /dev/null 2>&1; then \
-      echo \"[ERROR] The updated Claude Code does not run here; rolling back to $BUILT_VERSION\" && \
-      timeout 300 npm install -g @anthropic-ai/claude-code@$BUILT_VERSION || echo '[ERROR] Rollback failed'; \
+    SKIP_UPDATE=false && \
+    if [ \"$AVX_FALLBACK\" = \"true\" ]; then \
+      LATEST=$(timeout 60 npm view @anthropic-ai/claude-code version 2>/dev/null || echo unknown) && \
+      if [ \"$LATEST\" = \"unknown\" ]; then \
+        SKIP_UPDATE=true && \
+        echo \"[INFO] auto_update_claude=true, but the latest release could not be checked; keeping $BUILT_VERSION\"; \
+      elif [ \"$(printf '%s\n' \"$LATEST\" 2.1.113 | sort -V | head -n 1)\" = \"2.1.113\" ]; then \
+        SKIP_UPDATE=true && \
+        echo \"[INFO] auto_update_claude=true, but the latest release ($LATEST) needs AVX this CPU lacks; keeping $BUILT_VERSION\"; \
+      else \
+        echo \"[WARN] auto_update_claude=true; the build verified $BUILT_VERSION, an update may install a release that cannot run (and writes to the container layer)\"; \
+      fi; \
+    else \
+      echo \"[INFO] auto_update_claude=true; updating from the build-verified $BUILT_VERSION (updates write to the container layer and do not survive a rebuild)\"; \
+    fi && \
+    if [ \"$SKIP_UPDATE\" != \"true\" ]; then \
+      timeout 300 npm update -g @anthropic-ai/claude-code || echo '[WARN] Update failed; keeping the installed version'; \
+      if ! timeout 30 claude --version < /dev/null > /dev/null 2>&1; then \
+        echo \"[ERROR] The updated Claude Code does not run here; rolling back to $BUILT_VERSION\" && \
+        timeout 300 npm install -g @anthropic-ai/claude-code@$BUILT_VERSION || echo '[ERROR] Rollback failed'; \
+      fi; \
     fi; \
   else \
     echo \"[INFO] Claude Code $BUILT_VERSION (verified at build time)\"; \

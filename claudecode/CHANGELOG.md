@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.5] - 2026-08-17
+
+### Fixed
+- **Spurious AVX warning on hosts that run current Claude Code fine.** The
+  startup warning ("This CPU does not expose AVX ... running an older release")
+  was keyed solely to `grep -qw avx /proc/cpuinfo`, not to what the build
+  actually installed. On aarch64 the flag never exists (ARM has no AVX and the
+  ARM binary doesn't need it), and the log could therefore claim an older
+  release was running directly above the line saying the build verified a
+  current one (e.g. 2.1.233). The warning now fires only when the fallback
+  really happened: x86_64, no `avx` flag, AND the build-verified version is
+  below 2.1.113. It also names the version it fell back to.
+- **Auto-update no longer warns "may install a release that cannot run" on
+  every start regardless of the CPU.** With `auto_update_claude: true` the WARN
+  printed unconditionally. It is now an INFO on hosts where the build verified
+  a current release; the WARN is reserved for genuinely AVX-limited hosts.
+- **No more futile update/rollback cycle on AVX-limited hosts.** When the
+  add-on is pinned to a pre-2.1.113 release for lack of AVX, `npm update`
+  would install the latest release (which cannot run), fail the smoke test,
+  and roll back — a couple of wasted minutes and container-layer writes on
+  every single start. Startup now checks the latest published version first
+  and skips the update with one INFO line while it still requires AVX; the
+  update-verify-rollback path remains for every other case.
+
 ## [1.2.65-con.4] - 2026-08-17
 
 ### Fixed

@@ -302,7 +302,8 @@ Claude Code 2.1.113+ ships as a Bun-compiled native binary whose JavaScript engi
 
 Mitigations already built in:
 - The image build installs the newest Claude Code release that actually runs on the build host (`install-claude.sh` smoke-tests candidates), so a rebuild on an AVX-less host still produces a working add-on.
-- At startup, all `claude` calls are wrapped in timeouts, so a broken binary can't block the terminal from starting; a `[WARN]` in the log tells you AVX is missing.
+- At startup, all `claude` calls are wrapped in timeouts, so a broken binary can't block the terminal from starting; a `[WARN]` in the log tells you when the add-on is actually running a pre-2.1.113 release because AVX is missing. The warning only appears on x86 hosts where the build really did fall back — aarch64 CPUs never list an `avx` flag and don't need one, and a host whose build verified a current release is left alone.
+- With `auto_update_claude: true` on such a host, the update is skipped (with an `[INFO]` line) when the latest release still needs AVX, instead of installing it, watching it fail, and rolling back on every start.
 
 The real fix is at the hypervisor: on Proxmox set the VM CPU type to `host` (or `x86-64-v3`), then fully stop and start the VM. Verify inside the add-on with `grep -o -m1 avx2 /proc/cpuinfo`.
 
