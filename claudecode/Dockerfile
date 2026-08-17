@@ -184,7 +184,7 @@ CMD ["/bin/bash", "-c", "\
   export HA_URL=\"http://supervisor/core\" && \
   PERSIST_DIR=/homeassistant/.claudecode && \
   mkdir -p $PERSIST_DIR/config $PERSIST_DIR/gh /root/.config && \
-  cp /usr/share/claudecode/CLAUDE.addon.md $PERSIST_DIR/CLAUDE.md && \
+  cp /usr/share/claudecode/CLAUDE.addon.md $PERSIST_DIR/CLAUDE.md || echo '[WARN] Could not refresh CLAUDE.md in the config dir' && \
   if [ ! -f $PERSIST_DIR/CLAUDE.user.md ]; then \
     printf '%s\n' \
       '# User Instructions' \
@@ -208,12 +208,21 @@ CMD ["/bin/bash", "-c", "\
   PLAYWRIGHT_HOST=$(jq -r '.playwright_cdp_host // \"\"' /data/options.json) && \
   AUTO_UPDATE=$(jq -r '.auto_update_claude // false' /data/options.json) && \
   SETTINGS_FILE=/root/.claude/settings.json && \
-  [ -f \"$SETTINGS_FILE\" ] || echo '{}' > \"$SETTINGS_FILE\" && \
+  SETTINGS_TMP=\"$SETTINGS_FILE.tmp\" && \
+  settings_set() { jq \"$@\" \"$SETTINGS_FILE\" > \"$SETTINGS_TMP\" && mv \"$SETTINGS_TMP\" \"$SETTINGS_FILE\" || { rm -f \"$SETTINGS_TMP\"; return 1; }; } && \
+  { [ -f \"$SETTINGS_FILE\" ] || echo '{}' > \"$SETTINGS_FILE\"; } || echo '[WARN] Could not create settings.json' && \
+  if ! jq -e . \"$SETTINGS_FILE\" > /dev/null 2>&1; then \
+    echo '[WARN] settings.json does not parse; moving it aside and starting a fresh one' && \
+    mv \"$SETTINGS_FILE\" \"$SETTINGS_FILE.corrupt.$(date +%s)\" 2>/dev/null; \
+    echo '{}' > \"$SETTINGS_FILE\" || echo '[WARN] Could not reset settings.json'; \
+  fi && \
   if jq -e '.mcpServers.homeassistant.env.HASS_TOKEN' \"$SETTINGS_FILE\" > /dev/null 2>&1; then \
-    jq 'del(.mcpServers.homeassistant.env.HASS_TOKEN)' \"$SETTINGS_FILE\" > /tmp/settings.tmp && \
-    mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
-    echo '[INFO] Removed a Supervisor token that older versions persisted into settings.json'; \
-    echo '[INFO] That file lives in your HA config dir and is included in backups'; \
+    if settings_set 'del(.mcpServers.homeassistant.env.HASS_TOKEN)'; then \
+      echo '[INFO] Removed a Supervisor token that older versions persisted into settings.json'; \
+      echo '[INFO] That file lives in your HA config dir and is included in backups'; \
+    else \
+      echo '[WARN] Could not strip the persisted Supervisor token from settings.json - it is still there'; \
+    fi; \
   fi && \
   if ! grep -qw avx /proc/cpuinfo 2>/dev/null; then \
     echo '[WARN] This CPU does not expose AVX. Claude Code 2.1.113+ is a Bun-compiled'; \
@@ -235,9 +244,18 @@ CMD ["/bin/bash", "-c", "\
   EXTRA_NPM_PREFIX=/homeassistant/.claudecode/npm-global && \
   EXTRA_PKGS=$(jq -r '.extra_npm_packages // [] | join(\" \")' /data/options.json) && \
   if [ -n \"$EXTRA_PKGS\" ]; then \
-    mkdir -p \"$EXTRA_NPM_PREFIX\" && \
-    echo \"[INFO] Installing extra_npm_packages: $EXTRA_PKGS\" && \
-    npm install -g --prefix=\"$EXTRA_NPM_PREFIX\" $EXTRA_PKGS 2>&1 | tail -5 || echo '[WARN] Some extra_npm_packages failed to install'; \
+    if ! mkdir -p \"$EXTRA_NPM_PREFIX\"; then \
+      echo \"[WARN] Could not create $EXTRA_NPM_PREFIX; skipping extra_npm_packages\"; \
+    elif echo \"[INFO] Installing extra_npm_packages: $EXTRA_PKGS\" && timeout 180 npm install -g --prefix=\"$EXTRA_NPM_PREFIX\" $EXTRA_PKGS > /tmp/npm-extra.log 2>&1; then \
+      tail -5 /tmp/npm-extra.log; \
+    else \
+      NPM_RC=$?; tail -5 /tmp/npm-extra.log; \
+      if [ \"$NPM_RC\" = 124 ]; then \
+        echo '[WARN] extra_npm_packages install timed out after 180s (registry unreachable or slow); continuing without them'; \
+      else \
+        echo \"[WARN] extra_npm_packages install failed (npm exit $NPM_RC); continuing without them\"; \
+      fi; \
+    fi; \
   fi && \
   if timeout 30 claude --version < /dev/null > /dev/null 2>&1; then \
     CLAUDE_OK=true; \
@@ -253,9 +271,12 @@ CMD ["/bin/bash", "-c", "\
   if [ \"$CLAUDE_OK\" = \"true\" ] && [ \"$ENABLE_MCP\" = \"true\" ]; then \
     timeout 30 claude mcp add-json homeassistant '{\"command\":\"hass-mcp\"}' -s user && \
     ALLOWED_TOOLS='[\"mcp__homeassistant__get_version\",\"mcp__homeassistant__get_entity\",\"mcp__homeassistant__list_entities\",\"mcp__homeassistant__search_entities_tool\",\"mcp__homeassistant__domain_summary_tool\",\"mcp__homeassistant__list_automations\",\"mcp__homeassistant__get_history\",\"mcp__homeassistant__get_error_log\",\"Read(/homeassistant/**)\",\"Read(/config/**)\",\"Read(/share/**)\",\"Read(/media/**)\",\"Glob(/homeassistant/**)\",\"Glob(/config/**)\",\"Grep(/homeassistant/**)\",\"Grep(/config/**)\"]' && \
-    jq --argjson tools \"$ALLOWED_TOOLS\" '.permissions.allow = ($tools + (.permissions.allow // []) | unique)' $SETTINGS_FILE > /tmp/settings.tmp && mv /tmp/settings.tmp $SETTINGS_FILE && \
     echo '[INFO] MCP configured with Home Assistant integration'; \
-    echo '[INFO] Pre-authorized read-only MCP tools'; \
+    if settings_set --argjson tools \"$ALLOWED_TOOLS\" '.permissions.allow = ($tools + (.permissions.allow // []) | unique)'; then \
+      echo '[INFO] Pre-authorized read-only MCP tools'; \
+    else \
+      echo '[WARN] Could not pre-authorize MCP tools in settings.json'; \
+    fi; \
   elif [ \"$ENABLE_MCP\" = \"true\" ]; then \
     echo '[WARN] MCP is enabled but was skipped: the claude CLI is not responding'; \
   else \
@@ -275,15 +296,18 @@ CMD ["/bin/bash", "-c", "\
     echo '[INFO] Playwright MCP disabled'; \
   fi && \
   DEFAULT_MODE=$(jq -r '.default_permission_mode // \"auto\"' /data/options.json) && \
-  jq --arg mode \"$DEFAULT_MODE\" '.permissions.defaultMode = $mode' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
-  echo \"[INFO] Default permission mode: $DEFAULT_MODE\" && \
+  if settings_set --arg mode \"$DEFAULT_MODE\" '.permissions.defaultMode = $mode'; then \
+    echo \"[INFO] Default permission mode: $DEFAULT_MODE\"; \
+  else \
+    echo \"[WARN] Could not set permissions.defaultMode=$DEFAULT_MODE in settings.json\"; \
+  fi && \
   ENABLE_RC=$(jq -r '.enable_remote_control // false' /data/options.json) && \
   RC_PREFIX=$(jq -r '.remote_control_session_prefix // \"HomeAssistant\"' /data/options.json) && \
   if [ \"$ENABLE_RC\" = \"true\" ]; then \
-    jq '.remoteControlAtStartup = true' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
+    settings_set '.remoteControlAtStartup = true' || echo '[WARN] Could not enable remoteControlAtStartup in settings.json'; \
     export CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX=\"$RC_PREFIX\"; \
   else \
-    jq 'del(.remoteControlAtStartup)' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\"; \
+    settings_set 'del(.remoteControlAtStartup)' || echo '[WARN] Could not clear remoteControlAtStartup in settings.json'; \
   fi && \
   if [ \"$THEME\" = \"dark\" ]; then \
     COLORS='background=#1e1e2e,foreground=#cdd6f4,cursor=#f5e0dc'; \

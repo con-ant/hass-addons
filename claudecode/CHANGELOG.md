@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.5] - 2026-08-17
+
+### Fixed
+- **A setup failure can no longer leave the add-on with no terminal.** The
+  startup script is one `&&` chain ending in `exec ttyd`, so any unguarded
+  failure short-circuited before the terminal started - the add-on came up with
+  no shell and no way to diagnose it from inside. The likeliest trigger was a
+  `settings.json` that no longer parses. It is now validated at startup and, if
+  broken, moved aside as `settings.json.corrupt.<epoch>` and replaced with `{}`;
+  every write to it goes through one guarded helper and downgrades to a
+  `[WARN]` on failure, and success messages print only when the write actually
+  succeeded.
+- **`settings.json` is written atomically.** The temp file used to live in
+  `/tmp`, on a different filesystem from the target on the HA volume, so the
+  final `mv` was a copy-then-unlink rather than a rename and an interruption
+  could truncate the file that holds the permission rules, MCP config and
+  `remoteControlAtStartup`. It now sits beside the target.
+- **`extra_npm_packages` can no longer hang or break startup.** The install had
+  no timeout and its failure was never reported. It is bounded at 180s - under
+  the ~100s Docker HEALTHCHECK and ~240s Supervisor watchdog windows, so a slow
+  registry cannot get the container restarted mid-install - and a timeout or
+  install error is logged and skipped. A failure to create the install
+  directory is likewise skipped, not fatal.
+
 ## [1.2.65-con.4] - 2026-08-17
 
 ### Fixed
