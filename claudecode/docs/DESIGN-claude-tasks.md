@@ -2,7 +2,9 @@
 
 > A design for scheduled, unattended Claude runs inside the Claude Code add-on — health checks, reports, and anything else worth doing while nobody is watching — that notify through Home Assistant and stay out of the interactive session's way.
 
-_design v1 · 2026-08-17 · **status: proposal, nothing built** · targets this repo on top of #18–#20 · rendered copy: https://claude.ai/code/artifact/e3c91221-2f21-4646-ba3c-032eb1cae27f_
+_design v2 · 2026-08-17 · **status: proposal, nothing built** · targets `main` at con.6 (#18, #24, #25 merged) · rendered copy of v1: https://claude.ai/code/artifact/e3c91221-2f21-4646-ba3c-032eb1cae27f_
+
+> **v2 changes** (after #24/#25 landed and a re-review against them): endpoint and crond now hook into `claudecode-start` and its `on_stop`; the watchdog-based `binary_sensor` and `GET /health`-as-watchdog are removed (a Supervisor watchdog restart kills the live session — see #25); the nesting guard names the real environment markers; the endpoint hostname is the verified `<slug>` form; every PR bumps the version; §13 lists what was verified vs. still assumed.
 
 
 ## Summary
@@ -33,7 +35,7 @@ The gap is not scheduling — HA schedules well. The gap is that the scheduled t
 
 ## 2 · Verified facts this design rests on
 
-Everything below was checked on the reference install (HA OS 18.2, add-on 1.2.65-con.4, Claude Code 2.1.233) on 2026-08-17. Where a fact changes the design, it says so.
+Everything below was checked on the reference install (HA OS 18.2, add-on 1.2.65-con.4 → con.6 during the day, Claude Code 2.1.233) on 2026-08-17. Where a fact changes the design, it says so. Facts marked *(assumed)* were **not** verified and are called out again in §13.
 
 | Fact | Evidence | Consequence |
 |---|---|---|
@@ -44,6 +46,10 @@ Everything below was checked on the reference install (HA OS 18.2, add-on 1.2.65
 | `persistent_notification` and `notify.notify` exist on every HA | Present on the reference install; both are core | Two channels are guaranteed portable |
 | `mobile_app_*` targets are discoverable at runtime | `GET /core/api/services` lists `notify.mobile_app_pixel_8a`, `…_pixel_9_pro_xl` | The notifier enumerates phones; nothing is hard-coded to this house |
 | ttyd cannot host a second HTTP route | `ttyd --help`: index, base-path, auth — no route table | The trigger endpoint is its own small listener |
+| Add-ons resolve by `<slug-with-dashes>` on the hassio network | From inside this add-on, `http://d5369777-music-assistant:8095/` → 200; the bare short name does not resolve | HA's `rest_command` targets `http://d7e97e69-claudecode:7682` (slug prefix is per-install; the shipped package templates it) |
+| The add-on's AppArmor profile already grants `network` | `apparmor.txt` line 18 | A second listener needs no profile change |
+| Startup is one function per step in `claudecode-start`, ttyd runs as a *child* (`TTYD_PID`, `wait`), and `on_stop` handles SIGTERM with a 30s grace (`timeout: 30`) | #24, #25 on `main` | The endpoint and crond are started by new functions in that script and **stopped by `on_stop`** — they must not outlive ttyd or block the grace period |
+| Real interactive-session env markers | This session exports `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID` | The nesting guard tests these, not an invented name |
 | `crond` exists but is not running; `/etc/crontabs` is on the overlay | Alpine busybox crond present; overlay is wiped on rebuild | If crond is used, the add-on starts it and the crontab lives on the mapped volume |
 | Session-scoped cron in Claude Code is not durable | `CronCreate`: in-memory, dies with the session, 7-day cap, fires only when the REPL is idle | Not usable for this |
 | claude.ai routines cannot reach the LAN | They run in Anthropic's cloud | Fine for repo/web work; not for HA |
@@ -153,7 +159,7 @@ The frontmatter is the whole security boundary: `tools` becomes `--allowedTools`
 
 **What the runner does, in order.** Each step is chosen so that a failure at that step still leaves a visible trace.
 
-1. **Refuse to run inside an interactive session.** If `CLAUDE_CODE_SESSION`-style markers or a tmux pane of the `claude` session are detected as the parent, exit with a clear message. A task started from the terminal by hand is fine; a task *nested inside* the interactive Claude is not.
+1. **Refuse to run inside an interactive session.** If `CLAUDECODE` or `CLAUDE_CODE_SESSION_ID` is set in the environment (both are, inside a running Claude Code session — verified), exit with a clear message. A task started from the terminal *shell* by hand is fine (those variables are not set there); a task nested inside the interactive Claude is not. The runner also unsets every `CLAUDE_*` variable before spawning `claude -p`, so a task never inherits the interactive session's identity.
 2. **Lock.** `flock` on `state/.lock`, non-blocking. If held, check the PID inside; if that PID is dead, the lock is stale — break it and log `stale_lock_broken`. If alive, exit with status `skipped` and publish that as the entity state, so an over-eager schedule shows up rather than silently piling up.
 3. **Load and validate the definition.** Missing `tools`, unknown keys, a `timeout` above the hard ceiling, a model that isn't allowed — all fail *before* any tokens are spent, with the reason in the entity.
 4. **Assemble the prompt.** Data the task must look at is gathered by the task's own tools during the run, not pre-injected — so the prompt is the definition body plus the result-contract instruction. Where a task *does* take input from the trigger (e.g. "which day to report on"), it arrives as a typed field from the endpoint, is validated, and is placed *before* the instructions with an explicit "the following is data" frame.
@@ -212,10 +218,10 @@ The reference install would configure `mobile` to its two Pixels (or leave disco
 
 ### 4.4 The trigger endpoint
 
-Home Assistant Core cannot execute a command inside the add-on container, so the add-on exposes a very small HTTP listener — `claude-task-endpoint`, a few dozen lines, started at boot next to ttyd — and HA calls it with a `rest_command`.
+Home Assistant Core cannot execute a command inside the add-on container, so the add-on exposes a very small HTTP listener — `claude-task-endpoint`, a few dozen lines — and HA calls it with a `rest_command`. It is started by a `start_task_endpoint` function in `claudecode-start` (after `configure_mcp`, before `build_shell_cmd`), runs as a background child whose PID the script keeps, and is **stopped by `on_stop`** alongside ttyd — inside the 30s grace period #25 established, and before the tmux server is killed so an in-flight task can finish writing its `state/` file.
 
 ```
-POST http://<addon-hostname>:7682/run/<name>
+POST http://d7e97e69-claudecode:7682/run/<name>       # <slug>-claudecode; verified resolvable from HA
 Authorization: Bearer <token from /data/options.json → task_endpoint_token>
 Content-Type: application/json
 { "input": { "date": "2026-08-16" } }        # optional, typed per task
@@ -225,13 +231,15 @@ Content-Type: application/json
 → 404 unknown task · 401 bad token · 422 input failed validation
 ```
 
-- **Reachability:** bound to the add-on's internal Docker network address only, never published to the host. HA Core reaches it by add-on hostname on that network. Ingress is not involved.
+- **Reachability:** bound to the add-on's own hassio-network address (`172.30.33.x`), never published via `ports:`. HA Core reaches it as `http://<slug>-claudecode:7682` — verified that the `<slug-with-dashes>` form resolves from a sibling add-on and the bare short name does not. Ingress is not involved. No AppArmor change is needed (`network` is already granted).
 - **Auth:** a random token generated at first boot into `/data/`, shown once in the add-on log and available in the options UI; the `rest_command` carries it. Simple, and it means a stray LAN device cannot fire tasks even if it found the port.
 - **Async by design:** a task can run for minutes; `rest_command` has a short timeout. The endpoint returns 202 at once and the *result* arrives through the entity update — HA automations that need it trigger on the entity's state change, not on the HTTP response.
-- **Also exposes** `GET /tasks` (list, with last state) and `GET /health` for the watchdog.
+- **Also exposes** `GET /tasks` (list, with last state) and `GET /health` (200 if the listener is up and the tasks dir is readable). `GET /health` is for the shipped HA package's staleness alarm and for humans — it is **not** wired to a Supervisor `watchdog:`; see the box below.
 
 
-### 4.5 Scheduling tiers
+#> ⚠️ **No Supervisor `watchdog:` for the endpoint — deliberately.** v1 of this design (and #20) proposed one. #25 dropped it with reasoning that holds here too: Supervisor's TCP probe only runs once the add-on is `STARTED`, its miss counter never resets on success, and a watchdog restart **kills the live interactive session** — the exact thing this add-on exists to keep alive. A dead endpoint should be a loud entity in HA (§9), not a container restart.
+
+## 4.5 Scheduling tiers
 
 ```mermaid
 flowchart TB
@@ -250,6 +258,8 @@ flowchart TB
 ```
 
 _Almost everything is Tier A. Tier B exists for the two or three checks whose whole point is that HA might not be able to run them: "is Core answering", "is the DB intact", "did the backup job complete"._
+
+**How crond is started and stopped.** By a `start_task_cron` function in `claudecode-start`, only when `enable_task_scheduler` is on: `crond -f -c /homeassistant/.claudecode/tasks/cron.d` as a background child (the crontab lives on the mapped volume; `/etc/crontabs` is on the overlay and would be wiped). `on_stop` sends it TERM with the others. It is a sibling of ttyd, not a replacement for anything ttyd does.
 
 **Why not crond for everything?** Because HA already gives you a schedule editor, traces of every run, a per-task kill switch, and the notify integrations. Duplicating that in a crontab means two places to look. crond earns its place only where HA is the thing under test.
 
@@ -374,7 +384,7 @@ The user's own `CLAUDE.user.md` can then add house-specific notes ("the energy t
 | Crash between steps | state/ written last | Previous known-good state remains; next run overwrites |
 | HA down during a Tier B run | state POST fails | Result queued in `state/pending/`, published on next success; `webhook`/mobile channels still fire via Supervisor |
 | Login expired | envelope / pre-flight from PR #18's `check_login` | `error` "claude.ai login expired — run /login"; same message the terminal shows |
-| Endpoint down | `rest_command` fails | The HA automation's own trace shows the failure; a `binary_sensor.claude_task_endpoint` (from `GET /health`) goes off |
+| Endpoint down | `rest_command` fails; `GET /health` unreachable | The HA automation's own trace shows the failure. The shipped package (§11) includes a `command_line`/`rest` binary sensor that polls `GET /health` every 5 min and a staleness alarm on it — an HA-side signal, deliberately **not** a Supervisor watchdog (§4.4) |
 | Bad or missing definition | validation at load | `error` before any tokens are spent |
 
 The rule behind the table: **there is no failure that leaves the entity unchanged.** An entity that stops updating is itself the alarm — a shipped automation can warn if any `sensor.claude_task_*` is older than 2× its schedule.
@@ -395,16 +405,16 @@ Three guards: `max_cost_usd` per task in the frontmatter (over-budget runs are f
 
 ## 11 · Delivery as pull requests
 
-Four PRs, each independently reviewable and useful, in the order they build on each other. They assume #19 and #20 have landed (the boot sequence they extend).
+Four PRs, each independently reviewable and useful, in the order they build on each other. They build on `main` at con.6 (#24's `claudecode-start` and #25's boot-time session + `on_stop`). **Each PR bumps `1.2.65-con.N`** — a version that is already on `main` reaches no installed add-on, so a change without a bump does not ship (lesson from #19's review). Each adds a `## [con.N]` section under `### Added/Changed/Fixed`, ~20 lines of user-facing what/why; verification tables stay in the PR body and commit message.
 
 | PR | Contents | Ships value on its own? |
 |---|---|---|
 | **1 · Runner** | `claude-task`, task-file format and validator, `_project/` isolation, result contract, entity publish, logs/state. `CLAUDE.addon.md` section. Docs. | Yes: a human can write a task and run it from the terminal, and it shows up in HA. Its headline rationale — headless runs poisoning `--continue` — is a latent bug for any user who runs `claude -p` in the add-on today. |
 | **2 · Notifier** | `claude-notify`, channel resolution, `_notify.yaml`, critical payloads for iOS/Android, TTS snapshot/restore, `webhook`. | Yes: PR 1's results reach phones. |
-| **3 · Endpoint + scheduler option** | `claude-task-endpoint`, token, `enable_task_scheduler` add-on option, crond start at boot with the crontab on the volume, `GET /health`. | Yes: HA can now schedule tasks; Tier B possible. |
+| **3 · Endpoint + scheduler option** | `claude-task-endpoint`, token, `enable_task_scheduler` add-on option; `start_task_endpoint` / `start_task_cron` functions in `claudecode-start` and their teardown in `on_stop`; crontab on the volume; `GET /health`. | Yes: HA can now schedule tasks; Tier B possible. |
 | **4 · HA package** | An optional `packages/claudecode_tasks.yaml`: `rest_command`, example automations, kill-switch helpers, "run now" buttons, staleness alarm, a Lovelace card. Two example tasks (health-check, energy-report). | Yes: a new user gets the whole surface without hand-assembly. |
 
-PRs 1 and 2 are the valuable half and are where review effort should go. Each will carry the same verification discipline as #18–#20: reproduced-before-fixed, and a sandbox run of the real code paths with the model stubbed.
+PRs 1 and 2 are the valuable half and are where review effort should go. Each will carry the verification discipline #24 and #25 set: run the **real** script (`claudecode-start`, the runner) with paths redirected into a scratch root and `claude`/`curl`/`npm`/`timeout`/`tmux` stubbed as exported functions, tmux on a private `-L` socket, results as a scenario table in the PR body; `bash -n` and `shellcheck -e SC2016` clean; every reviewer finding reproduced before it is fixed. If the maintainer proposes a structurally better shape during review, the answer is to adopt it in that PR, not to defer it.
 
 
 ## 12 · Open questions for reviewers
@@ -430,3 +440,21 @@ Opus by default per the user. Should the add-on ship an `allowed_task_models` op
 ---
 
 Verification notes: every fact in §2 was checked live on 2026-08-17. Probe entities and notifications created during checks were deleted afterwards. No task infrastructure has been built yet; this document is the proposal.
+
+## 13 · What is verified, what is assumed
+
+A reviewer's tooling will test the claims in this document. To save that round-trip, here is which ones already have evidence and which do not.
+
+| Claim | Status | Evidence / what would verify it |
+|---|---|---|
+| `claude -p` runs in the container, returns the JSON envelope, and its transcript lands in the same project dir (poisoning `--continue`) | **verified** | §2 rows 1–2, live probe |
+| Dynamic entity create/delete and service calls via the Supervisor proxy | **verified** | §2 rows 3–4, live probe |
+| `mobile_app_*` discoverable; `notify.notify` and `persistent_notification` present | **verified** | §2 rows 5–6 |
+| `<slug>-claudecode` resolves from HA Core | **verified from a sibling add-on**; not yet from HA Core itself | §2; the shipped `rest_command` will prove it end to end |
+| A second listener needs no AppArmor change | **verified** (`network` granted) | §2 |
+| Endpoint and crond can be started as children of `claudecode-start` and stopped by `on_stop` within the 30s grace | *assumed* — mechanically obvious from #25's shape, but not yet exercised | PR 3's sandbox run |
+| Task transcripts stay out of `--continue` when cwd is `_project/` | *assumed* — follows from how `--continue` selects, but should be tested by running a task and then `claude --continue` in the interactive dir | PR 1's verification |
+| `--allowedTools` + `--permission-mode default` denies everything not listed and reports it in `permission_denials` | *assumed* — the envelope has the field; a deliberate denial test is needed | PR 1's verification |
+| A `sleep 2; has-session` liveness check would be meaningful for a task pane | **withdrawn** — #25 pointed out the pane command never exits, so it cannot fail; the runner's liveness signal is the entity's `running` state and its `timeout`, not tmux |
+| Cost figures in §10 | *estimates* from one Haiku probe | PR 1 logs `total_cost_usd` per run; revise after a week |
+
