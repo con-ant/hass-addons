@@ -5,5 +5,62 @@
 # volume — a token leak into backups; hass-mcp reads HA_TOKEN from the
 # environment instead. Removed.)
 source /root/.bashrc 2>/dev/null
-claude $AUTO_LAUNCH_ARGS
+
+CREDS=/root/.claude/.credentials.json
+
+# Pre-flight auth check.
+#
+# The claude.ai OAuth *refresh* token does not slide forward when the access
+# token renews — an access-token refresh moves `expiresAt` while leaving
+# `refreshTokenExpiresAt` untouched — so the login lapses on a fixed date even
+# on a box that never stops running. Once it has lapsed, `claude --continue
+# --remote-control` opens an interactive login prompt, and a Remote Control
+# client has no way to answer one: the session simply never connects, with
+# nothing in this log to say why. Print the reason instead of failing silently.
+if [ -f "$CREDS" ]; then
+  # Emit nothing unless the OAuth expiry is actually present. Defaulting a
+  # missing field to 0 would date the login to 1970 and report every API-key
+  # install — and any half-written file — as expired.
+  days=$(jq -r 'try (if (.claudeAiOauth.refreshTokenExpiresAt | type) == "number"
+                     then ((.claudeAiOauth.refreshTokenExpiresAt / 1000 - now) / 86400 | floor)
+                     else empty end) catch empty' "$CREDS" 2>/dev/null)
+  if [[ "$days" =~ ^-?[0-9]+$ ]]; then
+    if [ "$days" -le 0 ]; then
+      echo "[ERROR] claude.ai login has expired. Run /login in this terminal." >&2
+      echo "[ERROR] Remote Control cannot answer a login prompt and will not connect until you do." >&2
+    elif [ "$days" -le 5 ]; then
+      echo "[WARN] claude.ai login expires in ${days} day(s). Run /login before it lapses." >&2
+    fi
+  fi
+fi
+
+# Supervise claude instead of running it once.
+#
+# Previously a single `claude $AUTO_LAUNCH_ARGS` fell straight through to the
+# login shell below on any exit. That is right when the user types /exit, but
+# it also means a crash or a dropped session silently ends Remote Control until
+# somebody opens the web terminal and restarts it by hand — which defeats the
+# point of running unattended. Relaunch on a non-zero exit with --continue, so
+# the box recovers its own session; a clean exit still drops to the shell.
+#
+# Backoff doubles to a 60s ceiling, and resets once a run has lasted a minute,
+# so a genuine crash loop backs off while an ordinary long session that dies
+# once reconnects promptly.
+if [ -n "$AUTO_LAUNCH_ARGS" ]; then
+  backoff=2
+  while :; do
+    started=$SECONDS
+    claude $AUTO_LAUNCH_ARGS && break
+    [ $((SECONDS - started)) -ge 60 ] && backoff=2
+    echo "[WARN] claude exited unexpectedly; relaunching in ${backoff}s (Ctrl-C to stop)" >&2
+    sleep "$backoff"
+    [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
+    # Always resume after an unexpected exit, even when auto_launch_claude is
+    # "new" — the conversation that died is the one worth getting back.
+    AUTO_LAUNCH_ARGS="--continue $CLAUDE_FLAGS"
+  done
+else
+  claude
+fi
+
 exec bash --login

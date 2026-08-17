@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.4] - 2026-08-17
+
+### Fixed
+- **Auto-launch now supervises Claude instead of running it once.** The wrapper
+  ran `claude $AUTO_LAUNCH_ARGS` and fell through to `exec bash --login` on any
+  exit. That is correct when the user types `/exit`, but it also meant a crash
+  or a dropped session quietly ended Remote Control: the add-on stayed
+  "started", ingress still served a terminal, and nothing reconnected until
+  somebody opened the web terminal and relaunched by hand — which defeats the
+  point of `auto_launch_claude: continue` on an unattended box. A non-zero exit
+  now relaunches with `--continue`, so the machine recovers its own session; a
+  clean exit still drops to the login shell exactly as before. Backoff doubles
+  from 2s to a 60s ceiling and resets once a run has lasted a minute, so a
+  genuine crash loop backs off while a long-lived session that dies once comes
+  back promptly. Relaunch always adds `--continue`, including when
+  `auto_launch_claude` is `new` — after an unexpected exit the conversation
+  that just died is the one worth resuming.
+  Verified with a stubbed `claude`: a clean exit reaches the login shell without
+  relaunching; three consecutive failures relaunch with `--continue` on runs 2-4
+  and the observed spacing is 2s, 4s, 8s (14s total).
+
+### Added
+- **Pre-flight login check with a reason in the log.** The claude.ai OAuth
+  *refresh* token does not slide forward when the access token renews — an
+  access-token refresh moves `expiresAt` while leaving `refreshTokenExpiresAt`
+  untouched — so the login lapses on a fixed date even on a box that never stops
+  running. Once it has, `claude --continue --remote-control` opens an
+  interactive login prompt that a Remote Control client cannot answer: the
+  session simply never connects and the log says nothing. The wrapper now reads
+  `refreshTokenExpiresAt` from `/root/.claude/.credentials.json` and logs an
+  ERROR when it has passed (naming `/login` as the fix) or a WARN inside five
+  days. Nothing is emitted unless that field is present and numeric, so
+  `ANTHROPIC_API_KEY` installs, a missing file, and a half-written file stay
+  silent — verified against `{}`, malformed JSON, a string-typed field, an
+  already-expired timestamp, and a live credentials file.
 ## [1.2.65-con.3] - 2026-08-17
 
 ### Fixed
