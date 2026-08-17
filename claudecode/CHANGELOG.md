@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.5] - 2026-08-17
+
+### Changed
+- **Startup logic moved out of the Dockerfile into `claudecode-start`.** The
+  add-on's `CMD` was a ~160-line `bash -c` string joined by `&&`, so any
+  unguarded failure short-circuited before `ttyd` ran and the add-on came up
+  with no terminal and no way to diagnose it from inside. The same logic now
+  lives in `rootfs/usr/local/bin/claudecode-start` as a plain script: it never
+  sets `-e`, every step warns and moves on if it fails, and an `EXIT` trap
+  starts a bare terminal if anything still ends the script early. Behaviour
+  and log output are otherwise unchanged.
+
+### Fixed
+- **A `settings.json` that no longer parses is quarantined instead of killing
+  the boot.** It is validated at startup; if it is not a JSON object it is
+  moved aside as `settings.json.corrupt.<epoch>` (the path is logged) and a
+  fresh `{}` is written.
+- **`settings.json` is written atomically.** The temp file used to live in
+  `/tmp`, on a different filesystem from the target on the HA volume, so the
+  final `mv` was a copy-then-unlink and an interruption could truncate the file
+  holding the permission rules, MCP config and `remoteControlAtStartup`. All
+  writes now go through one helper whose temp file sits beside the target.
+- **`extra_npm_packages` can no longer hang startup.** The install had no
+  timeout and its failure was never reported. It is bounded at 180s and a
+  timeout or install error is logged and skipped.
+- Success messages (`Removed a Supervisor token…`, `Pre-authorized read-only
+  MCP tools`, `Default permission mode: …`) print only when the write they
+  describe actually succeeded, and a failed `claude mcp add-json` is reported
+  as such instead of as a settings.json error.
+
 ## [1.2.65-con.4] - 2026-08-17
 
 ### Fixed

@@ -160,7 +160,7 @@ COPY CLAUDE.addon.md /usr/share/claudecode/CLAUDE.addon.md
 # parsed the body as Dockerfile instructions ("unknown instruction: set").
 # COPY works on every builder and needs no syntax image.
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/playwright-mcp-launch /usr/local/bin/claude-auto-launch
+RUN chmod +x /usr/local/bin/playwright-mcp-launch /usr/local/bin/claude-auto-launch /usr/local/bin/claudecode-start
 
 # Ensure .bashrc is sourced for login shells too
 RUN echo 'source ~/.bashrc' > /root/.profile
@@ -176,151 +176,9 @@ WORKDIR /homeassistant
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -sf http://localhost:7681/ || exit 1
 
-# Startup script that reads config and persists Claude auth
-# Use /homeassistant/.claudecode which is always persistent
+# Startup logic lives in rootfs/usr/local/bin/claudecode-start: it reads the
+# options, wires /root/.claude to the persistent /homeassistant/.claudecode,
+# configures Claude Code, and execs ttyd. It never sets -e; a failing step
+# warns and the terminal still comes up.
 ENTRYPOINT []
-CMD ["/bin/bash", "-c", "\
-  export HA_TOKEN=\"$SUPERVISOR_TOKEN\" && \
-  export HA_URL=\"http://supervisor/core\" && \
-  PERSIST_DIR=/homeassistant/.claudecode && \
-  mkdir -p $PERSIST_DIR/config $PERSIST_DIR/gh /root/.config && \
-  cp /usr/share/claudecode/CLAUDE.addon.md $PERSIST_DIR/CLAUDE.md && \
-  if [ ! -f $PERSIST_DIR/CLAUDE.user.md ]; then \
-    printf '%s\n' \
-      '# User Instructions' \
-      '' \
-      'Edit this file to add your own persistent instructions for Claude Code.' \
-      '' \
-      'The add-on creates this file once and never overwrites it, so anything' \
-      'here survives restarts and add-on updates. It is imported into every' \
-      'Claude Code session via \\`~/.claude/CLAUDE.md\\`.' \
-      > $PERSIST_DIR/CLAUDE.user.md; \
-  fi && \
-  if [ ! -L /root/.claude ]; then rm -rf /root/.claude; ln -s $PERSIST_DIR /root/.claude; fi && \
-  if [ ! -L /root/.config/claude-code ]; then rm -rf /root/.config/claude-code; ln -s $PERSIST_DIR/config /root/.config/claude-code; fi && \
-  if [ ! -L /root/.claude.json ]; then touch $PERSIST_DIR/.claude.json; rm -f /root/.claude.json; ln -s $PERSIST_DIR/.claude.json /root/.claude.json; fi && \
-  if [ ! -L /root/.config/gh ]; then rm -rf /root/.config/gh; ln -s $PERSIST_DIR/gh /root/.config/gh; fi && \
-  FONT_SIZE=$(jq -r '.terminal_font_size // 14' /data/options.json) && \
-  THEME=$(jq -r '.terminal_theme // \"dark\"' /data/options.json) && \
-  SESSION_PERSIST=$(jq -r 'if .session_persistence == null then true else .session_persistence end' /data/options.json) && \
-  ENABLE_MCP=$(jq -r 'if .enable_mcp == null then true else .enable_mcp end' /data/options.json) && \
-  ENABLE_PLAYWRIGHT=$(jq -r '.enable_playwright_mcp // false' /data/options.json) && \
-  PLAYWRIGHT_HOST=$(jq -r '.playwright_cdp_host // \"\"' /data/options.json) && \
-  AUTO_UPDATE=$(jq -r '.auto_update_claude // false' /data/options.json) && \
-  SETTINGS_FILE=/root/.claude/settings.json && \
-  [ -f \"$SETTINGS_FILE\" ] || echo '{}' > \"$SETTINGS_FILE\" && \
-  if jq -e '.mcpServers.homeassistant.env.HASS_TOKEN' \"$SETTINGS_FILE\" > /dev/null 2>&1; then \
-    jq 'del(.mcpServers.homeassistant.env.HASS_TOKEN)' \"$SETTINGS_FILE\" > /tmp/settings.tmp && \
-    mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
-    echo '[INFO] Removed a Supervisor token that older versions persisted into settings.json'; \
-    echo '[INFO] That file lives in your HA config dir and is included in backups'; \
-  fi && \
-  if ! grep -qw avx /proc/cpuinfo 2>/dev/null; then \
-    echo '[WARN] This CPU does not expose AVX. Claude Code 2.1.113+ is a Bun-compiled'; \
-    echo '[WARN] binary that requires it, so this add-on is running an older release.'; \
-    echo '[WARN] On Proxmox set the VM CPU type to \"host\" (or x86-64-v3), then fully'; \
-    echo '[WARN] stop and start the VM. Verify with: grep -o -m1 avx2 /proc/cpuinfo'; \
-  fi && \
-  BUILT_VERSION=$(cat /etc/claude-code-version 2>/dev/null || echo unknown) && \
-  if [ \"$AUTO_UPDATE\" = \"true\" ]; then \
-    echo \"[WARN] auto_update_claude=true; the build verified $BUILT_VERSION, an update may install a release that cannot run (and writes to the container layer)\" && \
-    timeout 300 npm update -g @anthropic-ai/claude-code || echo '[WARN] Update failed; keeping the installed version'; \
-    if ! timeout 30 claude --version < /dev/null > /dev/null 2>&1; then \
-      echo \"[ERROR] The updated Claude Code does not run here; rolling back to $BUILT_VERSION\" && \
-      timeout 300 npm install -g @anthropic-ai/claude-code@$BUILT_VERSION || echo '[ERROR] Rollback failed'; \
-    fi; \
-  else \
-    echo \"[INFO] Claude Code $BUILT_VERSION (verified at build time)\"; \
-  fi && \
-  EXTRA_NPM_PREFIX=/homeassistant/.claudecode/npm-global && \
-  EXTRA_PKGS=$(jq -r '.extra_npm_packages // [] | join(\" \")' /data/options.json) && \
-  if [ -n \"$EXTRA_PKGS\" ]; then \
-    mkdir -p \"$EXTRA_NPM_PREFIX\" && \
-    echo \"[INFO] Installing extra_npm_packages: $EXTRA_PKGS\" && \
-    npm install -g --prefix=\"$EXTRA_NPM_PREFIX\" $EXTRA_PKGS 2>&1 | tail -5 || echo '[WARN] Some extra_npm_packages failed to install'; \
-  fi && \
-  if timeout 30 claude --version < /dev/null > /dev/null 2>&1; then \
-    CLAUDE_OK=true; \
-  else \
-    CLAUDE_OK=false; \
-    echo '[ERROR] claude CLI did not respond within 30s - skipping MCP setup and auto-launch'; \
-    echo '[ERROR] The terminal will still start so you can debug from inside the add-on'; \
-  fi && \
-  if [ \"$CLAUDE_OK\" = \"true\" ]; then \
-    timeout 30 claude mcp remove homeassistant -s user > /dev/null 2>&1 || true; \
-    timeout 30 claude mcp remove playwright -s user > /dev/null 2>&1 || true; \
-  fi && \
-  if [ \"$CLAUDE_OK\" = \"true\" ] && [ \"$ENABLE_MCP\" = \"true\" ]; then \
-    timeout 30 claude mcp add-json homeassistant '{\"command\":\"hass-mcp\"}' -s user && \
-    ALLOWED_TOOLS='[\"mcp__homeassistant__get_version\",\"mcp__homeassistant__get_entity\",\"mcp__homeassistant__list_entities\",\"mcp__homeassistant__search_entities_tool\",\"mcp__homeassistant__domain_summary_tool\",\"mcp__homeassistant__list_automations\",\"mcp__homeassistant__get_history\",\"mcp__homeassistant__get_error_log\",\"Read(/homeassistant/**)\",\"Read(/config/**)\",\"Read(/share/**)\",\"Read(/media/**)\",\"Glob(/homeassistant/**)\",\"Glob(/config/**)\",\"Grep(/homeassistant/**)\",\"Grep(/config/**)\"]' && \
-    jq --argjson tools \"$ALLOWED_TOOLS\" '.permissions.allow = ($tools + (.permissions.allow // []) | unique)' $SETTINGS_FILE > /tmp/settings.tmp && mv /tmp/settings.tmp $SETTINGS_FILE && \
-    echo '[INFO] MCP configured with Home Assistant integration'; \
-    echo '[INFO] Pre-authorized read-only MCP tools'; \
-  elif [ \"$ENABLE_MCP\" = \"true\" ]; then \
-    echo '[WARN] MCP is enabled but was skipped: the claude CLI is not responding'; \
-  else \
-    echo '[INFO] MCP disabled'; \
-  fi && \
-  if [ \"$CLAUDE_OK\" = \"true\" ] && [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
-    PW_MCP_JSON=$(jq -nc --arg host \"$PLAYWRIGHT_HOST\" '{command:\"/usr/local/bin/playwright-mcp-launch\", env:{PLAYWRIGHT_CDP_HOST:$host}}') && \
-    timeout 30 claude mcp add-json playwright \"$PW_MCP_JSON\" -s user && \
-    if [ -n \"$PLAYWRIGHT_HOST\" ]; then \
-      echo \"[INFO] Playwright MCP enabled (host override: $PLAYWRIGHT_HOST)\"; \
-    else \
-      echo '[INFO] Playwright MCP enabled (hostname auto-detected each time the MCP server starts)'; \
-    fi; \
-  elif [ \"$ENABLE_PLAYWRIGHT\" = \"true\" ]; then \
-    echo '[WARN] Playwright MCP is enabled but was skipped: the claude CLI is not responding'; \
-  else \
-    echo '[INFO] Playwright MCP disabled'; \
-  fi && \
-  DEFAULT_MODE=$(jq -r '.default_permission_mode // \"auto\"' /data/options.json) && \
-  jq --arg mode \"$DEFAULT_MODE\" '.permissions.defaultMode = $mode' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
-  echo \"[INFO] Default permission mode: $DEFAULT_MODE\" && \
-  ENABLE_RC=$(jq -r '.enable_remote_control // false' /data/options.json) && \
-  RC_PREFIX=$(jq -r '.remote_control_session_prefix // \"HomeAssistant\"' /data/options.json) && \
-  if [ \"$ENABLE_RC\" = \"true\" ]; then \
-    jq '.remoteControlAtStartup = true' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\" && \
-    export CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX=\"$RC_PREFIX\"; \
-  else \
-    jq 'del(.remoteControlAtStartup)' \"$SETTINGS_FILE\" > /tmp/settings.tmp && mv /tmp/settings.tmp \"$SETTINGS_FILE\"; \
-  fi && \
-  if [ \"$THEME\" = \"dark\" ]; then \
-    COLORS='background=#1e1e2e,foreground=#cdd6f4,cursor=#f5e0dc'; \
-  else \
-    COLORS='background=#eff1f5,foreground=#4c4f69,cursor=#dc8a78'; \
-  fi && \
-  AUTO_LAUNCH=$(jq -r '.auto_launch_claude // \"continue\"' /data/options.json) && \
-  if [ \"$CLAUDE_OK\" != \"true\" ]; then AUTO_LAUNCH=off; fi && \
-  CLAUDE_FLAGS=\"\" && \
-  if [ \"$ENABLE_RC\" = \"true\" ]; then CLAUDE_FLAGS=\"--remote-control\"; fi && \
-  case \"$AUTO_LAUNCH\" in \
-    continue) AUTO_LAUNCH_ARGS=\"--continue $CLAUDE_FLAGS\" ;; \
-    new) AUTO_LAUNCH_ARGS=\"$CLAUDE_FLAGS\" ;; \
-    *) AUTO_LAUNCH_ARGS=\"\" ;; \
-  esac && \
-  export CLAUDE_FLAGS AUTO_LAUNCH_ARGS && \
-  echo \"[INFO] Auto-launch: $AUTO_LAUNCH; remote-control: $ENABLE_RC\" && \
-  if [ \"$SESSION_PERSIST\" = \"true\" ]; then \
-    if [ \"$AUTO_LAUNCH\" != \"off\" ]; then \
-      SHELL_CMD='tmux new-session -A -s claude /usr/local/bin/claude-auto-launch'; \
-    else \
-      SHELL_CMD='tmux new-session -A -s claude'; \
-    fi; \
-  else \
-    if [ \"$AUTO_LAUNCH\" != \"off\" ]; then \
-      SHELL_CMD='/usr/local/bin/claude-auto-launch'; \
-    else \
-      SHELL_CMD='bash --login'; \
-    fi; \
-  fi && \
-  cd /homeassistant && \
-  exec ttyd --port 7681 --writable --ping-interval 30 --max-clients 5 \
-    --index /usr/share/ttyd/index.html \
-    -t fontSize=$FONT_SIZE \
-    -t fontFamily=Monaco,Consolas,monospace \
-    -t scrollback=20000 \
-    -t macOptionClickForcesSelection=true \
-    -t \"theme=$COLORS\" \
-    $SHELL_CMD \
-"]
+CMD ["/usr/local/bin/claudecode-start"]
