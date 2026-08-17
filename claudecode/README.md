@@ -243,11 +243,11 @@ Holding the modifier makes the browser terminal handle the selection natively in
 
 #### Authenticating Claude Code (first launch)
 
-If you access Home Assistant over **HTTPS** (or localhost), the CLI's own **press `c` to copy** hint works — the login URL lands directly on your clipboard via OSC 52. Paste it into a new tab, authenticate, copy the auth code, and **paste** it back into the terminal with `Shift+Insert` or `Ctrl+Shift+V`.
+The simplest path works everywhere, including plain HTTP: **click the URL**. The login screen prints it as a real hyperlink (OSC 8), so even though it spans several rows, clicking *any* row opens the **complete** URL in a new tab after a confirmation dialog.
 
-On plain HTTP the browser blocks programmatic clipboard writes, so `c` won't work — but the terminal's link detection follows URLs across wrapped lines, so usually you can simply **click the URL** even when it spans several rows, or hold `Shift` (`Option` on macOS) and select it with the mouse — the selection is copied as one unbroken line.
+If you access Home Assistant over **HTTPS** (or localhost), the CLI's own **press `c` to copy** hint also works — the login URL lands directly on your clipboard via OSC 52, ready to paste into a new tab. On plain HTTP the browser blocks programmatic clipboard writes, so `c` does nothing there — use the click.
 
-If clicking or selecting only picks up part of the URL (this can happen when a full-screen UI redraws the screen row by row instead of letting text flow), **zoom out** your browser (`Ctrl + -` or `Cmd + -`) until the URL fits on a single line and click or select it there.
+Avoid selecting the login URL with `Shift`/`Option`-drag: the login screen paints each row as a separate line, so the selection stitches the fragments together with line breaks. If you really need the URL as text, **zoom out** your browser (`Ctrl + -` or `Cmd + -`) until it fits on a single line first.
 
 Either way: complete authentication in the browser, **copy the auth code**, click back on the terminal, and **paste** it with `Shift+Insert` or `Ctrl+Shift+V`.
 
@@ -261,6 +261,7 @@ Either way: complete authentication in the browser, **copy the auth code**, clic
 - ✅ 20,000 line scrollback buffer
 - ✅ Copy by holding `Shift` (Windows/Linux) or `Option ⌥` (macOS) while selecting
 - ✅ Copy-mode copies and `claude`'s "press `c` to copy" go straight to your clipboard (HTTPS/localhost only)
+- ✅ Hyperlinks (OSC 8), like the wrapped `/login` URL, open complete with a single click
 - ⚠️ Use middle-click or Shift+Insert to paste (right-click paste may not work)
 
 **Without tmux (`session_persistence: false`):**
