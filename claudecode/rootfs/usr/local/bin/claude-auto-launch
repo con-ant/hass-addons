@@ -47,6 +47,14 @@ fi
 # so a genuine crash loop backs off while an ordinary long session that dies
 # once reconnects promptly.
 if [ -n "$AUTO_LAUNCH_ARGS" ]; then
+  # Catch SIGINT rather than dying on it. In a fast crash loop the wrapper spends
+  # nearly all its time in the sleep below — which is exactly when a user reaches
+  # for Ctrl-C — and an untrapped SIGINT there kills this script outright, so it
+  # never reaches the login shell handover and the respawn just relaunches the
+  # failing claude. That would make a shell unreachable precisely when it is what
+  # you need to recover (downgrade the CLI, /login, repair settings). While claude
+  # itself runs the terminal is in raw mode, so this only fires during the sleep.
+  trap 'interrupted=1' INT
   backoff=2
   while :; do
     started=$SECONDS
@@ -66,6 +74,8 @@ if [ -n "$AUTO_LAUNCH_ARGS" ]; then
     [ $((SECONDS - started)) -ge 60 ] && backoff=2
     echo "[WARN] claude exited unexpectedly (status $rc); relaunching in ${backoff}s" >&2
     sleep "$backoff"
+    # Ctrl-C during the wait means stop: same handover as the 130 case above.
+    [ -n "$interrupted" ] && break
     [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
     # Always resume after an unexpected exit, even when auto_launch_claude is
     # "new" — the conversation that died is the one worth getting back.

@@ -27,9 +27,20 @@ All notable changes to this project will be documented in this file.
   period relaunching. 137 (SIGKILL) is deliberately treated as a crash: an OOM
   kill is exactly the case worth recovering from, and during a real container
   kill the loop dies with the container anyway.
+  SIGINT is trapped rather than fatal. In a fast crash loop the wrapper spends
+  nearly all its time in the backoff sleep, which is exactly when someone reaches
+  for Ctrl-C; an untrapped SIGINT there kills the script outright, so it never
+  reaches the login-shell handover and the respawn relaunches the failing claude -
+  leaving no shell precisely when a shell is what you need to recover (downgrade
+  the CLI, `/login`, repair settings). A `trap 'interrupted=1' INT` plus a check
+  after the sleep routes that to the same handover as the 130 case. While claude
+  itself runs the terminal is in raw mode, so the trap only fires during the sleep
+  and the exit-status paths are unaffected.
   Verified with a stubbed `claude` across every exit path: 0, 129, 130 and 143
   reach the login shell without relaunching; 1 and 137 relaunch with `--continue`
-  at 2s, 4s, 8s.
+  at 2s, 4s, 8s. The Ctrl-C case was reproduced by delivering SIGINT to the
+  wrapper's process group mid-sleep, as a terminal does: without the trap the
+  login shell is never reached, with it the handover happens.
 
 ### Added
 - **Pre-flight login check with a reason in the log.** The claude.ai OAuth
