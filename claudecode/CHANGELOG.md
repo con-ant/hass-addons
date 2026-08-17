@@ -36,11 +36,22 @@ All notable changes to this project will be documented in this file.
   after the sleep routes that to the same handover as the 130 case. While claude
   itself runs the terminal is in raw mode, so the trap only fires during the sleep
   and the exit-status paths are unaffected.
+  The loop also gives up on a claude that cannot start at all: five consecutive
+  runs that each died within 5s means it is failing deterministically (an unknown
+  flag after a CLI update, a corrupted install, an incompatible runtime), and no
+  amount of relaunching helps - but a shell does. It logs an ERROR and drops to
+  the login shell. Real crashes are long runs that die occasionally and never
+  accumulate consecutive fast failures, so unattended recovery is unaffected.
+  Without the cap the loop was unescapable in exactly the case where a shell is
+  needed to fix it.
   Verified with a stubbed `claude` across every exit path: 0, 129, 130 and 143
   reach the login shell without relaunching; 1 and 137 relaunch with `--continue`
   at 2s, 4s, 8s. The Ctrl-C case was reproduced by delivering SIGINT to the
   wrapper's process group mid-sleep, as a terminal does: without the trap the
-  login shell is never reached, with it the handover happens.
+  login shell is never reached, with it the handover happens. The give-up cap
+  was verified in both directions: five instant failures reach the shell in
+  about a second; runs of 6s each that die twice relaunch normally and never
+  trip it.
 
 ### Added
 - **Pre-flight login check with a reason in the log.** The claude.ai OAuth
@@ -56,6 +67,16 @@ All notable changes to this project will be documented in this file.
   `ANTHROPIC_API_KEY` installs, a missing file, and a half-written file stay
   silent — verified against `{}`, malformed JSON, a string-typed field, an
   already-expired timestamp, and a live credentials file.
+  The check runs before EVERY launch, not only the first. On an unattended box
+  the token lapses mid-supervision, weeks after the wrapper started, and the
+  relaunch that follows is exactly the launch that strands; a one-shot check at
+  start would have passed back then and said nothing now. Verified by letting
+  the token expire during a stubbed run and then crashing it: the ERROR is
+  printed before the relaunch. And "expired" means a negative day count, not
+  zero: `floor()` turns 12 remaining hours into 0, which the previous `-le 0`
+  read as expired and reported as an ERROR on the one day it matters most that
+  the message be trusted. Zero now reads "expires today".
+
 ## [1.2.65-con.3] - 2026-08-17
 
 ### Fixed

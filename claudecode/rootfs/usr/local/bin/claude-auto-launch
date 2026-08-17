@@ -17,22 +17,37 @@ CREDS=/root/.claude/.credentials.json
 # --remote-control` opens an interactive login prompt, and a Remote Control
 # client has no way to answer one: the session simply never connects, with
 # nothing in this log to say why. Print the reason instead of failing silently.
-if [ -f "$CREDS" ]; then
+#
+# This is a function because it must run before EVERY launch, not just the
+# first: on an unattended box the token lapses mid-supervision, weeks after the
+# wrapper started, and the relaunch that follows is exactly the launch that
+# strands. A one-shot check at start would have passed back then and said
+# nothing now.
+check_login() {
+  [ -f "$CREDS" ] || return 0
   # Emit nothing unless the OAuth expiry is actually present. Defaulting a
   # missing field to 0 would date the login to 1970 and report every API-key
   # install — and any half-written file — as expired.
+  local days
   days=$(jq -r 'try (if (.claudeAiOauth.refreshTokenExpiresAt | type) == "number"
                      then ((.claudeAiOauth.refreshTokenExpiresAt / 1000 - now) / 86400 | floor)
                      else empty end) catch empty' "$CREDS" 2>/dev/null)
-  if [[ "$days" =~ ^-?[0-9]+$ ]]; then
-    if [ "$days" -le 0 ]; then
-      echo "[ERROR] claude.ai login has expired. Run /login in this terminal." >&2
-      echo "[ERROR] Remote Control cannot answer a login prompt and will not connect until you do." >&2
-    elif [ "$days" -le 5 ]; then
+  [[ "$days" =~ ^-?[0-9]+$ ]] || return 0
+  # floor() rounds toward -inf, so 0 means "expires within the next 24h", not
+  # "expired" — 12h of validity left is 0.5 -> 0. Only a negative day count is
+  # actually past the deadline; treat 0 as "expires today".
+  if [ "$days" -lt 0 ]; then
+    echo "[ERROR] claude.ai login has expired. Run /login in this terminal." >&2
+    echo "[ERROR] Remote Control cannot answer a login prompt and will not connect until you do." >&2
+  elif [ "$days" -le 5 ]; then
+    if [ "$days" -eq 0 ]; then
+      echo "[WARN] claude.ai login expires today. Run /login before it lapses." >&2
+    else
       echo "[WARN] claude.ai login expires in ${days} day(s). Run /login before it lapses." >&2
     fi
   fi
-fi
+}
+check_login
 
 # Supervise claude instead of running it once.
 #
@@ -56,6 +71,7 @@ if [ -n "$AUTO_LAUNCH_ARGS" ]; then
   # itself runs the terminal is in raw mode, so this only fires during the sleep.
   trap 'interrupted=1' INT
   backoff=2
+  fast_fails=0
   while :; do
     started=$SECONDS
     claude $AUTO_LAUNCH_ARGS
@@ -71,6 +87,23 @@ if [ -n "$AUTO_LAUNCH_ARGS" ]; then
     case $rc in
       0|129|130|143) break ;;
     esac
+    # Distinguish "crashes sometimes" from "cannot start at all". A run that
+    # died within 5s did not get going; five of those in a row means claude is
+    # failing deterministically (unknown flag after a CLI update, corrupted
+    # install, incompatible runtime) and no amount of relaunching will help —
+    # but a shell will. Real crashes are long runs that die occasionally and
+    # never accumulate consecutive fast failures, so unattended recovery is
+    # unaffected. Without this cap the loop was unescapable in exactly the
+    # case where a shell is needed to fix it.
+    if [ $((SECONDS - started)) -lt 5 ]; then
+      fast_fails=$((fast_fails + 1))
+    else
+      fast_fails=0
+    fi
+    if [ "$fast_fails" -ge 5 ]; then
+      echo "[ERROR] claude failed to start $fast_fails times in a row (last status $rc); dropping to a shell so it can be fixed" >&2
+      break
+    fi
     [ $((SECONDS - started)) -ge 60 ] && backoff=2
     echo "[WARN] claude exited unexpectedly (status $rc); relaunching in ${backoff}s" >&2
     sleep "$backoff"
@@ -80,6 +113,9 @@ if [ -n "$AUTO_LAUNCH_ARGS" ]; then
     # Always resume after an unexpected exit, even when auto_launch_claude is
     # "new" — the conversation that died is the one worth getting back.
     AUTO_LAUNCH_ARGS="--continue $CLAUDE_FLAGS"
+    # The token may have lapsed since the last launch; say so before relaunching
+    # into a prompt Remote Control cannot answer.
+    check_login
   done
 else
   claude
