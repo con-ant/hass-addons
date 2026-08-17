@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `docs/DESIGN-claude-tasks.md` — design v3 of the scheduled-tasks proposal
+  (docs only, nothing built). Supersedes the v2 draft from the design-review
+  PR: settings/memory isolation via `--setting-sources ""` plus a composed
+  settings file, a per-run token broker instead of an inherited Supervisor
+  token, per-task `paths:` read grants over an image-shipped deny baseline,
+  native `--json-schema` structured output for the result contract, a
+  republish subsystem with a registry-backed anchor sensor, a stop path that
+  winds down in-flight runs inside the Supervisor deadline, action buttons
+  deferred to v1.1 behind nonce provenance, and Tier B (crond) cut from v1.
+
 ## [1.2.65-con.6] - 2026-08-17
 
 ### Fixed
