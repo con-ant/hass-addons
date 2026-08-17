@@ -50,9 +50,21 @@ if [ -n "$AUTO_LAUNCH_ARGS" ]; then
   backoff=2
   while :; do
     started=$SECONDS
-    claude $AUTO_LAUNCH_ARGS && break
+    claude $AUTO_LAUNCH_ARGS
+    rc=$?
+    # 0   the user typed /exit
+    # 130 SIGINT  - Ctrl-C out of Claude
+    # 143 SIGTERM - the supervisor is stopping us
+    # 129 SIGHUP  - the terminal went away (ttyd's configured close signal)
+    # All four are somebody meaning it, so hand over to the login shell. Anything
+    # else is a crash. 137 (SIGKILL) is deliberately NOT here: an OOM kill is
+    # exactly the case worth recovering from, and during a real container kill
+    # this loop dies with the container anyway.
+    case $rc in
+      0|129|130|143) break ;;
+    esac
     [ $((SECONDS - started)) -ge 60 ] && backoff=2
-    echo "[WARN] claude exited unexpectedly; relaunching in ${backoff}s (Ctrl-C to stop)" >&2
+    echo "[WARN] claude exited unexpectedly (status $rc); relaunching in ${backoff}s" >&2
     sleep "$backoff"
     [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
     # Always resume after an unexpected exit, even when auto_launch_claude is

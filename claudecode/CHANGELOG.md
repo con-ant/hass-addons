@@ -19,9 +19,17 @@ All notable changes to this project will be documented in this file.
   back promptly. Relaunch always adds `--continue`, including when
   `auto_launch_claude` is `new` — after an unexpected exit the conversation
   that just died is the one worth resuming.
-  Verified with a stubbed `claude`: a clean exit reaches the login shell without
-  relaunching; three consecutive failures relaunch with `--continue` on runs 2-4
-  and the observed spacing is 2s, 4s, 8s (14s total).
+  Relaunching is decided on the exit status, not merely on "non-zero": status 0
+  (`/exit`), 130 (SIGINT, Ctrl-C), 143 (SIGTERM, the supervisor stopping us) and
+  129 (SIGHUP, ttyd's configured close signal) are all somebody meaning it, and
+  hand over to the login shell. Without that, Ctrl-C could never reach a shell -
+  it would relaunch on the backoff forever - and a shutdown would spend its grace
+  period relaunching. 137 (SIGKILL) is deliberately treated as a crash: an OOM
+  kill is exactly the case worth recovering from, and during a real container
+  kill the loop dies with the container anyway.
+  Verified with a stubbed `claude` across every exit path: 0, 129, 130 and 143
+  reach the login shell without relaunching; 1 and 137 relaunch with `--continue`
+  at 2s, 4s, 8s.
 
 ### Added
 - **Pre-flight login check with a reason in the log.** The claude.ai OAuth
