@@ -34,6 +34,9 @@ on_abort() {
   trap - EXIT
   start_ttyd
 }
+# A Supervisor stop/restart mid-startup must end the container, not start a
+# terminal: bash runs the EXIT trap on an untrapped SIGTERM, so clear it first.
+trap 'trap - EXIT; exit 143' TERM INT HUP
 trap 'on_abort $?' EXIT
 
 info() { echo "[INFO] $*"; }
@@ -45,18 +48,27 @@ opt()  { jq -r "$1" "$OPTS" 2>/dev/null; }
 # settings.json: one guarded, atomic writer.
 # ---------------------------------------------------------------------------
 settings_init() {
+  if [ ! -d "$(dirname "$SETTINGS_FILE")" ]; then
+    warn "$(dirname "$SETTINGS_FILE") does not exist; settings.json will not be applied this boot"
+    return 0
+  fi
   if [ ! -e "$SETTINGS_FILE" ]; then
     echo '{}' > "$SETTINGS_FILE" || warn "Could not create settings.json"
+    return 0
   fi
-  if ! jq -e 'type == "object"' "$SETTINGS_FILE" > /dev/null 2>&1; then
-    local quarantine
-    quarantine="$SETTINGS_FILE.corrupt.$(date +%s)"
-    if mv "$SETTINGS_FILE" "$quarantine" 2>/dev/null; then
-      warn "settings.json did not parse; the broken file was saved as $quarantine"
-    else
-      warn "settings.json did not parse and could not be moved aside"
-    fi
-    echo '{}' > "$SETTINGS_FILE" || warn "Could not reset settings.json"
+  # Must be an object, and .permissions (which every write below indexes into)
+  # must be an object or absent.
+  if jq -e 'type == "object" and ((.permissions // {}) | type == "object")' "$SETTINGS_FILE" > /dev/null 2>&1; then
+    return 0
+  fi
+  local quarantine
+  quarantine="$SETTINGS_FILE.corrupt.$(date +%s)"
+  if mv "$SETTINGS_FILE" "$quarantine" 2>/dev/null; then
+    warn "settings.json is not usable; the old file was saved as $quarantine"
+    echo '{}' > "$SETTINGS_FILE" || warn "Could not create a fresh settings.json"
+  else
+    # Never overwrite the only copy: leave it and let each write warn.
+    warn "settings.json is not usable and could not be moved aside; leaving it in place"
   fi
 }
 
@@ -75,12 +87,15 @@ settings_set() {
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
-setup_persist_dir() {
-  export HA_TOKEN="$SUPERVISOR_TOKEN"
-  export HA_URL="http://supervisor/core"
+export HA_TOKEN="$SUPERVISOR_TOKEN"
+export HA_URL="http://supervisor/core"
 
-  mkdir -p "$PERSIST_DIR/config" "$PERSIST_DIR/gh" /root/.config \
-    || warn "Could not create $PERSIST_DIR; nothing will persist across restarts"
+setup_persist_dir() {
+  if ! mkdir -p "$PERSIST_DIR/config" "$PERSIST_DIR/gh" /root/.config; then
+    warn "Could not create $PERSIST_DIR - is the Home Assistant config volume mounted and writable?"
+    warn "Skipping persistent config setup; nothing will persist across restarts"
+    return 0
+  fi
   cp /usr/share/claudecode/CLAUDE.addon.md "$PERSIST_DIR/CLAUDE.md" \
     || warn "Could not refresh CLAUDE.md in the config dir"
   if [ ! -f "$PERSIST_DIR/CLAUDE.user.md" ]; then
@@ -163,7 +178,9 @@ maybe_update_claude() {
   fi
   warn "auto_update_claude=true; the build verified $BUILT_VERSION, an update may install a release that cannot run (and writes to the container layer)"
   timeout 300 npm update -g @anthropic-ai/claude-code || warn "Update failed; keeping the installed version"
-  if ! claude_responds; then
+  if claude_responds; then
+    CLAUDE_OK=true  # check_claude will not probe again
+  else
     err "The updated Claude Code does not run here; rolling back to $BUILT_VERSION"
     timeout 300 npm install -g "@anthropic-ai/claude-code@$BUILT_VERSION" || err "Rollback failed"
   fi
@@ -178,7 +195,7 @@ install_extra_npm_packages() {
   fi
   info "Installing extra_npm_packages: $EXTRA_PKGS"
   # shellcheck disable=SC2086  # EXTRA_PKGS is a space-separated list
-  timeout 180 npm install -g --prefix="$prefix" $EXTRA_PKGS > "$log" 2>&1
+  timeout -k 10 180 npm install -g --prefix="$prefix" $EXTRA_PKGS > "$log" 2>&1
   rc=$?
   tail -5 "$log" 2>/dev/null
   case $rc in
@@ -189,7 +206,7 @@ install_extra_npm_packages() {
 }
 
 check_claude() {
-  if claude_responds; then
+  if [ "$CLAUDE_OK" = "true" ] || claude_responds; then
     CLAUDE_OK=true
   else
     CLAUDE_OK=false
