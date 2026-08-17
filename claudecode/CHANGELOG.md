@@ -5,246 +5,101 @@ All notable changes to this project will be documented in this file.
 ## [1.2.65-con.5] - 2026-08-17
 
 ### Fixed
-- **Spurious AVX warning on hosts that run current Claude Code fine.** The
-  startup warning ("This CPU does not expose AVX ... running an older release")
-  was keyed solely to `grep -qw avx /proc/cpuinfo`, not to what the build
-  actually installed. On aarch64 the flag never exists (ARM has no AVX and the
-  ARM binary doesn't need it), and the log could therefore claim an older
-  release was running directly above the line saying the build verified a
-  current one (e.g. 2.1.233). The warning now fires only when the fallback
-  really happened: x86_64, no `avx` flag, AND the build-verified version is
-  below 2.1.113. It also names the version it fell back to.
-- **Auto-update no longer warns "may install a release that cannot run" on
-  every start regardless of the CPU.** With `auto_update_claude: true` the WARN
-  printed unconditionally. It is now an INFO on hosts where the build verified
-  a current release; the WARN is reserved for genuinely AVX-limited hosts.
-- **No more futile update/rollback cycle on AVX-limited hosts.** When the
-  add-on is pinned to a pre-2.1.113 release for lack of AVX, `npm update`
-  would install the latest release (which cannot run), fail the smoke test,
-  and roll back — a couple of wasted minutes and container-layer writes on
-  every single start. Startup now checks the latest published version first
-  and skips the update with one INFO line while it still requires AVX; the
-  update-verify-rollback path remains for every other case.
+- The startup AVX warning fired on any host whose `/proc/cpuinfo` lacks an
+  `avx` flag — including every aarch64 host, which never has one and doesn't
+  need it — even when the build had verified a current release. It now appears
+  only when the add-on genuinely fell back to a pre-2.1.113 release, and names
+  that version.
+- With `auto_update_claude: true`, the "may install a release that cannot run"
+  WARN printed on every start; it is now an INFO unless the host is genuinely
+  AVX-limited. On such hosts the futile update/fail/rollback cycle is skipped
+  while the latest release still requires AVX.
+
+### Changed
+- Condensed the changelog and documentation; detailed rationale lives in the
+  git history.
 
 ## [1.2.65-con.4] - 2026-08-17
 
 ### Fixed
-- **Auto-launch now supervises Claude instead of running it once.** The wrapper
-  ran `claude $AUTO_LAUNCH_ARGS` and fell through to `exec bash --login` on any
-  exit. That is correct when the user types `/exit`, but it also meant a crash
-  or a dropped session quietly ended Remote Control: the add-on stayed
-  "started", ingress still served a terminal, and nothing reconnected until
-  somebody opened the web terminal and relaunched by hand — which defeats the
-  point of `auto_launch_claude: continue` on an unattended box. A non-zero exit
-  now relaunches with `--continue`, so the machine recovers its own session; a
-  clean exit still drops to the login shell exactly as before. Backoff doubles
-  from 2s to a 60s ceiling and resets once a run has lasted a minute, so a
-  genuine crash loop backs off while a long-lived session that dies once comes
-  back promptly. Relaunch always adds `--continue`, including when
-  `auto_launch_claude` is `new` — after an unexpected exit the conversation
-  that just died is the one worth resuming.
-  Relaunching is decided on the exit status, not merely on "non-zero": status 0
-  (`/exit`), 130 (SIGINT, Ctrl-C), 143 (SIGTERM, the supervisor stopping us) and
-  129 (SIGHUP, ttyd's configured close signal) are all somebody meaning it, and
-  hand over to the login shell. Without that, Ctrl-C could never reach a shell -
-  it would relaunch on the backoff forever - and a shutdown would spend its grace
-  period relaunching. 137 (SIGKILL) is deliberately treated as a crash: an OOM
-  kill is exactly the case worth recovering from, and during a real container
-  kill the loop dies with the container anyway.
-  SIGINT is trapped rather than fatal. In a fast crash loop the wrapper spends
-  nearly all its time in the backoff sleep, which is exactly when someone reaches
-  for Ctrl-C; an untrapped SIGINT there kills the script outright, so it never
-  reaches the login-shell handover and the respawn relaunches the failing claude -
-  leaving no shell precisely when a shell is what you need to recover (downgrade
-  the CLI, `/login`, repair settings). A `trap 'interrupted=1' INT` plus a check
-  after the sleep routes that to the same handover as the 130 case. While claude
-  itself runs the terminal is in raw mode, so the trap only fires during the sleep
-  and the exit-status paths are unaffected.
-  The loop also gives up on a claude that cannot start at all: five consecutive
-  runs that each died within 5s means it is failing deterministically (an unknown
-  flag after a CLI update, a corrupted install, an incompatible runtime), and no
-  amount of relaunching helps - but a shell does. It logs an ERROR and drops to
-  the login shell. Real crashes are long runs that die occasionally and never
-  accumulate consecutive fast failures, so unattended recovery is unaffected.
-  Without the cap the loop was unescapable in exactly the case where a shell is
-  needed to fix it.
-  Verified with a stubbed `claude` across every exit path: 0, 129, 130 and 143
-  reach the login shell without relaunching; 1 and 137 relaunch with `--continue`
-  at 2s, 4s, 8s. The Ctrl-C case was reproduced by delivering SIGINT to the
-  wrapper's process group mid-sleep, as a terminal does: without the trap the
-  login shell is never reached, with it the handover happens. The give-up cap
-  was verified in both directions: five instant failures reach the shell in
-  about a second; runs of 6s each that die twice relaunch normally and never
-  trip it.
+- Auto-launch now supervises Claude instead of running it once: unexpected
+  exits (crash, OOM kill) relaunch `claude --continue` with exponential
+  backoff, so Remote Control recovers on unattended boxes. Intentional exits
+  (`/exit`, Ctrl-C, SIGTERM/SIGHUP) still drop to the login shell, and five
+  consecutive instant failures give up to a shell instead of looping.
 
 ### Added
-- **Pre-flight login check with a reason in the log.** The claude.ai OAuth
-  *refresh* token does not slide forward when the access token renews — an
-  access-token refresh moves `expiresAt` while leaving `refreshTokenExpiresAt`
-  untouched — so the login lapses on a fixed date even on a box that never stops
-  running. Once it has, `claude --continue --remote-control` opens an
-  interactive login prompt that a Remote Control client cannot answer: the
-  session simply never connects and the log says nothing. The wrapper now reads
-  `refreshTokenExpiresAt` from `/root/.claude/.credentials.json` and logs an
-  ERROR when it has passed (naming `/login` as the fix) or a WARN inside five
-  days. Nothing is emitted unless that field is present and numeric, so
-  `ANTHROPIC_API_KEY` installs, a missing file, and a half-written file stay
-  silent — verified against `{}`, malformed JSON, a string-typed field, an
-  already-expired timestamp, and a live credentials file.
-  The check runs before EVERY launch, not only the first. On an unattended box
-  the token lapses mid-supervision, weeks after the wrapper started, and the
-  relaunch that follows is exactly the launch that strands; a one-shot check at
-  start would have passed back then and said nothing now. Verified by letting
-  the token expire during a stubbed run and then crashing it: the ERROR is
-  printed before the relaunch. And "expired" means a negative day count, not
-  zero: `floor()` turns 12 remaining hours into 0, which the previous `-le 0`
-  read as expired and reported as an ERROR on the one day it matters most that
-  the message be trusted. Zero now reads "expires today".
+- Pre-flight login check before every launch: WARN when the claude.ai OAuth
+  refresh token expires within five days, ERROR (naming `/login`) once it has
+  lapsed. API-key installs and missing credential files stay silent.
 
 ## [1.2.65-con.3] - 2026-08-17
 
 ### Fixed
-- **The wrapped `/login` URL is now clickable and opens as one complete
-  link.** The login screen turned out to be exactly the full-screen-UI case
-  documented as a limitation in 1.2.65-con.2: the CLI hard-wraps the OAuth
-  URL into separate rows (real newlines, no wrap metadata), so the link
-  detector, `Shift`/`Option`-drag selection, and cmd-click could each see
-  only one row's fragment — and on plain HTTP the `c` (OSC 52) copy hint is
-  blocked by the browser, leaving no working path to log in. But the CLI
-  prints every one of those rows wrapped in an OSC 8 hyperlink whose
-  metadata carries the *complete* URL, and the xterm.js 5.5 client already
-  activates OSC 8 links out of the box. The only missing piece was tmux:
-  it stores pane hyperlinks but only re-emits them when the outer terminal
-  declares the `hyperlinks` terminal-feature, which its default `xterm*`
-  feature list lacks — so tmux was silently stripping the links. One
-  `terminal-features` override in `.tmux.conf` fixes it (tmux ≥ 3.4; the
-  Alpine 3.21 base ships 3.5a). Clicking any row of the wrapped URL now
-  opens the complete OAuth URL in a new tab (after the terminal's
-  link-confirmation dialog) — a navigation, not a clipboard write, so it
-  works on plain HTTP too. Verified end-to-end by replaying a captured
-  real `/login` byte stream (Claude Code 2.1.233) through the shipped ttyd
-  1.7.7 binary + the built web client in a headless Chromium: without the
-  override, clicking opened only the truncated first-row fragment
-  (reproducing the report); with it, clicking the first row and clicking a
-  continuation row each opened the full URL, and tmux OSC 52 copies still
-  landed on the clipboard. Drag-selection across the login URL's rows still
-  stitches fragments with line breaks (they are separate lines; nothing to
-  join) — the README now points to the click instead.
+- The wrapped `/login` URL is clickable as one complete link: the CLI emits it
+  as an OSC 8 hyperlink, but tmux stripped it without a `terminal-features`
+  override. Clicking any row now opens the full OAuth URL — on plain HTTP too.
 
 ## [Unreleased]
 
 ### Changed
-- Recorded upstream `robsonfelix/robsonfelix-hass-addons` main (through
-  v1.2.65) as merged, using an "ours" merge that keeps this fork's tree
-  byte-for-byte unchanged. All upstream changes through v1.2.65 — the
-  remote-control options (v1.2.64), the AVX/AppArmor/token-leak fixes
-  (v1.2.65), the French translation, and the playwright-browser base-image
-  fix — were already incorporated and adapted in 1.2.65-con.1. This merge
-  only fixes the fork's ancestry so GitHub no longer reports main as
-  behind upstream. No functional changes; no release required.
+- Recorded upstream main (through v1.2.65) as merged via an "ours" merge to
+  fix the fork's ancestry; all upstream changes were already incorporated in
+  1.2.65-con.1. No functional changes.
 
 ## [1.2.65-con.2] - 2026-08-14
 
 ### Added
-- **Working clipboard integration (OSC 52) in the web terminal.** The web
-  client embedded in the ttyd 1.7.7 binary bundles xterm.js 5.4 without the
-  clipboard addon, so OSC 52 writes were silently dropped — the Claude CLI's
-  "press `c` to copy" hint did nothing, and tmux copies never reached the
-  system clipboard. ttyd now serves a newer web client (xterm.js 5.5 +
-  `@xterm/addon-clipboard`) via `--index`; the 1.7.7 binary is unchanged.
-  The client is compiled in a Dockerfile build stage from a pinned ttyd main
-  commit (2922cb8), with yarn honoring the upstream lockfile — the build is
-  reproducible (byte-identical output across runs).
-  tmux is configured with `set-clipboard on` plus an `Ms` terminal-override
-  pinned to the `c` selection (tmux fills `%p1` with `""` for its own copies
-  and `c` for programs; the clipboard addon drops anything that isn't exactly
-  `c`, so the override prints `%p1` with zero precision and hardcodes `c`).
-  Verified against the shipped 1.7.7 binary with a headless Chromium: typing,
-  resize, window title, program-initiated OSC 52 (the "press `c`" path), and
-  tmux buffer/copy-mode copies all work — including end-to-end from a full
-  amd64 image build (both clipboard paths driven in a browser against ttyd
-  running out of the built container). Because tmux stores wrapped output
-  as one logical line, copy-mode copies of the wrapped login URL come out
-  intact — the problem PR #15 worked around, now solved at the root.
-  The newer client also helps plain-HTTP setups: its link detector follows
-  URLs across soft-wrapped rows, so a wrapped login URL printed as flowing
-  output is clickable as one complete link, and a Shift/Option-drag
-  selection over it copies as one unbroken line via `execCommand` — both
-  verified with the async clipboard API unavailable, as it is on plain HTTP.
-  Limitations, also verified: OSC 52 itself needs HTTPS or localhost —
-  on plain HTTP the write is dropped harmlessly and the drag gestures
-  remain the copy path; and rows painted by full-screen UIs with per-row
-  cursor positioning carry no wrap metadata, so click and drag there see
-  one row at a time (covered by `c`/OSC 52 on HTTPS, or the browser
-  zoom-out fallback). The main-branch client on a 1.7.7 server is an
-  unreleased pairing; the build stage and `--index` flag should be dropped
-  when the next ttyd release ships. README updated (copy table,
-  authentication flow, trade-offs list).
+- Working clipboard (OSC 52) in the web terminal: ttyd now serves a newer web
+  client (xterm.js 5.5 + clipboard addon, built reproducibly from a pinned
+  ttyd commit) and tmux passes OSC 52 through. The CLI's "press `c` to copy"
+  and tmux copy-mode copies land on the system clipboard (HTTPS/localhost
+  only — browsers block programmatic clipboard writes on plain HTTP).
 
 ### Fixed
-- **GitHub CLI authentication now persists across restarts and rebuilds.**
-  `github-cli` is installed in the image, but `~/.config/gh` lived in the
-  container's ephemeral filesystem, so `gh auth login` had to be repeated after
-  every restart or add-on update. It is now symlinked into
-  `/homeassistant/.claudecode/gh`, following the same pattern already used for
-  `~/.claude`, `~/.claude.json`, and `~/.config/claude-code`.
-- Copying text from the web terminal was impossible on macOS whenever the program in the pane enabled mouse tracking - which is the normal state of this add-on: tmux runs with `mouse on`, and Claude Code's fullscreen renderer captures the mouse too. ttyd's copy path is client-side (a native xterm.js selection is auto-copied with a brief scissors overlay), but xterm.js only allows bypassing application mouse-tracking with Shift+drag on Windows/Linux; on macOS the gesture is Option+drag and it is additionally gated behind the `macOptionClickForcesSelection` client option, which defaults to false. Mac users therefore had no working copy gesture at all. ttyd now starts with `-t macOptionClickForcesSelection=true`, so Option+drag makes a native selection that lands on the system clipboard. Verified against the shipped ttyd 1.7.7 binary and web client. These gestures remain the copy path for plain-HTTP setups now that this release also ships the full OSC 52 fix (see above)
-  (ported from upstream robsonfelix/robsonfelix-hass-addons#37 by @ahalekelly)
+- macOS copy: `Option (⌥)`+drag now makes a native selection
+  (`macOptionClickForcesSelection=true`); previously Mac users had no working
+  copy gesture while tmux/Claude captured the mouse (ported from upstream #37
+  by @ahalekelly).
+- `gh` authentication persists across restarts and rebuilds: `~/.config/gh`
+  is symlinked into `/homeassistant/.claudecode/gh`.
 
 ### Changed
-- README copy/paste instructions updated to match: `Option (⌥)`+drag on macOS, `Shift`+drag on Windows/Linux (the previously documented `Ctrl+Shift` gesture never worked on macOS)
+- README copy/paste instructions: `Option (⌥)`+drag on macOS, `Shift`+drag on
+  Windows/Linux.
 
 ## [1.2.65-con.1] - 2026-08-13
 
-Imports the worthwhile fixes from upstream v1.2.64 and v1.2.65
-(robsonfelix/robsonfelix-hass-addons), adapted to this fork's feature set.
+Imports the worthwhile fixes from upstream v1.2.64/v1.2.65, adapted to this
+fork.
 
 ### Security
-- **Supervisor token no longer written to disk.** The `update_mcp_token()`
-  shell function (run by the `c`/`cc` aliases and the auto-launch wrapper)
-  wrote `$SUPERVISOR_TOKEN` into `settings.json`, which lives under
-  `/homeassistant/.claudecode/` and therefore ships inside every Home
-  Assistant backup. hass-mcp never read that key — it reads `HA_TOKEN` from
-  the environment, which the add-on already exports. The function is removed
-  and any token persisted by older versions is scrubbed from `settings.json`
-  on startup.
+- The Supervisor token is no longer written into `settings.json` (which ships
+  inside HA backups); tokens persisted by older versions are scrubbed on
+  startup.
 
 ### Fixed
-- **AVX-less hosts (upstream #24):** Claude Code 2.1.113+ is a Bun-compiled
-  native binary that requires AVX; on VMs exposing the generic kvm64 CPU model
-  every `claude` invocation hangs, which used to block startup. The build now
-  uses upstream's `install-claude.sh` to install the newest release that
-  passes a smoke test, startup wraps every `claude` call in a timeout behind a
-  `claude --version` health gate (the terminal always starts, MCP setup and
-  auto-launch are skipped with a `[WARN]`/`[ERROR]` instead of hanging), and a
-  startup warning plus README section explain the hypervisor-level fix.
-- `auto_update_claude` now verifies the updated CLI still runs and rolls back
-  to the build-time version (recorded in `/etc/claude-code-version`) if not.
-- `enable_mcp: false` and `session_persistence: false` were silently ignored:
-  jq's `// true` default treats an explicit `false` like "unset". Now read
-  with an explicit null check (upstream fix).
-- Pre-authorized MCP tools now apply on the very first start: `settings.json`
-  is bootstrapped before the MCP configuration step instead of after it
-  (previously the allowlist merge silently failed until the second start).
-- Build robustness (upstream #19/#23): shell/tmux config and helper scripts
-  moved from Dockerfile heredocs (which require BuildKit heredoc support) to
-  `COPY rootfs/`; ttyd and Home Assistant CLI downloads retry on transient
-  network errors; the `ha` CLI is pinned to 5.2.0 instead of `latest`.
+- AVX-less hosts (upstream #24): the build installs the newest Claude Code
+  release that passes a smoke test, startup wraps every `claude` call in a
+  timeout so the terminal always starts, and a warning explains the
+  hypervisor-level fix.
+- `auto_update_claude` verifies the updated CLI still runs and rolls back to
+  the build-time version if not.
+- `enable_mcp: false` and `session_persistence: false` were silently ignored
+  (jq's `// true` treated explicit false as unset).
+- Pre-authorized MCP tools now apply on the very first start.
+- Build robustness (upstream #19/#23): Dockerfile heredocs replaced with
+  `COPY rootfs/`, downloads retry on transient errors, `ha` CLI pinned to
+  5.2.0.
 
 ### Added
-- `remote_control_session_prefix` option (upstream #34): sets
-  `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX` (default "HomeAssistant") for
-  Remote Control session names. `enable_remote_control` now also writes
-  `remoteControlAtStartup: true` into `settings.json` (and removes it when
-  disabled), so manually started `claude` sessions get Remote Control too, in
-  addition to the existing `--remote-control` flag on auto-launches.
-- French translation (upstream #27), extended to the Remote Control options;
-  Remote Control entries added to the en/es/pt-BR translations.
-- tmux user overrides: `/homeassistant/.claudecode/tmux.conf` is sourced last
-  (survives rebuilds), e.g. `set -g mouse off` to restore native copy/paste.
-- README: Remote Control blast-radius security note, honest Container
-  Security section (root, `full_access`, backups contain credentials), AVX
-  troubleshooting section, tmux customization section.
+- `remote_control_session_prefix` option (upstream #34); `enable_remote_control`
+  also sets `remoteControlAtStartup` so manually started sessions get Remote
+  Control too.
+- French translation (upstream #27); Remote Control strings for en/es/pt-BR.
+- tmux user overrides: `/homeassistant/.claudecode/tmux.conf` is sourced last.
+- README: Remote Control security note, Container Security section, AVX
+  troubleshooting, tmux customization.
 
 ## [1.2.63-con.10] - 2026-06-05
 
