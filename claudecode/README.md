@@ -105,7 +105,7 @@ claude --continue
 | `session_persistence` | Use tmux for persistent sessions | true |
 | `auto_update_claude` | Auto-update Claude Code on startup (rolls back automatically if the new release cannot run on this host). Writes to the container layer — see changelog 1.2.63-con.10 | false |
 | `default_permission_mode` | Default Claude Code permission mode: `default`, `auto`, `acceptEdits`, `plan`, or `bypassPermissions`. `auto` uses a classifier to approve/deny prompts (Claude Code v2.1.83+, Max/Team/Enterprise/API plan, Sonnet 4.6+/Opus 4.6+); falls back silently to `default` if requirements aren't met | auto |
-| `auto_launch_claude` | Auto-run Claude when the terminal opens: `off` (bash prompt), `new` (`claude`), or `continue` (`claude --continue`). Drops to a login shell when Claude exits | continue |
+| `auto_launch_claude` | Auto-run Claude when the terminal opens: `off` (bash prompt), `new` (`claude`), or `continue` (`claude --continue`). Drops to a login shell when Claude exits. With `enable_remote_control` on, the session is started at container boot instead (see Remote Control below) | continue |
 | `enable_remote_control` | Turn on [Remote Control](https://code.claude.com/docs/en/remote-control) for all Claude sessions (sets `remoteControlAtStartup` in settings.json and passes `--remote-control` to auto-launches) so you can view and steer sessions from claude.ai/code or the Claude mobile app. Requires Claude Code v2.1.51+, claude.ai OAuth login (not API key), and a Pro/Max/Team/Enterprise plan. See the security note below | false |
 | `remote_control_session_prefix` | Prefix for auto-generated Remote Control session names shown in claude.ai/code and the mobile app (e.g. `HomeAssistant-graceful-unicorn`). Only applies when `enable_remote_control` is on | HomeAssistant |
 | `extra_npm_packages` | List of npm package specs to install at every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). Bin dir is on `PATH`. Use to add custom MCP servers without forking the Dockerfile. | `[]` |
@@ -201,6 +201,7 @@ When `session_persistence` is enabled, the add-on uses tmux to maintain your ter
 - Your session survives browser refreshes
 - You can disconnect and reconnect without losing context
 - Claude Code conversations are preserved
+- With `enable_remote_control` on, the session is created at boot so Remote Control works without a browser
 
 ### tmux Commands
 
@@ -291,6 +292,8 @@ Either way: complete authentication in the browser, **copy the auth code**, clic
 ### Remote Control
 
 With `enable_remote_control`, sessions can be driven from `claude.ai/code` or the Claude mobile app (requires a Pro, Max, Team, or Enterprise subscription; API keys are not supported).
+
+The Claude session is started when the container boots, not when you open the web terminal, so Remote Control is available after a restart without anyone opening the add-on. This requires `session_persistence: true` (tmux holds the session) and `auto_launch_claude` set to `continue` or `new`; opening the web terminal attaches to the running session. Stopping or restarting the add-on sends Claude a SIGTERM and gives it up to 15s to exit before the container goes down. Set `auto_launch_claude: off` if you do not want Claude running unattended.
 
 **Security note:** this add-on runs as root with full access to your Home Assistant host. Anyone who can sign in to the linked Claude account can control it. Leave this off unless you need it.
 

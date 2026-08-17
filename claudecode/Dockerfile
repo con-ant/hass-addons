@@ -178,7 +178,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 
 # Startup logic lives in rootfs/usr/local/bin/claudecode-start: it reads the
 # options, wires /root/.claude to the persistent /homeassistant/.claudecode,
-# configures Claude Code, and execs ttyd. It never sets -e; a failing step
+# configures Claude Code, and runs ttyd. It never sets -e; a failing step
 # warns and the terminal still comes up.
 ENTRYPOINT []
 CMD ["/usr/local/bin/claudecode-start"]
