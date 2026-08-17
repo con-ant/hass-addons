@@ -1,17 +1,13 @@
 ARG BUILD_FROM
 
-# Build a current ttyd web client. The client embedded in the ttyd 1.7.7
-# binary predates OSC 52 clipboard support (xterm.js 5.4, no clipboard addon),
-# so startup serves this one via --index instead. Built from a pinned ttyd
-# main commit with yarn (via corepack, fetched from the npm registry) so
-# yarn.lock is honored - a plain npm install resolves newer transitive deps
-# and fails type-checking. Everything is pinned (ttyd commit, corepack, and
-# the lockfile-resolved deps) so the output is reproducible and nothing
-# drifts between builds. COREPACK_INTEGRITY_KEYS=0 keeps a pinned corepack
-# working across npm signing-key rotations (which have broken pinned
-# corepacks before); transport is TLS and dependency integrity comes from
-# the yarn.lock checksums. Drop this stage and the --index flag once a ttyd
-# release newer than 1.7.7 ships and the download below is bumped.
+# Build a current ttyd web client: the one embedded in the ttyd 1.7.7 binary
+# predates OSC 52 clipboard support, so startup serves this build via --index.
+# Built with yarn so ttyd's lockfile is honored (npm resolves newer transitive
+# deps and fails type-checking). Everything is pinned - ttyd commit, corepack,
+# lockfile deps - so the output is reproducible. COREPACK_INTEGRITY_KEYS=0
+# keeps the pinned corepack working across npm signing-key rotations;
+# integrity comes from the yarn.lock checksums. Drop this stage and the
+# --index flag once a ttyd release newer than 1.7.7 ships.
 FROM ${BUILD_FROM} AS ttyd-client
 RUN apk add --no-cache curl nodejs npm
 ARG TTYD_CLIENT_COMMIT=2922cb89f518bae4d0fcf4d757a7419638fc71fc
