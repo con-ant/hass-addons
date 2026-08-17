@@ -305,6 +305,32 @@ build_shell_cmd() {
   fi
 }
 
+# Start the tmux session now, at boot, rather than on the first browser
+# connection. ttyd spawns SHELL_CMD per client, so with session_persistence and
+# an auto-launch mode nothing ran after a restart until somebody opened the web
+# terminal - no tmux session, no Claude, and no Remote Control, on exactly the
+# configuration whose point is running unattended. Starting the session
+# detached here means ttyd's `tmux new-session -A` attaches to it instead of
+# creating it. This is the first tmux server in the container, so the session
+# inherits this shell's exports (HA_TOKEN, CLAUDE_FLAGS, AUTO_LAUNCH_ARGS,
+# CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX) and the WORKDIR cwd.
+prestart_session() {
+  [ "$SESSION_PERSIST" = "true" ] || return 0
+  [ "$AUTO_LAUNCH" != "off" ] || return 0
+  if ! tmux new-session -d -s claude /usr/local/bin/claude-auto-launch 2>/dev/null; then
+    warn "Could not pre-start the tmux session; it will start on the first terminal connection"
+    return 0
+  fi
+  # new-session -d exits 0 even when the command it launched died at once, so
+  # do not report success from that status: give it a moment and check.
+  sleep 2
+  if tmux has-session -t claude 2>/dev/null; then
+    info "Claude session started at boot; Remote Control no longer waits for a browser"
+  else
+    warn "Pre-started Claude session exited within 2s; the first terminal connection will start a fresh one and show why"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -319,6 +345,7 @@ check_claude
 configure_mcp
 apply_settings
 build_shell_cmd
+prestart_session
 
 trap - EXIT
 start_ttyd

@@ -1,6 +1,6 @@
 name: Claude Code
 description: Run Claude Code AI assistant inside Home Assistant to create automations, debug issues, and manage your smart home configuration
-version: "1.2.65-con.5"
+version: "1.2.65-con.6"
 slug: claudecode
 url: https://github.com/con-ant/hass-addons
 arch:
@@ -11,6 +11,14 @@ boot: auto
 init: true
 ingress: true
 ingress_port: 7681
+# Application-level watchdog: every 120s Supervisor TCP-probes this from outside
+# the container; two consecutive misses restart the add-on (when the user's
+# watchdog toggle is on). This complements the Dockerfile HEALTHCHECK, which
+# Supervisor also acts on - Docker's health_status events map to
+# ContainerState.UNHEALTHY and the container watchdog restarts on them - but
+# that probe is a curl run *inside* the container, so it shares fate with the
+# container's own exec path. This probe does not.
+watchdog: tcp://[HOST]:[PORT:7681]
 ingress_stream: true
 panel_icon: mdi:brain
 panel_title: Claude Code

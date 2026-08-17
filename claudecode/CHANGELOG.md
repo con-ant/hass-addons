@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.6] - 2026-08-17
+
+### Fixed
+- **The Claude session now starts with the container, not with the first
+  browser.** ttyd spawns its command per client connection, so with
+  `session_persistence` and `auto_launch_claude: continue` nothing ran after an
+  add-on restart until somebody opened the web terminal - no tmux session, no
+  Claude, and no Remote Control. The session is now started detached at the
+  end of startup, and ttyd attaches to it. Success is confirmed with
+  `has-session` after two seconds rather than taken from `new-session -d`'s
+  exit status (which is 0 even if the command died at once); a session that
+  has already exited is logged as a `[WARN]`. A failed pre-start falls back to
+  starting on first connection.
+
+### Added
+- **Supervisor application watchdog:** `tcp://[HOST]:[PORT:7681]`. Supervisor
+  probes the port from outside the container every 120s and restarts the add-on
+  after two consecutive misses (when the watchdog toggle is on). This
+  complements the in-container HEALTHCHECK curl, which Supervisor also acts on
+  but which shares fate with the container's own exec path.
+
 ## [1.2.65-con.5] - 2026-08-17
 
 ### Changed
