@@ -10,8 +10,9 @@ startup: application
 boot: auto
 init: true
 # Seconds the Supervisor waits after SIGTERM before killing the container.
-# claudecode-start uses this to hand a running Claude a SIGTERM and let it
-# exit before ttyd goes down (default 10 is too tight for that).
+# claudecode-start hands a running Claude a SIGTERM and waits up to
+# STOP_GRACE_SECS (10) for it before tearing down tmux and ttyd; the default
+# 10 is too tight for that.
 timeout: 30
 ingress: true
 ingress_port: 7681

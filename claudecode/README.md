@@ -293,7 +293,7 @@ Either way: complete authentication in the browser, **copy the auth code**, clic
 
 With `enable_remote_control`, sessions can be driven from `claude.ai/code` or the Claude mobile app (requires a Pro, Max, Team, or Enterprise subscription; API keys are not supported).
 
-The Claude session is started when the container boots, not when you open the web terminal, so Remote Control is available after a restart without anyone opening the add-on. This requires `session_persistence: true` (tmux holds the session) and `auto_launch_claude` set to `continue` or `new`; opening the web terminal attaches to the running session. Stopping or restarting the add-on sends Claude a SIGTERM and gives it up to 15s to exit before the container goes down. Set `auto_launch_claude: off` if you do not want Claude running unattended.
+The Claude session is started when the container boots, not when you open the web terminal, so Remote Control is available after a restart without anyone opening the add-on. This requires `session_persistence: true` (tmux holds the session) and `auto_launch_claude` set to `continue` or `new`; opening the web terminal attaches to the running session. Stopping or restarting the add-on sends Claude a SIGTERM and gives it up to 10s to exit before the container goes down. Set `auto_launch_claude: off` if you do not want Claude running unattended.
 
 **Security note:** this add-on runs as root with full access to your Home Assistant host. Anyone who can sign in to the linked Claude account can control it. Leave this off unless you need it.
 
