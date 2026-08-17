@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.3] - 2026-08-17
+
+### Fixed
+- **The wrapped `/login` URL is now clickable and opens as one complete
+  link.** The login screen turned out to be exactly the full-screen-UI case
+  documented as a limitation in 1.2.65-con.2: the CLI hard-wraps the OAuth
+  URL into separate rows (real newlines, no wrap metadata), so the link
+  detector, `Shift`/`Option`-drag selection, and cmd-click could each see
+  only one row's fragment — and on plain HTTP the `c` (OSC 52) copy hint is
+  blocked by the browser, leaving no working path to log in. But the CLI
+  prints every one of those rows wrapped in an OSC 8 hyperlink whose
+  metadata carries the *complete* URL, and the xterm.js 5.5 client already
+  activates OSC 8 links out of the box. The only missing piece was tmux:
+  it stores pane hyperlinks but only re-emits them when the outer terminal
+  declares the `hyperlinks` terminal-feature, which its default `xterm*`
+  feature list lacks — so tmux was silently stripping the links. One
+  `terminal-features` override in `.tmux.conf` fixes it (tmux ≥ 3.4; the
+  Alpine 3.21 base ships 3.5a). Clicking any row of the wrapped URL now
+  opens the complete OAuth URL in a new tab (after the terminal's
+  link-confirmation dialog) — a navigation, not a clipboard write, so it
+  works on plain HTTP too. Verified end-to-end by replaying a captured
+  real `/login` byte stream (Claude Code 2.1.233) through the shipped ttyd
+  1.7.7 binary + the built web client in a headless Chromium: without the
+  override, clicking opened only the truncated first-row fragment
+  (reproducing the report); with it, clicking the first row and clicking a
+  continuation row each opened the full URL, and tmux OSC 52 copies still
+  landed on the clipboard. Drag-selection across the login URL's rows still
+  stitches fragments with line breaks (they are separate lines; nothing to
+  join) — the README now points to the click instead.
+
 ## [1.2.65-con.2] - 2026-08-14
 
 ### Added
