@@ -68,5 +68,9 @@ configuration:
       « HomeAssistant-graceful-unicorn ». S'applique uniquement lorsque le
       Contrôle à Distance est activé.
 
+  job_default_model:
+    name: Modèle par défaut des tâches planifiées
+    description: >-
+      Alias du modèle utilisé par les Claude Jobs (~/.claude/jobs/*.md) qui ne définissent pas model: eux-mêmes. fable est le plus capable et le plus coûteux ; une tâche peut fixer un modèle moins cher dans son frontmatter.
 network:
   7681/tcp: Terminal Web (ttyd)

@@ -27,6 +27,7 @@ claude "Why isn't my motion sensor automation working?"
 - **Customizable Theme**: Choose between dark and light terminal themes
 - **Multi-Architecture**: Supports amd64, aarch64, armv7, armhf, and i386
 - **Secure Authentication**: Claude Code handles its own authentication securely
+- **Scheduled jobs**: Unattended, read-only Claude runs (health checks, reports) that Home Assistant triggers on a schedule and that report back as entities and notifications — see [Scheduled jobs](#scheduled-jobs-claude-jobs)
 
 ## Setup
 
@@ -109,6 +110,7 @@ claude --continue
 | `enable_remote_control` | Turn on [Remote Control](https://code.claude.com/docs/en/remote-control) for all Claude sessions (sets `remoteControlAtStartup` in settings.json and passes `--remote-control` to auto-launches) so you can view and steer sessions from claude.ai/code or the Claude mobile app. Requires Claude Code v2.1.51+, claude.ai OAuth login (not API key), and a Pro/Max/Team/Enterprise plan. See the security note below | false |
 | `remote_control_session_prefix` | Prefix for auto-generated Remote Control session names shown in claude.ai/code and the mobile app (e.g. `HomeAssistant-graceful-unicorn`). Only applies when `enable_remote_control` is on | HomeAssistant |
 | `extra_npm_packages` | List of npm package specs to install at every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). Bin dir is on `PATH`. Use to add custom MCP servers without forking the Dockerfile. | `[]` |
+| `job_default_model` | Model alias used by scheduled jobs (`~/.claude/jobs/*.md`) that do not set `model:` themselves: `fable`, `opus`, `sonnet` or `haiku`. `fable` is the most capable and the most expensive; a job can pin a cheaper model in its own frontmatter. See [Scheduled jobs](#scheduled-jobs-claude-jobs) | fable |
 
 ### Playwright MCP setup
 
@@ -181,6 +183,7 @@ The MCP registration itself is persistent (stored in `~/.claude/settings.json`, 
 | `/media` | Media folder | read-write |
 | `/ssl` | SSL certificates | read-only |
 | `/backup` | Backups | read-only |
+| `/homeassistant/.claudecode/jobs` | Claude Jobs: definitions (`*.md`), `state/`, `logs/` (= `~/.claude/jobs`) | read-write |
 
 ## Customizing Claude's instructions
 
@@ -193,6 +196,27 @@ add-on creates this file once and never overwrites it; it's imported by
 `~/.claude/CLAUDE.md`, so anything you put there loads into every Claude Code
 session and survives restarts and add-on updates. Good for project
 conventions, frequently-referenced entity IDs, or reminders about your setup.
+
+## Scheduled jobs (Claude Jobs)
+
+A **job** is an unattended, read-only Claude run — a Markdown file in
+`~/.claude/jobs/` (frontmatter: model, tools, bounds, notify map; body: the
+prompt) that the add-on executes headlessly, isolated from your terminal
+session, and turns into a `sensor.claude_job_<name>` entity plus a notification
+chosen by severity. Home Assistant owns the schedule; the add-on executes; a
+person acts on the result. Two examples ship: `health-check` and `energy-report`.
+
+```bash
+claude-job list                  # definitions and their last result
+claude-job validate --all        # check every job file
+claude-job dry-run health-check  # exactly what would run, spends nothing
+claude-job run health-check      # run it now; result in ~/.claude/jobs/state/health-check.json
+```
+
+The full reference — writing jobs, the `claude-job` command, what "read-only"
+means, result states, notifications, triggering from Home Assistant, cost —
+is in [`docs/JOBS.md`](docs/JOBS.md); the design and its security argument are
+in [`docs/DESIGN-claude-jobs.md`](docs/DESIGN-claude-jobs.md).
 
 ## Session Persistence
 

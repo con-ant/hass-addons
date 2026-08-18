@@ -55,6 +55,7 @@ RUN apk add --no-cache \
     vim \
     nano \
     tmux \
+    tzdata \
     coreutils \
     findutils \
     grep \
@@ -99,8 +100,18 @@ RUN chmod +x /usr/local/bin/install-claude.sh \
     && npm cache clean --force \
     && rm -rf /root/.npm /tmp/*
 
-# Install hass-mcp for Home Assistant integration and pymodbus for Modbus operations
-RUN pip3 install --no-cache-dir --break-system-packages hass-mcp pymodbus pyserial
+# Install hass-mcp for Home Assistant integration and pymodbus for Modbus operations.
+# hass-mcp is pinned: the job broker (docs/DESIGN-claude-jobs.md §4.5) allow-lists
+# hass-mcp's one fixed /api/template query by importing it, and the design's
+# tool/transport map was verified against 0.6.0. Bump deliberately.
+RUN pip3 install --no-cache-dir --break-system-packages "hass-mcp==0.6.0" pymodbus pyserial
+
+# Claude Jobs (docs/DESIGN-claude-jobs.md): the job validator/runner/endpoint are
+# Python 3 stdlib plus these two. They must go through pip: the base image's
+# Python 3.13 lives in /usr/local, so Alpine's py3-* apk packages (built for the
+# distro python) would be invisible to it. jsonschema pulls rpds-py, which ships
+# musllinux wheels for both arches this add-on builds.
+RUN pip3 install --no-cache-dir --break-system-packages "pyyaml>=6,<7" "jsonschema>=4.18,<5"
 
 # Install mbpoll (Modbus command line tool) from source
 RUN apk add --no-cache --virtual .build-deps \
@@ -160,7 +171,17 @@ COPY CLAUDE.addon.md /usr/share/claudecode/CLAUDE.addon.md
 # parsed the body as Dockerfile instructions ("unknown instruction: set").
 # COPY works on every builder and needs no syntax image.
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/playwright-mcp-launch /usr/local/bin/claude-auto-launch /usr/local/bin/claudecode-start
+RUN chmod +x /usr/local/bin/playwright-mcp-launch /usr/local/bin/claude-auto-launch /usr/local/bin/claudecode-start \
+    /usr/local/bin/claude-job /usr/local/lib/claude-job/ha_broker.py /usr/local/lib/claude-job/bin/ha \
+    && python3 -m compileall -q /usr/local/lib/claude-job
+# ^ bytecode is compiled at build time: /usr/local is read-only under the
+#   AppArmor profile, so a runtime __pycache__ write would be denied (harmless,
+#   but one audit line per job run).
+
+# The add-on version is not otherwise visible inside the container; the job
+# endpoint reports it on /health and GET /jobs. HA's builder passes BUILD_VERSION.
+ARG BUILD_VERSION
+RUN echo "${BUILD_VERSION:-dev}" > /etc/claudecode-addon-version
 
 # Ensure .bashrc is sourced for login shells too
 RUN echo 'source ~/.bashrc' > /root/.profile

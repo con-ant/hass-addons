@@ -94,6 +94,37 @@ logger:
 `_LOGGER.debug()` calls are invisible unless the logger level is `debug`. Use
 `_LOGGER.info()` / `_LOGGER.warning()` for logs that should always appear.
 
+## Scheduled jobs
+
+Unattended Claude runs ("jobs") live in `~/.claude/jobs/` (the same directory as
+`/homeassistant/.claudecode/jobs/`). Each `*.md` file is one job: YAML frontmatter
+(description, model, timeout, max_cost_usd, tools, paths, notify map, optional input)
+plus the prompt. Home Assistant triggers them on a schedule via the add-on's job
+endpoint; results appear as `sensor.claude_job_<slug>` (hyphens become underscores)
+and as notifications. These jobs are unrelated to Claude Code's in-session Task tools
+and to Home Assistant's `ai_task` integration — different mechanisms, deliberately
+different name.
+
+- List jobs:                  `claude-job list`
+- Last result:                `~/.claude/jobs/state/<name>.json`
+- Run history:                `~/.claude/jobs/logs/<name>.jsonl` (one JSON line per run)
+- Check a definition:         `claude-job validate <name>` (`--json` for machine-readable)
+- See exactly what would run: `claude-job dry-run <name>` (composed settings, prompt and
+                              command line; spends nothing)
+- Run one by hand:            `claude-job run <name>` — from inside this session it starts
+                              the run in the background and prints a run id; the result
+                              lands in `~/.claude/jobs/state/<name>.json` a few minutes later
+- Pause:                      `claude-job disable <name>` (`enable`, `force-run` and
+                              `token` are for the human at the terminal and will prompt)
+- Examples and reference:     `/usr/share/claudecode/jobs/*.md`, and the add-on README
+
+Jobs are read-only by construction: write/edit/web tools are rejected by the validator,
+Bash is limited to the read-only `ha` subcommands in `/usr/share/claudecode/job-ha-allowlist`,
+file reads exist only through the job's declared `paths:` (under /homeassistant, /share,
+/media), and a new job you author should ship `enabled: false` until a human has reviewed
+it. Put the load-bearing number in the job's headline. Do not use `claude-job run` as a
+way to "do the work" of this conversation — it is for scheduled or one-off headless runs.
+
 ## User instructions
 
 The add-on regenerates this file (`~/.claude/CLAUDE.md`) on every start, so

@@ -1,0 +1,33 @@
+# Read-only `ha` CLI allow-list for Claude jobs (design §4.5, layer 2).
+#
+# Format: one command per line, tokens separated by single spaces, starting with `ha`.
+# A trailing ` *` means the command accepts further arguments (flags such as --lines);
+# without it the rule must name the command exactly. Blank lines and `#` comments are ignored.
+#
+# A job's `Bash(ha …)` rule is valid only if its tokens prefix-match one of these lines.
+# Every mutating verb (restart, update, rebuild, options, reboot, restore, …) is absent by
+# construction, and the per-run token broker has no route for them either.
+#
+# `logs` verbs are effectively `--lines`/`-n` only: the job's `ha` wrapper strips
+# -f/--follow and -b/--boot before exec (a follow would block until the job timeout),
+# and the validator rejects any rule that names those flags.
+#
+# CLI 5.x spells add-ons `ha apps …`; `ha addons …` is a deprecated alias. Both are accepted.
+
+ha core check
+ha core info
+ha core stats
+ha core logs *
+ha supervisor info
+ha supervisor stats
+ha supervisor logs *
+ha resolution info
+ha os info
+ha host info
+ha host logs *
+ha addons
+ha addons info *
+ha apps
+ha apps info *
+ha backups
+ha backups info *

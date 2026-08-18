@@ -1,0 +1,73 @@
+#!/bin/bash
+# ha -- claude-job wrapper around the real Home Assistant CLI (design §4.5 layer 1; breakdown 2j;
+# CONTRACTS A3/A25/A29).
+#
+# Inside a job run the child PATH starts with this directory, so `ha ...` lands here. We point the
+# real CLI at the per-run token broker (127.0.0.1:$CLAUDE_JOB_BROKER_PORT) and authenticate with the
+# per-run nonce; the broker swaps in the Supervisor token only for its read-only route table.
+# Calling /usr/local/bin/ha directly instead is harmless: the job env carries no SUPERVISOR_TOKEN,
+# so the real CLI cannot authenticate against the Supervisor.
+#
+# Follow/boot flags are stripped before exec (design §4.5 "log-verb caveat"): `-f/--follow` turns
+# `ha core logs` into an endless stream that would pin the run until `timeout` kills it and yield no
+# result envelope; `-b/--boot` is stripped too as the design specifies (finite, but not needed by any
+# shipped job). `--lines/-n` is kept: it becomes a Range header the broker forwards.
+# `--endpoint/--api-token/--config` from the caller are refused outright (they would re-point or
+# re-credential the CLI), combined short-flag clusters that hide -f/-b (e.g. `-fn 50`) are refused
+# (use `-n 50`), and the CLI's SUPERVISOR_* env fallbacks are unset before exec.
+# CLAUDE_JOB_REAL_HA (test seam) is honoured only when /usr/local/bin/ha is absent, i.e. never in
+# the image, so a job cannot re-point this wrapper at another binary via an env prefix.
+set -u
+
+if [[ -z "${CLAUDE_JOB_BROKER_PORT:-}" || -z "${CLAUDE_JOB_BROKER_NONCE:-}" ]]; then
+    echo "ha: no job broker in this environment (this wrapper only works inside a claude-job run)" >&2
+    exit 1
+fi
+if ! [[ "${CLAUDE_JOB_BROKER_PORT}" =~ ^[0-9]+$ ]]; then
+    echo "ha: CLAUDE_JOB_BROKER_PORT is not a port number" >&2
+    exit 1
+fi
+
+REAL=/usr/local/bin/ha
+if [[ ! -x "$REAL" ]]; then
+    REAL="${CLAUDE_JOB_REAL_HA:-$REAL}"
+fi
+
+args=()
+skip_next=0
+for a in "$@"; do
+    if (( skip_next )); then
+        skip_next=0
+        continue
+    fi
+    case "$a" in
+        --endpoint|--endpoint=*|--api-token|--api-token=*|--config|--config=*)
+            echo "ha: --endpoint/--api-token/--config are not permitted inside a job" >&2
+            exit 1 ;;
+        -f|-f=*|--follow|--follow=*)
+            continue ;;
+        -b|--boot)              # value given as the next argument
+            skip_next=1
+            continue ;;
+        -b?*|--boot=*)          # value glued to the flag
+            continue ;;
+        -[A-Za-z][A-Za-z]*)     # short cluster (`-fn`, `-vf`) or glued value (`-n50`, `-tfoo`)
+            letters="${a#-}"
+            letters="${letters%%[!A-Za-z]*}"
+            case "${letters:0:1}" in
+                n|t) args+=("$a") ;;                    # value-taking flag first: rest is its value
+                *)
+                    if [[ "$letters" == *[fb]* ]]; then
+                        echo "ha: combined short flags containing -f/-b are not supported inside a job; write them separately (e.g. -n 50)" >&2
+                        exit 1
+                    fi
+                    args+=("$a") ;;
+            esac ;;
+        *)
+            args+=("$a") ;;
+    esac
+done
+
+unset SUPERVISOR_ENDPOINT SUPERVISOR_API_TOKEN SUPERVISOR_TOKEN
+exec "$REAL" --endpoint "http://127.0.0.1:${CLAUDE_JOB_BROKER_PORT}" \
+    --api-token "${CLAUDE_JOB_BROKER_NONCE}" ${args[@]+"${args[@]}"}

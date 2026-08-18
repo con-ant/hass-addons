@@ -20,7 +20,7 @@ This file contains instructions for Claude Code when working on this repository.
   - `config.yaml` - Add-on configuration (bump version here)
   - `Dockerfile` - Container build instructions
   - `build.yaml` - Multi-architecture build settings
-  - `DOCS.md` - User documentation
+  - `README.md`, `docs/` - User documentation (`docs/JOBS.md` for Claude Jobs)
   - `CHANGELOG.md` - Version history (**update before commits**)
   - `apparmor.txt` - Security profile
 
