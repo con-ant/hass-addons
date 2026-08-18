@@ -12,13 +12,13 @@ The v2 review found the design sound in shape and wrong in several load-bearing 
 - **The Supervisor token story was self-contradictory** (strip it and `ha`/hass-mcp die; keep it and any Bash reads it). v3: a per-run localhost **broker** holds the token; the job sees only a port and a worthless nonce.
 - **`Read(/homeassistant/**)` exposed secrets** including the add-on's own credentials. v3: no default read grant, per-job `paths:` opt-in, an image-shipped deny baseline that also polices Grep/Glob and Bash file access (probed).
 - **Result extraction by prose-tail parsing was brittle.** v3: native `--json-schema` structured output (probed: the envelope carries a parsed, schema-conformant object), with the status and action ids **enum-locked** so the model cannot fake runner-owned states or invent actions.
-- **States-API entities vanish on HA Core restart.** v3: a designed republish subsystem (three triggers) anchored by one registry-backed REST summary sensor that the staleness alarm watches instead of per-job entities.
+- **States-API entities vanish on HA Core restart.** v3: a designed republish path (three triggers) anchored by one registry-backed REST summary sensor that the staleness alarm watches instead of per-job entities.
 - **The stop path orphaned every in-flight run.** v3: per-run process groups, pgid files in `/run/claudecode/`, an explicit teardown budget that fits the 30 s Supervisor deadline, and a TERM trap that publishes `aborted`.
 - **Action buttons laundered attacker-authored payloads through a human tap.** v3: actions are statically declared, model-selected by id only, nonce-authorized — and the whole chain is **deferred to v1.1** so v1 ships provably mutation-free.
 - **Tier B (crond) detected outages it could tell nobody about**, using crond incantations that were wrong anyway. v3: Tier B is cut from v1; a sleep-loop scheduler design is recorded with re-entry conditions.
 - **The HA surface used mechanisms that don't exist** (add-on-created `input_boolean` helpers, button entities, custom notification events). v3: automation-enabled-state plus an add-on flag file as the kill switch, Lovelace `tap_action` buttons, a shipped translation automation, one schedule blueprint.
 - **Onboarding friction** (hand-copied token, hand-discovered hostname, unmentioned `packages:` include). v3: the add-on renders the HA package itself with hostname and token baked in; one `packages:` include remains.
-- **Operational gaps** (no global concurrency cap, no atomic-write convention, no log retention, no endpoint supervision, wrong flock dance). All specified in §4.7.
+- **Operational gaps** (no global concurrency cap, no atomic-write convention, no log retention, no endpoint supervision, wrong flock dance). All specified in §4.7 and Appendix A.
 - **The core noun changed: *task* → *job*** (one execution remains a *run*). *Task* collides with Claude Code's in-session `Task*` tools and with HA's core `ai_task` integration; *job* carries the cron/CI mental model and collides with nothing user-facing (§4.2).
 - Markdown defects that swallowed every `<placeholder>` are fixed; the verified/assumed discipline is kept and extended with facts live-probed on CLI 2.1.233 (§2, §13).
 
@@ -62,7 +62,7 @@ Two evidence classes. **Install facts** were checked live on the reference insta
 | ttyd cannot host a second HTTP route | `ttyd --help` | The trigger endpoint is its own listener |
 | Add-ons resolve as `<repo-hash>-claudecode` on the hassio network; the hash is per-repository-URL, not per-install | `http://d5369777-music-assistant:8095/` → 200 from inside this add-on; bare short names do not resolve | The shipped hostname is portable verbatim; resolution from HA Core itself is a PR 4 verify item |
 | The AppArmor profile already grants `network` | `apparmor.txt` | A second listener needs no profile change |
-| Startup is one function per step in `claudecode-start`; ttyd runs as a child (`TTYD_PID`, `wait`); `on_stop` handles SIGTERM; `STOP_GRACE_SECS=10`; Supervisor kill deadline `timeout: 30`; `init: true` puts tini at PID 1 | `claudecode-start`, `config.yaml` | New machinery slots in as functions and must fit the teardown budget (§4.7) |
+| Startup is one function per step in `claudecode-start`; ttyd runs as a child (`TTYD_PID`, `wait`); `on_stop` handles SIGTERM; `STOP_GRACE_SECS=10`; Supervisor kill deadline `timeout: 30`; `init: true` puts tini at PID 1 | `claudecode-start`, `config.yaml` | New machinery slots in as functions and must fit the teardown budget (§4.7 / Appendix A.1) |
 | Interactive-session env markers are `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID` | Live session export | The nesting guard tests these |
 | Session-scoped cron in Claude Code is not durable; claude.ai routines cannot reach the LAN | Probe / by construction | Neither is usable for this |
 | `CLAUDE.addon.md` is regenerated into `~/.claude/CLAUDE.md` at every boot | `claudecode-start` | The shipped file is where the interactive session learns about jobs (§7) |
@@ -109,7 +109,7 @@ flowchart LR
     BP --> RC
   end
   subgraph ADDON["Claude Code add-on (container)"]
-    EP["claude-job-endpoint<br/>+ 60 s ticker<br/>(reaper · publish-retry · prune)"]
+    EP["claude-job-endpoint<br/>+ the tick (60 s loop)"]
     RUN["claude-job run &lt;name&gt;<br/>runner"]
     BRK["ha-broker<br/>127.0.0.1, per-run<br/>holds SUPERVISOR_TOKEN"]
     CLI["claude -p<br/>env -i · --setting-sources ''<br/>cwd /data/claude-jobs/project"]
@@ -136,7 +136,7 @@ flowchart LR
   ENT -. state change .-> HA
 ```
 
-_Home Assistant triggers a job over HTTP. The runner composes policy from the image plus the job's frontmatter, runs Claude headlessly behind a token broker, and publishes the schema-enforced result as an entity and a notification. The endpoint's ticker reaps stuck runs and republishes entities; the registry-backed anchor sensor is what the alarm watches._
+_Home Assistant triggers a job over HTTP. The runner composes policy from the image plus the job's frontmatter, runs Claude headlessly behind a token broker, and publishes the schema-enforced result as an entity and a notification. The endpoint's tick (§4.9) demotes stuck runs and republishes entities; the registry-backed anchor sensor is what the alarm watches._
 
 ### 4.1 Layout on disk
 
@@ -146,7 +146,7 @@ _Home Assistant triggers a job over HTTP. The runner composes policy from the im
 ├── energy-report.md
 ├── _notify.yaml                           # optional notifier config (§4.8)
 ├── logs/
-│   ├── <name>.jsonl                       # one line per run; self-pruned (§4.7)
+│   ├── <name>.jsonl                       # one line per run; self-pruned (Appendix A.6)
 │   └── cost-<YYYY-MM>.json                # archived monthly cost rollups
 └── state/
     ├── <name>.json                        # last result + published/notified flags
@@ -162,8 +162,8 @@ _Home Assistant triggers a job over HTTP. The runner composes policy from the im
 └── token                                  # endpoint bearer token, 0600 (§4.9)
 
 /run/claudecode/                           # tmpfs semantics; wiped with the container
-├── stopping · endpoint.pid · endpoint.status       # spawner control files (§4.7)
-├── jobs/<name>.pgid                       # JSON per in-flight run (§4.7)
+├── stopping · endpoint.pid · endpoint.status       # spawner control files (Appendix A)
+├── jobs/<name>.pgid                       # JSON per in-flight run (§4.7 / Appendix A.1)
 └── run/<name>.settings.json · <name>.mcp.json · <name>.port   # per-run, 0600
 
 /usr/share/claudecode/                     # image-shipped, immutable at runtime
@@ -179,7 +179,7 @@ Changes from v2: `_settings.json` and `_project/` are gone from the volume — p
 
 ### 4.2 Job definitions — the frontmatter schema
 
-A job file is best understood as **a Claude Code custom-agent definition plus scheduling**: the `model:`, `tools:` and prompt-body keys carry exactly their custom-agent meanings, and everything else (`timeout`, `max_cost_usd`, `notify`, `paths`, `input`, `min_interval`, `stale_after`, `actions`) is the scheduling-and-surfacing layer this design adds. (Whether the runner should literally invoke via `--agents`/`--agent` instead of assembling flags itself is an open implementation question — [verify: `--agents` composes with `--setting-sources ""` and `--json-schema`]; the framing stands either way.) The job's **name is its filename stem**; a `name:` key is rejected with the hint "name is derived from the filename; remove this key". Filenames must match `^[a-z0-9]+(-[a-z0-9]+)*\.md$` (lowercase, hyphen-separated, ≤ 48 chars, underscores forbidden) — so the entity slug (hyphen → underscore, `health-check.md` → `sensor.claude_job_health_check`) is collision-free by construction. Non-conforming files and `_`-prefixed infrastructure files are not jobs; `claude-job validate` says why. Unknown keys are **errors** (a typo'd `timout:` must not silently vanish).
+A job file is best understood as **a Claude Code custom-agent definition plus scheduling**: the `model:`, `tools:` and prompt-body keys carry exactly their custom-agent meanings, and everything else (`timeout`, `max_cost_usd`, `notify`, `paths`, `input`, `min_interval`, `stale_after`, `actions`) is the scheduling-and-surfacing layer this design adds. (Whether the runner should literally invoke via `--agents`/`--agent` instead of assembling flags itself is now closed — **verified install-side, negative**: the isolation flags do compose with `--agents` (deny rules, `allowedTools`, the budget cap and the agent's own `model:` all held), but `structured_output` came back **null** — the agent path produced prose across 11 turns and never submitted the schema object, while the identical invocation without `--agents` returned a valid, enum-locked object. So the runner assembles flags itself and never invokes via `--agents`; the framing above is vocabulary, not mechanism.) The job's **name is its filename stem**; a `name:` key is rejected with the hint "name is derived from the filename; remove this key". Filenames must match `^[a-z0-9]+(-[a-z0-9]+)*\.md$` (lowercase, hyphen-separated, ≤ 48 chars, underscores forbidden) — so the entity slug (hyphen → underscore, `health-check.md` → `sensor.claude_job_health_check`) is collision-free by construction. Non-conforming files and `_`-prefixed infrastructure files are not jobs; `claude-job validate` says why. Unknown keys are **errors** (a typo'd `timout:` must not silently vanish).
 
 **Naming decision.** The noun is **job** (one execution is a **run**). *Task* was rejected because it collides twice with things a user of this add-on already sees: Claude Code's own in-session `Task*` tools, and Home Assistant's core `ai_task` integration (the reference install already has `ai_task.claude_ai_task`). *Job* transfers the cron/CI mental model and collides with nothing user-facing — the Supervisor's internal jobs API has no user-facing surface.
 
@@ -191,18 +191,19 @@ description: Daily health check; reports anything a human should look at.
 
 model: fable
   # OPTIONAL · default: add-on option job_default_model (ships "fable").
-  # MUST be in allowed_job_models (add-on option, default
-  # [fable, opus, sonnet, haiku]). [verify: the installed CLI resolves the
-  # alias `fable`; if not, the shipped default and allow-list entry are the
-  # full ID `claude-fable-5` instead — the validator treats both as one model.]
-  # Aliases only in shipped examples; operators may append full model IDs to the option.
+  # MUST be in the model allow-list — an image constant in v1, value recorded
+  # in §4.11. [verify: the installed CLI resolves the alias `fable`; if not,
+  # the shipped default and allow-list entry are the full ID `claude-fable-5`
+  # instead — the validator treats both as one model.]
+  # Aliases only in shipped examples; an operator needing a full model ID in
+  # the allow-list is exactly §4.11's promotion trigger.
 
 timeout: 600
-  # OPTIONAL · seconds · default 600 · min 30 · max job_max_timeout (option, ships 3600).
+  # OPTIONAL · seconds · default 600 · min 30 · max 3600 (image constant — §4.11).
   # Wall clock: the runner runs `timeout --signal=TERM -k 15 <timeout>`.
 
 max_cost_usd: 1.50
-  # OPTIONAL · default 1.00 · min 0.01 · max job_max_cost_usd (option, ships 5.00).
+  # OPTIONAL · default 1.00 · min 0.01 · max 5.00 (image constant — §4.11).
   # Passed as --max-budget-usd: a HARD mid-run stop [probed 2.1.233].
 
 max_turns: 50
@@ -302,13 +303,13 @@ One executable, `/usr/local/bin/claude-job`, a **verb-subcommand CLI** invoked i
 2. **Nesting guard.** If `CLAUDECODE` or `CLAUDE_CODE_SESSION_ID` is set, refuse with a clear message: a job must not run inside the interactive Claude. (This is a guard only — the child env is cleaned by construction at step 9's `env -i`, not by unsetting.)
 3. **Load & parse the definition; disabled gate.** Frontmatter parse failure → publish `error` (`reason: invalid_definition`) and exit 2. If the flag file `state/disabled/<slug>` exists or frontmatter `enabled: false` (and the invocation was not `force-run`): take the disabled path — no tokens, exit 3 (§4.10 defines exactly what is published).
 4. **Job lock.** `flock -n` on fd 9 → `state/<name>.lock`. The kernel releases the lock when the holder dies — **no stale detection, no PID dance, no lock breaking**. On contention, the **overlap rule** applies: a live run owns the entity's `running` state, so the runner writes **no entity state** — it appends `{"event":"skipped_overlap"}` to the log, increments a skip counter (tmp+rename), and exits 3; the next terminal publish carries `skipped_since_last: N`. After acquisition the lock file's content is overwritten with `{pid, pgid, run_id, started_at}` — diagnostics only, never logic.
-5. **Global semaphore.** `flock -w 60` (option `job_global_wait`, default 60 s) on `state/_global.lock` — HA schedules cluster on round times, so a short wait absorbs the 07:00 pileup instead of silently halving coverage. Default concurrency is **1** (`job_max_concurrent`, schema `int(1,4)`; N > 1 uses slot files). Wait expiry → publish `skipped` (`reason: concurrency_limit`, holder diagnostics attached), exit 3. `flock` runs as an external command inside the run's pgid, so a stop-path TERM interrupts the wait and the trap fires. The job's `timeout` clock starts *after* acquisition. Lock order is always job-then-global; no runner ever holds two job locks — deadlock-free.
+5. **Global semaphore.** `flock -w 60` (60 s — image constant, §4.11) on `state/_global.lock` — HA schedules cluster on round times, so a short wait absorbs the 07:00 pileup instead of silently halving coverage. Concurrency is **1** (image constant; §4.11 records the promotion schema `int(1,4)`, N > 1 uses slot files). Wait expiry → publish `skipped` (`reason: concurrency_limit`, holder diagnostics attached), exit 3. `flock` runs as an external command inside the run's pgid, so a stop-path TERM interrupts the wait and the trap fires. The job's `timeout` clock starts *after* acquisition. Lock order is always job-then-global; no runner ever holds two job locks — deadlock-free.
 6. **Full validation + input validation** (same `jobdef.py` the CLI uses; input re-checked even though the endpoint pre-checks). Failure → publish `error` (`reason: invalid_definition` / `invalid_input`, `validation_errors` list, `cost_usd: 0.0`), exit 2. **Fail-before-tokens is guaranteed** up to and including this step.
 7. **Stage the run.** Start the broker (§4.5); compose `/run/claudecode/run/<name>.settings.json` and `<name>.mcp.json` (0600); generate the per-job result schema (§4.6); fetch HA's time zone through the broker (fallback UTC).
-8. **Publish `running`** — state `running`, minimal attributes only: `job`, `started_at`, `timeout_s`, `run_id`, `trigger` (`endpoint|manual`), `prev_status`, `friendly_name`, `icon`. No headline, no detail — recorder must not store stale result text under `running`. Write the state-file phase marker `{"status":"running", run_id, pid, started_at, deadline}` (deadline = start + timeout_s; what the reaper reads) and `/run/claudecode/jobs/<name>.pgid` (`{pgid, run_id, started_at, deadline}`). Install the TERM trap (§4.7). If the publish POST fails (HA down), continue — the ticker retries (§4.7).
+8. **Publish `running`** — state `running`, minimal attributes only: `job`, `started_at`, `timeout_s`, `run_id`, `trigger` (`endpoint|manual`), `prev_status`, `friendly_name`, `icon`. No headline, no detail — recorder must not store stale result text under `running`. Write the state-file phase marker `{"status":"running", run_id, pid, started_at, deadline}` (deadline = start + timeout_s; what the tick's duty 1 reads) and `/run/claudecode/jobs/<name>.pgid` (`{pgid, run_id, started_at, deadline}`). Install the TERM trap (Appendix A). If the publish POST fails (HA down), continue — the tick retries (duty 2 — §4.9).
 9. **Assemble the prompt** (§4.6: typed-input block if any, job body verbatim, submission trailer) and **spawn** the exact invocation of §4.4.
-10. **Judge.** Parse the envelope; apply the judgment table (§4.6). If the failure is auth-shaped, retry exactly once (§4.7).
-11. **Persist.** Append one complete JSONL line to `logs/<name>.jsonl` (then self-prune, §4.7); update `state/_cost.json`; write `state/<name>.json` **last** (tmp+rename) with `published: false`.
+10. **Judge.** Parse the envelope; apply the judgment table (§4.6). If the failure is auth-shaped, retry exactly once (Appendix A.8).
+11. **Persist.** Append one complete JSONL line to `logs/<name>.jsonl` (then self-prune, Appendix A.6); update `state/_cost.json`; write `state/<name>.json` **last** (tmp+rename) with `published: false`.
 12. **Publish** the terminal state and attributes (§4.10 schema); on 2xx rewrite the state file with `published: true`.
 13. **Notify.** Hand the result to `claude-job-notify` with the resolved channel list. If the notifier is absent (PR 1 before PR 2), skip and set the entity attribute `notify_status: skipped_no_notifier`.
 14. **Cleanup & exit.** Kill the broker, remove `/run/claudecode/run/<name>.*` and the pgid file (the EXIT trap covers crash paths). Exit codes: **0** — run completed, findings included (a critical finding is a *successful run*; the finding is the product); **2** — invalid definition/input; **3** — skipped/overlap/disabled; **143** — aborted by TERM.
@@ -394,9 +395,9 @@ env -i HOME=/root PATH=/usr/local/lib/claude-job/bin:/usr/local/bin:/usr/bin:/bi
     --append-system-prompt "$(cat /usr/share/claudecode/job-contract.md)"
 ```
 
-`timeout -k 15` is the single grace value used everywhere in this document: TERM at `timeout_s`, KILL 15 s later. The stop path does not depend on it — it TERMs the pgid directly and budgets its own 5 s (§4.7).
+`timeout -k 15` is the single grace value used everywhere in this document: TERM at `timeout_s`, KILL 15 s later. The stop path does not depend on it — it TERMs the pgid directly and budgets its own 5 s (§4.7 / Appendix A.1).
 
-**Credential sharing: the shared config dir, deliberately.** An isolated `CLAUDE_CONFIG_DIR` with a symlinked `.credentials.json` was rejected — the CLI writes credentials via tmp+rename, which would replace the symlink and fork the credential store, doubling the refresh-expiry bug class this add-on already fought; a copied credentials file forks token lineages outright. With settings, memory and MCP isolation delivered by flags, the only things the shared dir contributes are exactly the things wanted: one `.credentials.json`, one OAuth identity, transcripts inspectable from the terminal. The concurrent-refresh race that sharing leaves open is handled by the auth retry (§4.7).
+**Credential sharing: the shared config dir, deliberately.** An isolated `CLAUDE_CONFIG_DIR` with a symlinked `.credentials.json` was rejected — the CLI writes credentials via tmp+rename, which would replace the symlink and fork the credential store, doubling the refresh-expiry bug class this add-on already fought; a copied credentials file forks token lineages outright. With settings, memory and MCP isolation delivered by flags, the only things the shared dir contributes are exactly the things wanted: one `.credentials.json`, one OAuth identity, transcripts inspectable from the terminal. The concurrent-refresh race that sharing leaves open is handled by the auth retry (Appendix A.8).
 
 ### 4.5 The token broker and the `ha` CLI
 
@@ -462,7 +463,7 @@ Log routes are matched **exact-path** (query strings allowed, a path segment `fo
 | `ok` / `info` / `warning` / `critical` | model (contract), `warning` also by runner escalation | the finding |
 | `error` | runner only | the run or definition is broken: validation, envelope error, timeout, no/invalid result |
 | `skipped` | runner only | declined to start with nothing in flight: `concurrency_limit`, or disabled-and-never-ran (§4.10) |
-| `aborted` | runner TERM trap / reaper | the platform interrupted a healthy run (add-on stop, external kill); self-heals next run |
+| `aborted` | runner TERM trap / the tick | the platform interrupted a healthy run (add-on stop, external kill); self-heals next run |
 
 Overlap of the *same* job never writes entity state (step 4) — publishing `skipped` over a live `running` would clobber `started_at` and break overdue detection. Staleness is a watcher computation, not a state.
 
@@ -491,7 +492,7 @@ Overlap of the *same* job never writes entity state (step 4) — publishing `ski
 | 5 | no parseable envelope on stdout | `error` | `no result envelope (exit <E>)` | `raw_tail` (last 500 chars) |
 | 6 | `subtype == "error_max_turns"` | `error` | `hit max turns (<max_turns>) before finishing` | |
 | 7 | `subtype == "error_max_budget_usd"` [probed 2.1.233] | `error` | `stopped at budget cap $<max_cost_usd>` | |
-| 8 | `is_error` or any other non-`success` subtype | `error` | `run failed: <first 120 chars>` | auth-shaped → retry once upstream (§4.7), then the "run /login" wording |
+| 8 | `is_error` or any other non-`success` subtype | `error` | `run failed: <first 120 chars>` | auth-shaped → retry once upstream (Appendix A.8), then the "run /login" wording |
 | 9 | `success` but SO null/absent | `error` | `completed without submitting a result` | `result_tail` for diagnosis, never parsed |
 | 10 | SO fails runner re-validation | `error` | `result failed schema validation: <violation>` | logged, not published |
 | 11 | valid SO **and** `permission_denials` non-empty | contract status, **escalate ≥ `warning`** | prefixed `[denied: <tool>×N]` | a speculative denied probe with a good result is a *warning naming the gap*, never an error; denial list appended to `detail` |
@@ -504,50 +505,17 @@ Exit codes are consulted only in rows 3–5; whenever an envelope parses, the en
 
 **Native bounds — three concentric, all set on every run:** `--max-turns` (default 50) catches loops; `--max-budget-usd` (from `max_cost_usd`) hard-stops runaway spend with a typed envelope; `timeout --signal=TERM -k 15` (from `timeout`) catches hangs and is the only bound that produces no envelope. Sizing guidance in DOCS: `timeout ≥ max_turns × 10 s` so the typed bounds trip first.
 
-### 4.7 Lifecycle — stop path, reaping, durability, retention
+### 4.7 Lifecycle — stop path, recovery, durability
 
-**Stop path.** Constants next to `STOP_GRACE_SECS`: `JOB_STOP_GRACE_SECS=5`, `RUN_DIR=/run/claudecode`. Every run is its own process group (step 1) and writes `/run/claudecode/jobs/<name>.pgid` — **the single PID artifact in this design**; the endpoint keeps no child table and the stop path never walks process trees. One `kill -TERM -<pgid>` takes runner + claude + MCP servers + broker atomically.
+A run's whole life is the §4.3 sequence: start → nesting guard → locks → `running` publish → spawn → judge → persist → publish → notify → cleanup. This section is the shape of what happens when that sequence is interrupted, and the bounds that keep state and disk honest; the mechanics — lock-file contents, atomic-write conventions, retention rules, the teardown budget table, the auth-retry regex — live in **Appendix A**, unchanged in substance.
+
+**Stop path, in order.** `on_stop` stops the spawners first (nothing new can spawn), TERMs every in-flight run's process group **early** (one pgid file per run in `/run/claudecode/jobs/` is the single PID artifact; `kill -TERM -<pgid>` takes runner + claude + MCP servers + broker atomically), tears down the interactive session while runners drain, reaps stragglers (poll ≤ 5 s, then KILL), then stops ttyd — ≤ 27 s worst case against the 30 s Supervisor deadline (stage-by-stage budget: Appendix A.1).
 
 > **In-flight jobs are killed and marked `aborted` on any restart — no survival, no resume.** A 600 s run cannot fit any grace window (arithmetic, not policy); resuming against stale input data is *less* correct than the free re-run at the next schedule; and restarts usually mean config changes. The honest surface is an entity reading `aborted — add-on restarted`, healed by the next run.
 
-New `claudecode-start` functions (same best-effort, warn-and-continue discipline as every existing step): `setup_job_dirs`, `start_job_endpoint` (respawn loop below), `stop_job_spawners` (touch `stopping`, TERM the loop + current endpoint PID; ≤ 2 s), `signal_job_runs` (TERM every pgid file's group; instant), `reap_job_runs` (poll ≤ 5 s, then KILL; remove pgid files), and the composite `shutdown_jobs`. Modified `on_stop` — signal early, reap late, so runners drain while the interactive session tears down:
+**Recovery.** The runner's TERM trap publishes `aborted` through the same `finish()` every exit path uses (Appendix A.2). A runner that died without reporting is demoted to `error` by the tick's duty 1 (Appendix A.3); results persisted but unpublished are republished by the tick's duty 2; the endpoint itself runs under a never-give-up respawn loop (Appendix A.5).
 
-```bash
-on_stop() {
-  trap - EXIT TERM INT HUP
-  stop_job_spawners     # nothing new can spawn
-  signal_job_runs       # TERM lands EARLY
-  stop_sessions          # existing, unchanged
-  reap_job_runs         # runners had stop_sessions' wall-clock + up to 5 s
-  stop_ttyd              # existing, unchanged
-  exit 143
-}
-```
-
-| Stage | Worst case | Cumulative |
-|---|---|---|
-| `stop_job_spawners` | 2 s | 2 s |
-| `signal_job_runs` | < 0.1 s | 2 s |
-| `stop_sessions` (existing) | 15 s | 17 s |
-| `reap_job_runs` | 5 s + KILL | 22 s |
-| `stop_ttyd` (usually already done) | 5 s | 27 s |
-| **total** | | **≤ 27 s < 30 s Supervisor deadline** |
-
-The ttyd-died path (today: `wait "$TTYD_PID"; exit $?`, orphaning everything) gains `shutdown_jobs` before its exit; `on_abort` needs no structural change because every new stop function no-ops on empty state.
-
-**Runner TERM trap** (installed step 8; budget ≤ 4 s, inside `reap_job_runs`' 5 s): nudge the claude child with TERM idempotently, wait ≤ 2 s, then `finish aborted` — one shared `finish()` used by *all* exit paths: (a) write `state/<name>.json` durably first (tmp+rename, `published: false`), (b) append one complete JSONL line, (c) best-effort publish with `curl --max-time 2`, marking `published: true` on 2xx, (d) remove the pgid file; exit 143. A TERM-killed claude emits no envelope — the record is synthesized entirely from runner-side knowledge, never parsed from absent output.
-
-**Stuck-`running` recovery — one reaper.** The endpoint's 60 s **ticker** (plus the same pass at every endpoint start, which covers hard container kills since the endpoint starts on every boot). Per `state/*.json` with `status == "running"`: within `deadline + 120 s` → leave alone; past margin with a live pgid → warn (the spawn watchdog SIGKILLs at `deadline + 180 s` as last resort); past margin with no live pgid → rewrite to `error` / `reason: lost` ("runner died without reporting") and publish. The runner never reaps; the auth retry extends `deadline` in the state file so the reaper needs no retry knowledge. Blind spot: endpoint down *and* runner hard-killed → nothing demotes until the next endpoint start; the HA-side anchor alarm covers that window — a deliberate pairing.
-
-**Durable writes.** Every JSON state write is tmp+rename in the same directory (the repo's `settings_set` convention). JSONL appends are single complete lines; readers skip lines that fail to parse (torn tails tolerated, never repaired). There is **no `state/pending/` queue** — last-state-wins: `state/<name>.json` carries `published: false` until a 2xx; the ticker retries every unpublished file every 60 s; a newer run supersedes an unpublished older one (HA needs current state, not replayed history — history lives in the JSONL). The ticker's first pass publishes everything regardless of flag, which doubles as the add-on-start republish trigger (§4.10).
-
-**Endpoint supervision.** The endpoint runs under an in-script respawn loop (background subshell, `trap - INT QUIT`, current PID rewritten to `endpoint.pid` each spawn): backoff 1 → 60 s doubling; after 5 consecutive fast crashes (< 10 s uptime) degrade to 300 s retries and POST `sensor.claude_jobs_endpoint = error` directly to the states API — a *positive* in-container alarm complementing the HA-side anchor. Never gives up: a dead endpoint means no triggers, no reaper, no publish-retry. The loop exits (instead of respawning) when `stopping` exists. Runner processes spawned with `start_new_session=True` are detached from the endpoint's lifetime; `init: true` means tini reaps them if the endpoint dies mid-run [verify: PR 3 sandbox].
-
-**Log retention** (the jobs dir rides in every HA backup — bounds are correctness, not housekeeping): the runner self-prunes `logs/<name>.jsonl` in `finish()` when > 1 MiB, keeping the last 200 lines (tmp+rename); per-line caps (`detail` ≤ 8 KiB, raw tail ≤ 4 KiB); endpoint and respawn diagnostics go to **stdout** (the add-on log — Supervisor owns retention), never the backup set; the ticker's daily pass backstop-prunes anything > 2 MiB and deletes stray `*.tmp.*` files older than 1 h. Bound: ≈ #jobs × 1 MiB.
-
-**Transcript retention.** Every run writes a full CLI transcript into `/homeassistant/.claudecode/projects/-data-claude-jobs-project/` (§4.1) — inside the HA backup set, containing everything the job read. Same rationale as `logs/`: bounds are correctness, not housekeeping. The runner prunes this directory — **and only this directory; sibling `projects/` dirs belong to the interactive session** — in `finish()`: delete transcript files older than `job_transcript_keep_days` (add-on option, default 30), then oldest-first until the directory is ≤ 50 MiB. The ticker's daily pass runs the identical rule as backstop (covers hard-killed runs where `finish()` never ran; deletion by mtime makes the overlap harmless). Recent transcripts stay inspectable from the terminal (§4.4); nothing ever resumes a job transcript, so pruning breaks no resume path. [verify: whether the CLI's own `cleanupPeriodDays` cleanup (default 30 days) already sweeps this directory for `-p` runs under `--setting-sources ""` — if it does, the explicit prune is belt-and-braces and both keep the same 30-day figure.]
-
-**Auth retry** (the shared-credentials refresh race, §4.4): if `is_error` and the envelope text matches `(oauth|authentication|unauthorized|401|token.*(expired|invalid|revoked)|please.*(log ?in|/login))` (case-insensitive) → exactly one retry after `10 + jitter` seconds (lets a concurrent interactive refresh land), with the state file's `deadline` extended and both attempts logged (`attempts: 2`, `retried_auth: true`). Second auth-shaped failure → `error` "claude.ai login expired — run /login in the terminal" (the same message the terminal shows). No-envelope failures and non-auth errors are never retried.
+**Durability and bounds.** Every JSON state write is atomic tmp+rename; JSONL logs tolerate torn tails and are never repaired; logs and transcripts are pruned by the runner in `finish()` with the tick's duty 4 as backstop; the shared-credentials refresh race (§4.4) gets exactly one auth retry. All rules and numbers: Appendix A.4–A.8.
 
 ### 4.8 The notifier — `claude-job-notify`
 
@@ -606,17 +574,23 @@ Python 3 stdlib only (`http.server.ThreadingHTTPServer`, daemon threads — ever
 
 **Rate limiting** — cost protection, not security (every mutating caller already holds the token): per-job `min_interval` (default 60 s, frontmatter override, 0 = off), in-memory, reset on respawn (documented; the flock and `timeout` are the real resource bounds). Terminal invocations bypass it by construction.
 
-**The ticker** (a daemon thread in the endpoint, every 60 s + once at start): publish-retry for `published: false` state files; the stuck-`running` reaper; the daily prune backstop (logs **and** the job transcript directory — §4.7); stray tmp cleanup; and — at most every 10 min, piggybacked on `GET /jobs` handling — the republish canary (§4.10).
+**The tick** — `claude-job-endpoint`'s single background loop (a daemon thread, every 60 s plus one pass at endpoint start; conceptually `--tick`). One loop, one name; its duties, referenced throughout this document by number:
 
-**CLI preflight — drift fails closed.** A shared `cli_preflight()` greps `claude --help` for the load-bearing flags verified help-listed on 2.1.233: `--setting-sources`, `--settings`, `--tools`, `--json-schema`, `--strict-mcp-config`. (`--max-turns` is deliberately absent from this list: it exists but is hidden from `--help` on 2.1.233 — the grep set is "flags verified help-listed", nothing more.) It runs (1) in `claudecode-start` after `maybe_update_claude` — the only point where `auto_update_claude` can change the CLI — and (2) in the endpoint's startup and the runner's step 6, so terminal invocations are equally gated. A missing `--json-schema` activates the §4.6 MCP fallback; any other miss is **refusal**: the endpoint still starts but answers `POST /jobs/*/run` with `503 {"reason": "cli_preflight_failed", "missing": […]}`, reports `degraded` on `/health`, carries the failure in `GET /jobs` (so the anchor names the reason instead of merely going `unavailable`), and publishes `sensor.claude_jobs_endpoint = error`; the reaper, publish-retry and republish keep running. The endpoint additionally exposes `claude_version` and `cli_drift: true` whenever the running version ≠ `/etc/claude-code-version`. Honest limits: a hidden-but-working flag would cause a false refusal (loud, one-line fix — the acceptable direction), and **flag-semantics drift with the flag still present is not caught** — there is no token-free way to exercise the permission machinery, and a boot-time model canary would both cost tokens and require credentials that don't exist before first `/login`, so it is not a gate.
+1. **Demote stuck `running`** runs past their deadline (mechanics: Appendix A.3).
+2. **Retry unpublished** `state/*.json` files (`published: false` until a 2xx — Appendix A.4).
+3. **Republish canary check** — at most every 10 min, piggybacked on `GET /jobs` handling (§4.10 trigger 3).
+4. **Backstop prune** (daily) of logs **and** the job transcript directory (Appendix A.6–A.7).
+5. **Stray-tmp cleanup** — delete `*.tmp.*` files older than 1 h.
+
+**CLI preflight — drift fails closed.** A shared `cli_preflight()` greps `claude --help` for the load-bearing flags verified help-listed on 2.1.233: `--setting-sources`, `--settings`, `--tools`, `--json-schema`, `--strict-mcp-config`. (`--max-turns` is deliberately absent from this list: it exists but is hidden from `--help` on 2.1.233 — the grep set is "flags verified help-listed", nothing more.) It runs (1) in `claudecode-start` after `maybe_update_claude` — the only point where `auto_update_claude` can change the CLI — and (2) in the endpoint's startup and the runner's step 6, so terminal invocations are equally gated. A missing `--json-schema` activates the §4.6 MCP fallback; any other miss is **refusal**: the endpoint still starts but answers `POST /jobs/*/run` with `503 {"reason": "cli_preflight_failed", "missing": […]}`, reports `degraded` on `/health`, carries the failure in `GET /jobs` (so the anchor names the reason instead of merely going `unavailable`), and publishes `sensor.claude_jobs_endpoint = error`; the tick keeps running, every duty. The endpoint additionally exposes `claude_version` and `cli_drift: true` whenever the running version ≠ `/etc/claude-code-version`. Honest limits: a hidden-but-working flag would cause a false refusal (loud, one-line fix — the acceptable direction), and **flag-semantics drift with the flag still present is not caught** — there is no token-free way to exercise the permission machinery, and a boot-time model canary would both cost tokens and require credentials that don't exist before first `/login`, so it is not a gate.
 
 ### 4.10 The Home Assistant surface
 
-**Entity mechanism — states API plus designed republish, anchored by one registry sensor.** Dynamic states-API entities have no registry entry: every Core restart erases them (v2's staleness alarm was unimplementable — an absent entity has no `last_updated`). MQTT discovery would fix that but demands a broker most installs don't run — deferred to v2 of this feature as an optional tier. The v3 resolution: stop making the alarm depend on per-job entities at all. The endpoint computes staleness server-side (`GET /jobs`); one shipped **REST sensor** — `sensor.claude_jobs_attention`, registry-backed via `unique_id`, state = the `attention` count (the name says what the state is) — polls it every `job_anchor_scan_interval` seconds (add-on option, schema `int(15,300)`, default 60, rendered into the package's `rest:` block; capped at 300 so the shipped alarm's `for:` windows stay sound), survives every restart by construction, and goes `unavailable` when the endpoint is down, *which is itself the alarm condition*. Per-job entities remain what they are good at: dashboard detail and history, where a restart gap is cosmetic.
+**Entity mechanism — states API plus designed republish, anchored by one registry sensor.** Dynamic states-API entities have no registry entry: every Core restart erases them (v2's staleness alarm was unimplementable — an absent entity has no `last_updated`). MQTT discovery would fix that but demands a broker most installs don't run — deferred to v2 of this feature as an optional tier. The v3 resolution: stop making the alarm depend on per-job entities at all. The endpoint computes staleness server-side (`GET /jobs`); one shipped **REST sensor** — `sensor.claude_jobs_attention`, registry-backed via `unique_id`, state = the `attention` count (the name says what the state is) — polls it every 60 s (an image constant rendered into the package's `rest:` block — §4.11, which also records the promotion schema), survives every restart by construction, and goes `unavailable` when the endpoint is down, *which is itself the alarm condition*. Per-job entities remain what they are good at: dashboard detail and history, where a restart gap is cosmetic.
 
 Naming convention, stated once: **`claude_job_<slug>` entities are per-job; `claude_jobs_*` entities are platform-level.** No platform name is a one-character edit away from the per-job pattern.
 
-**Republish — exactly three triggers:** (1) endpoint start = add-on start (with backoff up to 10 min for host reboots where Core lags); (2) `POST /republish`, called by a shipped automation on the `homeassistant start` event; (3) a lazy canary — at most every 10 min during `GET /jobs` handling, the endpoint GETs `sensor.claude_jobs_cost_raw` from the states API; a 404 means Core restarted and trigger 2 was lost → full republish. Honest statement (in DOCS.md too): **without the package installed there is no anchor and no alarm; per-job entities degrade to best-effort.**
+**Republish — exactly three triggers:** (1) endpoint start = add-on start (with backoff up to 10 min for host reboots where Core lags); (2) `POST /republish`, called by a shipped automation on the `homeassistant start` event; (3) a lazy canary (the tick's duty 3) — at most every 10 min during `GET /jobs` handling, the endpoint GETs `sensor.claude_jobs_cost_raw` from the states API; a 404 means Core restarted and trigger 2 was lost → full republish. Honest statement (in DOCS.md too): **without the package installed there is no anchor and no alarm; per-job entities degrade to best-effort.**
 
 **Entity set and attributes:**
 
@@ -626,11 +600,11 @@ Naming convention, stated once: **`claude_job_<slug>` entities are per-job; `cla
 | `sensor.claude_jobs_attention` | package REST sensor (registry) | alarm anchor + summary attributes |
 | `sensor.claude_jobs_cost_raw` | states API + republish | cost rollup + republish canary (non-registry, non-statistics — "raw") |
 | `sensor.claude_jobs_monthly_cost` | package template sensor (registry, `state_class: total_increasing`, reads the anchor) | the statistics-grade cost entity |
-| `sensor.claude_jobs_endpoint` | states API (respawn-loop and preflight alarms only) | positive endpoint-failure signal (§4.7, §4.9) |
+| `sensor.claude_jobs_endpoint` | states API (respawn-loop and preflight alarms only) | positive endpoint-failure signal (Appendix A.5, §4.9) |
 
 `sensor.claude_jobs_endpoint` only ever publishes `error` — nothing sets it to `ok`, which is why it is not named `_endpoint_health`.
 
-Terminal publish of `sensor.claude_job_<slug>`: state ∈ `ok|info|warning|critical|error|skipped|aborted`; attributes `job`, `headline`, `detail` (**capped at 900 chars**, truncated at a line boundary, `detail_truncated: true` — recorder stores the full attribute dict on every state change; the full text lives in `state/<slug>.json`, `GET /jobs/<slug>/detail`, and the persistent notification), `last_run`, `duration_s`, `cost_usd`, `run_count`, `model`, `enabled`, `stale_after`, `run_id`, `session_id`, `envelope_subtype`, `skipped_since_last`, `notify_status`, `metrics.*`. The `running` publish carries minimal attributes only (§4.3 step 8). **`actions` selections are never published as attributes** — action descriptors in attributes would be readable and fireable by any automation, exactly the laundering surface v1.1's nonce design closes. A commented-out recorder exclusion for `sensor.claude_job_*` ships in the package (commented, because a second `recorder:` key collides with user config [verify]).
+Terminal publish of `sensor.claude_job_<slug>`: state ∈ `ok|info|warning|critical|error|skipped|aborted`; attributes `job`, `headline`, `detail` (**capped at 900 chars**, truncated at a line boundary, `detail_truncated: true` — recorder stores the full attribute dict on every state change; the full text lives in `state/<slug>.json`, `GET /jobs/<slug>/detail`, and the persistent notification), `last_run`, `duration_s`, `cost_usd`, `run_count`, `model`, `enabled`, `stale_after`, `run_id`, `session_id`, `envelope_subtype`, `skipped_since_last`, `notify_status`, `metrics.*`. The `running` publish carries minimal attributes only (§4.3 step 8). **`actions` selections are never published as attributes** — action descriptors in attributes would be readable and fireable by any automation, exactly the laundering surface v1.1's nonce design closes. A recorder exclusion for `sensor.claude_job_*` is deferred to v1.1 (§11) — an optimization, not correctness.
 
 **Kill switch — two layers, both honored.** The schedule automation's own enabled-toggle is the *schedule gate* (free, UI-native, what HA users reach for). The flag file `state/disabled/<slug>` is the *hard gate*, checked by the runner on every path (endpoint, run-now, CLI) — creation/removal is atomic, and it never rewrites a Claude-authored file. Frontmatter `enabled: false` is additionally honored as "born disabled, pending review". The coherent rule set:
 
@@ -646,15 +620,15 @@ Terminal publish of `sensor.claude_job_<slug>`: state ∈ `ok|info|warning|criti
 
 **The generated package.** The add-on has `homeassistant_config:rw`; when `enable_job_endpoint` turns on, `claudecode-start` **renders and writes** `/homeassistant/claudecode_jobs.yaml` (tmp+rename, header comment "generated — do not edit, changes are overwritten") with the real hostname and — per decision §6.4 — the bearer token baked into the `rest_command` headers, regenerated every boot so rotation and hostname changes self-heal.
 
-**Git-backed config guard.** Version-controlling `/homeassistant` is a documented, common pattern, and the usual blacklist-style (or absent) `.gitignore` would commit the rendered token file on the next auto-backup push (only a whitelist-style `*` + `!file` repo excludes it by default). So: when rendering with the token baked in and `/homeassistant/.git` exists, the renderer ensures the line `/claudecode_jobs.yaml` is present in `/homeassistant/.git/info/exclude` (created if absent; append idempotent). `info/exclude` is chosen over `.gitignore` deliberately: it has the same effect on every git operation in that clone, but is repo-local and untracked — the add-on keeps its §6.4 rule of never mutating a user-authored file. The renderer then runs `git -C /homeassistant ls-files --error-unmatch claudecode_jobs.yaml` (best-effort; tolerate git absent or `safe.directory` refusal): if the file is **already tracked**, no ignore mechanism helps — log a prominent warning at boot naming the fix (`claude-job token rotate`, switch to `job_token_via_secret: true`, and purge the file from history). DOCS.md carries a "git-backed config directories" callout next to the `job_token_via_secret` escape hatch, recommending the `!secret` mode outright for anyone who pushes their config repo anywhere, plus one line on credentials: if the config dir is git-backed with URL-embedded credentials, move them to a credential helper outside the repo — job `paths:` grants could otherwise read `.git/config`; the image deny baseline blocks `.git/**` under all job-readable roots as a backstop (and `~/.git-credentials`/`~/.gitconfig` are already covered by the `//root/**` deny), but credentials in a working tree remain readable by the interactive session and anything else with file access.
+**Git-backed config guard.** Version-controlling `/homeassistant` is a documented, common pattern, and the usual blacklist-style (or absent) `.gitignore` would commit the rendered token file on the next auto-backup push (only a whitelist-style `*` + `!file` repo excludes it by default). So: when rendering with the token baked in and `/homeassistant/.git` exists, the renderer ensures the line `/claudecode_jobs.yaml` is present in `/homeassistant/.git/info/exclude` (created if absent; append idempotent). `info/exclude` is chosen over `.gitignore` deliberately: it has the same effect on every git operation in that clone, but is repo-local and untracked — the add-on keeps its §6.4 rule of never mutating a user-authored file. The renderer then runs `git -C /homeassistant ls-files --error-unmatch claudecode_jobs.yaml` (best-effort; tolerate git absent or `safe.directory` refusal): if the file is **already tracked**, no ignore mechanism helps — log a prominent warning at boot naming the fix (`claude-job token rotate`, purge the file from history, and — once the v1.1 `!secret` rendering lands, §6.4/§11 — switch to it). DOCS.md carries a "git-backed config directories" callout, recommending the v1.1 `!secret` mode outright for anyone who pushes their config repo anywhere, plus one line on credentials: if the config dir is git-backed with URL-embedded credentials, move them to a credential helper outside the repo — job `paths:` grants could otherwise read `.git/config`; the image deny baseline blocks `.git/**` under all job-readable roots as a backstop (and `~/.git-credentials`/`~/.gitconfig` are already covered by the `//root/**` deny), but credentials in a working tree remain readable by the interactive session and anything else with file access.
 
 Contents, fixed forever (nothing in it is per-job):
 
 1. `rest_command.claude_job_run`, `claude_job_set_enabled`, `claude_job_republish` (and, from v1.1, `claude_job_action`)
-2. `rest:` → the `sensor.claude_jobs_attention` anchor (`job_anchor_scan_interval` poll of `GET /jobs`, default 60 s; summary attributes only — never the per-job array, which would put every headline into recorder every minute)
+2. `rest:` → the `sensor.claude_jobs_attention` anchor (a 60 s poll of `GET /jobs` — the §4.11 constant; summary attributes only — never the per-job array, which would put every headline into recorder every minute)
 3. `template:` → `sensor.claude_jobs_monthly_cost`, sourced from `state_attr('sensor.claude_jobs_attention', 'cost_month_usd')`
 4. `automation:` — republish-on-HA-start; the combined alarm (below); (v1.1: the action forwarder)
-5. the commented-out recorder exclusion; a commented-out example schedule (commented because shipping a live daily schedule on the default model is a spend decision only the user may make)
+5. a commented-out example schedule (commented because shipping a live daily schedule on the default model is a spend decision only the user may make); the commented-out recorder exclusion joins in v1.1 (§11)
 
 The **one remaining manual step**, per-install and never per-job: add `homeassistant: packages: claudecode_jobs: !include claudecode_jobs.yaml` to `configuration.yaml` and restart HA once.
 
@@ -663,6 +637,29 @@ The **one remaining manual step**, per-install and never per-job: add `homeassis
 **Scheduling — one blueprint.** The add-on writes `blueprints/automation/claudecode/schedule.yaml` next to the package: inputs `job` (text) and `at` (time selector); body = time trigger → `rest_command.claude_job_run` with `continue_on_error: true` (a non-2xx otherwise aborts the calling automation). Scheduling a new Claude-authored job is a UI flow producing a real automation whose enabled-toggle is the schedule gate — zero YAML per job, end to end. Blueprints cannot ship the `rest_command`/`rest:`/`template:` pieces, which is why the package exists; per-automation blueprints for the fixed automations would add import flows with no parameters worth asking for.
 
 **Example Lovelace view** (DOCS.md, stock cards only): a markdown card enumerating `sensor.claude_job_*` via Jinja with a footer comparing rendered count against the anchor's `job_count` (so a republish gap is visible, not silent); an entities card for the anchor and monthly cost; per-job button cards for run-now and disable.
+
+### 4.11 Add-on options: two shipped, everything else an image constant
+
+v1 exposes exactly **two** add-on options — the feature's master switch and the one knob every install's spend hangs on:
+
+| Option | Schema | Default |
+|---|---|---|
+| `enable_job_endpoint` | `bool` | `false` |
+| `job_default_model` | `str` | Fable, in the alias form of the settled decision (§4.2) |
+
+Every other knob this design prices ships as an **image constant** carrying the value the design already chose; nothing in `options.json` or on the volume can change it. The policy: **a constant is promoted to an option the first time a real install needs to change it; the schema for each is recorded here so promotion is mechanical.**
+
+| Constant (would-be option name) | v1 value | Schema on promotion | Governs |
+|---|---|---|---|
+| `job_max_concurrent` | 1 | `int(1,4)` | §4.3 step 5 |
+| `job_global_wait` | 60 s | `int(0,300)` | §4.3 step 5 |
+| `job_max_timeout` | 3600 s | `int(30,7200)` | frontmatter `timeout` ceiling (§4.2) |
+| `job_max_cost_usd` | 5.00 | `float(0.01,20.0)` | frontmatter `max_cost_usd` ceiling (§4.2) |
+| `allowed_job_models` | `[fable, opus, sonnet, haiku]` | `[str]` — operators append full model IDs | §4.2 `model:` validation |
+| `job_anchor_scan_interval` | 60 s | `int(15,300)` — cap 300 keeps the shipped alarm's `for:` windows sound | §4.10 anchor poll |
+| `job_transcript_keep_days` | 30 d | `int(1,365)` | transcript prune (Appendix A.7) |
+
+Per-job frontmatter keys (`timeout`, `max_cost_usd`, `max_turns`, `model`, `min_interval`, `stale_after`, …) are untouched by this rule — they are job data, not add-on configuration. (`job_token_via_secret` is not in either table: it is a v1.1 feature, not a demoted option — §6.4, §11.)
 
 ## 5 · A run, end to end
 
@@ -691,10 +688,10 @@ sequenceDiagram
   RUN->>NF: status=warning, channels resolved
   NF->>PH: persistent (replace-by-id) · notify.mobile_app_* (tag/group)
   HAS-->>HA: state change → any follow-up automation
-  Note over EP,HAS: ticker (60 s): publish-retry · reaper · canary republish
+  Note over EP,HAS: the tick (60 s): duties 1–3
 ```
 
-_Home Assistant gets its answer from the entity, not the HTTP response. The state file is written before the publish, so a crash between steps leaves the previous known-good state — and the ticker retries anything unpublished._
+_Home Assistant gets its answer from the entity, not the HTTP response. The state file is written before the publish, so a crash between steps leaves the previous known-good state — and the tick retries anything unpublished (duty 2)._
 
 ## 6 · Decision records
 
@@ -731,7 +728,7 @@ The token must exist on the HA side for `rest_command` headers. Two candidate sh
 
 > **Decision: the generated package, token baked in.** Writing a new, add-on-owned file (`claudecode_jobs.yaml`) is not mutating the user's `secrets.yaml` — the objection to auto-writing secrets (round-tripping hand-edited YAML, VCS conflicts) does not apply to a file the add-on owns outright and regenerates every boot. The UX difference is decisive: one include line versus a four-step flow with a paste, and rotation self-heals instead of silently 401ing.
 >
-> **The named risk:** the token enters `/homeassistant` and therefore the HA config backup set and anything the user shares from it. Bounded: the endpoint is internal-network only, so the token is useless off-host; rotation is one command. On git-backed config dirs the default rendering is additionally guarded by the renderer's `.git/info/exclude` entry and already-tracked check (§4.10) — chosen over a `.gitignore` append precisely because this section's rule is never mutating a user-authored file. **The hardened alternative ships too:** add-on option `job_token_via_secret: true` renders the package with `Authorization: !secret claude_job_auth` instead, and DOCS.md carries the 3-step manual copy (`claude-job token show` → `secrets.yaml` → reload restful commands) for users who want the token out of config — and recommends it outright for anyone who publishes their config repo (`secrets.yaml` is the canonical `.gitignore` entry in every guide, so the `!secret` path is genuinely git-safe). One primary path, one documented escape.
+> **The named risk:** the token enters `/homeassistant` and therefore the HA config backup set and anything the user shares from it. Bounded: the endpoint is internal-network only, so the token is useless off-host; rotation is one command. On git-backed config dirs the default rendering is additionally guarded by the renderer's `.git/info/exclude` entry and already-tracked check (§4.10) — chosen over a `.gitignore` append precisely because this section's rule is never mutating a user-authored file. **The hardened alternative is designed here and lands in v1.1 (§11):** add-on option `job_token_via_secret: true` renders the package with `Authorization: !secret claude_job_auth` instead, and DOCS.md carries the 3-step manual copy (`claude-job token show` → `secrets.yaml` → reload restful commands) for users who want the token out of config — recommended outright for anyone who publishes their config repo (`secrets.yaml` is the canonical `.gitignore` entry in every guide, so the `!secret` path is genuinely git-safe). Deferring it is correctness-neutral: the v1 `info/exclude` guard already keeps the default rendering out of git. One primary path, one documented escape.
 
 Invariant either way: the token never appears in `options.json`, the add-on log, or any HTTP response (`/health` exposes `token_set: true|false` only).
 
@@ -810,7 +807,7 @@ The user's own `CLAUDE.user.md` adds house-specific notes without explaining the
 3. **Bash command-analysis evasion.** An allowed `:*` pattern could in principle smuggle a compound command. Mitigations: the only allowed Bash family is `ha` (no path-taking arguments), file reads stayed policed in probes, and the broker bounds what `ha` can do regardless. Not fully closed [verify: compound-command probe].
 4. **Auto-approved "safe" commands** — verified install-side: `echo` and `cat` run with zero `Bash(...)` allow rules whenever `Bash` is in `--tools`, including as the second half of a `;` compound under an allowed prefix rule. The `;` compound itself is **not** an escape route (an appended `touch` was denied), and file reads stay policed — `cat` of a deny-listed path is denied. Consequence, stated plainly because it is the load-bearing fact of this section: **the image-shipped deny baseline is what stands between a Bash-capable job and `secrets.yaml`; allow rules alone do not.** Accepted with the deny baseline as the boundary.
 5. **The broker's `POST /core/api/template`** renders arbitrary Jinja — read-only breadth slightly beyond `/states` (registry metadata via `device_attr`/`area_name`/labels, none of it secret-bearing); render-only confirmed; the DoS shape (an expensive render stalling Core's event loop) is bounded the same as the already-allowed history queries. **Kept** (decision — §4.5); render-time bounds are a §13 verify row.
-6. **Token in the config backup set** under the default package rendering — decision §6.4, with the `!secret` escape hatch. On git-backed config dirs the default rendering is additionally guarded by a `.git/info/exclude` entry (§4.10); a token committed before that guard existed must be rotated, not just ignored.
+6. **Token in the config backup set** under the default package rendering — decision §6.4, with the `!secret` escape hatch (v1.1 — §11). On git-backed config dirs the default rendering is additionally guarded by a `.git/info/exclude` entry (§4.10); a token committed before that guard existed must be rotated, not just ignored.
 7. **`_notify.yaml` webhook headers are plaintext secrets** on the volume — covered by the job deny-glob, but readable by the interactive session and file-level access. Documented.
 8. **Sibling add-on trust:** any container on the hassio bridge can reach :7682; the token is the whole gate. A compromised sibling with Supervisor access has worse options than firing a read-only job. Accepted.
 9. **v1.1 nonce transit:** the action nonce rides Core and the push transport; anyone positioned there can tap one button's worth of authority — exactly one pre-declared, expiring action. That position already owns the house. Accepted, documented, and the standing reason action jobs stay exact-argv.
@@ -831,9 +828,9 @@ The user's own `CLAUDE.user.md` adds house-specific notes without explaining the
 | Concurrency limit (other jobs running) | global semaphore wait expiry | `skipped` "concurrency_limit" |
 | Job disabled but triggered | flag file / frontmatter | last state kept with `enabled: false` (or `skipped` if never ran); endpoint answers `accepted: false` |
 | Add-on stopped/updated mid-run | runner TERM trap via pgid | `aborted` "add-on stopping"; next scheduled run heals it |
-| Container hard-killed mid-run | ticker reaper at next endpoint start | `error` "runner died without reporting" |
-| Crash between persist and publish | `published: false` in state file | ticker republishes within 60 s |
-| HA Core down during a run | publish POST fails | result persisted; published by the ticker when Core returns (attributes carry the true `ended_at`) |
+| Container hard-killed mid-run | the tick (duty 1) at next endpoint start | `error` "runner died without reporting" |
+| Crash between persist and publish | `published: false` in state file | the tick republishes within 60 s (duty 2) |
+| HA Core down during a run | publish POST fails | result persisted; published by the tick when Core returns (attributes carry the true `ended_at`) |
 | HA Core restarted (entities erased) | republish triggers 1–3 | entities reappear within seconds (automation) to ≤ 10 min (canary) |
 | Endpoint crashed | respawn loop | restarts in 1–60 s; after 5 fast crashes, `sensor.claude_jobs_endpoint = error` + 300 s cadence |
 | Endpoint dead / add-on stopped | anchor sensor `unavailable` 10 min | shipped alarm fires |
@@ -861,13 +858,15 @@ Five PRs, each independently reviewable and useful. Per repo convention each bum
 |---|---|---|---|
 | **1 · Runner** | `claude-job`, `jobdef.py` validator (+ `py3-yaml`, `py3-jsonschema` apk), full frontmatter schema (incl. `notify:`/`actions:`, validated-inert), broker + `ha` wrapper + image policy/contract/allowlist files, `--json-schema` judgment, locks, TERM trap, entity publish, logs/state/cost, `CLAUDE.addon.md` section | A human writes a job, runs it from the terminal, sees the entity; `notify_status: skipped_no_notifier` degradation means no dead calls into PR 2 | The §13 PR 1 probe set, re-run **on the installed add-on**, and repeated on every shipped CLI bump |
 | **2 · Notifier** | `claude-job-notify`, six channels with exact payloads, `_notify.yaml`, fallback chain, dedupe/renag, persistent dismiss-on-recovery. No buttons. | PR 1's results reach phones | §13 PR 2 items (live iOS + Android pass) |
-| **3 · Endpoint + lifecycle** | `claude-job-endpoint` (all v1 routes), token lifecycle, ticker (reaper/publish-retry/prune), respawn loop, `start_job_endpoint`/`stop_job_spawners`/`signal_job_runs`/`reap_job_runs` + `on_stop`/`start_ttyd` integration, `enable_job_endpoint` option. Docs carry a copy-paste `rest_command` + example automation with the kill-switch inline, so scheduling never precedes its off-switch. **No crond, no scheduler** (§6.3). | HA can trigger jobs; stuck states heal | §13 PR 3 items (teardown budget exercised in sandbox; tini reaping; flock TERM interruption) |
-| **4 · Generated HA package** | Package rendering (hostname + token, `job_token_via_secret` variant), anchor sensor, template cost sensor, republish + alarm automations, schedule blueprint, Lovelace examples, DOCS (onboarding, dead-man recipe, DND caveat) | A new user gets the whole surface from one include line | §13 PR 4 items (end-to-end from HA Core: DNS, rest sensor unavailability, blueprint discovery) |
+| **3 · Endpoint + lifecycle** | `claude-job-endpoint` (all v1 routes), token lifecycle, the tick (all five duties — §4.9), respawn loop, `start_job_endpoint`/`stop_job_spawners`/`signal_job_runs`/`reap_job_runs` + `on_stop`/`start_ttyd` integration, `enable_job_endpoint` option. Docs carry a copy-paste `rest_command` + example automation with the kill-switch inline, so scheduling never precedes its off-switch. **No crond, no scheduler** (§6.3). | HA can trigger jobs; stuck states heal | §13 PR 3 items (teardown budget exercised in sandbox; tini reaping; flock TERM interruption) |
+| **4 · Generated HA package** | Package rendering (hostname + token baked in), anchor sensor, template cost sensor, republish + alarm automations, schedule blueprint, Lovelace examples, DOCS (onboarding, dead-man recipe, DND caveat) | A new user gets the whole surface from one include line | §13 PR 4 items (end-to-end from HA Core: DNS, rest sensor unavailability, blueprint discovery) |
 | **5 · v1.1 action chain** (one PR — all pieces or none) | Nonce store + mint, `/action` route, translation automation added to the package, `kind: action` activation, DOCS threat model | The trust chain is only reviewable as a unit | §13 PR 5 items (live taps both platforms; replay/expiry probes) |
+
+**v1.1 beyond the action chain** — deferred, correctness-neutral in v1, listed here so nothing dangles: the websocket statistics proxy (§4.5); the `job_token_via_secret` add-on option and `!secret` package rendering (§6.4 — the v1 `info/exclude` guard already covers the default path); the commented-out recorder exclusion for `sensor.claude_job_*` (§4.10 — an optimization, whose "second `recorder:` key" probe rides along).
 
 ## 12 · Open questions for reviewers
 
-Previously open, now resolved after the install-side review (this section is kept so later section numbers survive). Each resolution lives in its section: the interactive allow-list ships five verb-scoped `claude-job` rules, with `enable`/`force-run`/`token` deliberately prompting (§7); the broker's `POST /core/api/template` route is **kept**, with the risk restated honestly (§4.5, §8 risk 5); `allowed_job_models` stays aliases-default with operator-appended full IDs (§4.2, as written); the anchor poll gained the `job_anchor_scan_interval` option (§4.10); and the two confusable entity-name pairs are renamed — anchor `sensor.claude_jobs_attention`, canary `sensor.claude_jobs_cost_raw` — under the stated convention `claude_job_<slug>` = per-job, `claude_jobs_*` = platform (§4.10). No open design questions remain; everything still unverified is a §13 item, not a question.
+Previously open, now resolved after the install-side review (this section is kept so later section numbers survive). Each resolution lives in its section: the interactive allow-list ships five verb-scoped `claude-job` rules, with `enable`/`force-run`/`token` deliberately prompting (§7); the broker's `POST /core/api/template` route is **kept**, with the risk restated honestly (§4.5, §8 risk 5); the model allow-list stays aliases-only (an image constant in v1; an operator needing full IDs is §4.11's promotion trigger); the anchor poll interval is fixed at 60 s (image constant — §4.11); and the two confusable entity-name pairs are renamed — anchor `sensor.claude_jobs_attention`, canary `sensor.claude_jobs_cost_raw` — under the stated convention `claude_job_<slug>` = per-job, `claude_jobs_*` = platform (§4.10). No open design questions remain; everything still unverified is a §13 item, not a question.
 
 ## 13 · What is verified, what is assumed
 
@@ -888,7 +887,7 @@ Everything **[probed 2.1.233]** in §2 has live evidence but from a non-containe
 | Compound-command evasion: `; touch` under `Bash(ha core logs:*)` **denied**; `; cat <path>` runs (safe-list) but deny-listed paths stay denied — the deny baseline holds (§8 risk 4) | **verified install-side** |
 | `ha core logs` exposes `-f`/`--follow` (also `-b`, `-n`) — mitigations shipped: wrapper strips follow flags, allow-list is `--lines`-only, validator rejects follow-naming rules (§4.5). Remaining: broker rejects `…/logs/follow` and enforces read timeout + response cap under a simulated streaming response | CLI half **verified install-side**; broker half to exercise in PR 1 |
 | `/api/template` render time is bounded by the installed Core (else accept the stall as equivalent to the allowed history-query risk — §8 risk 5) | assumed; probe |
-| Whether the CLI's own `cleanupPeriodDays` cleanup (default 30 d) sweeps the job project dir for `-p` runs under `--setting-sources ""` (§4.7 transcript retention) | unknown; probe — the explicit prune ships regardless |
+| Whether the CLI's own `cleanupPeriodDays` cleanup (default 30 d) sweeps the job project dir for `-p` runs under `--setting-sources ""` (transcript retention — Appendix A.7) | unknown; probe — the explicit prune ships regardless |
 | Scope of auto-approved "safe" commands with zero allow rules | partially probed; enumerate |
 | Adversarial non-conforming `structured_output` (API rejects vs CLI passes through); `success` with null SO; `is_error` with populated SO | handled either way by rows 9/10; probe reachability |
 | `--model fable` alias resolves on the installed CLI; fallback: ship the full ID `claude-fable-5` as the default and allow-list entry | assumed; probe |
@@ -920,7 +919,7 @@ Everything **[probed 2.1.233]** in §2 has live evidence but from a non-containe
 | `rest` sensor transitions to `unavailable` on connection refused within one `scan_interval` (else the alarm's endpoint leg needs a `last_updated`-age template — spec the fallback in the PR) | assumed; probe |
 | LTS statistics for non-registry states-API entities | unknown — **not promised in DOCS** until tested; the template mirror is the safe claim |
 | Blueprint file discovered without a Core restart (else: picked up by the restart the package already requires — acceptable) | assumed; probe |
-| Second `recorder:` key collides under packages (why the exclusion ships commented) | assumed; probe |
+| Second `recorder:` key collides under packages (why the v1.1 exclusion will ship commented — §11) | assumed; probe with the v1.1 item |
 
 **PR 5 (v1.1 actions):**
 
@@ -932,3 +931,64 @@ Everything **[probed 2.1.233]** in §2 has live evidence but from a non-containe
 **Estimates, not facts:** the §10 cost figures (one Haiku probe + typical multi-turn runs); revise from `logs/` after a week.
 
 **Withdrawn v2 claims, for the record:** "the frontmatter is the whole security boundary" (it is one of five layers); "`--settings` replaces settings" (it merges — hence `--setting-sources ""`); "transcripts land in `_project/.claude/projects/`" (they land under the config dir, cwd-escaped); "a scoped read-only HA token" (no such scope exists); "HA Core cannot execute a command in the add-on" (`addon_stdin` exists — §6.1); the crond incantation, the `input_boolean`/button-entity/custom-event mechanisms, and the flock stale-PID dance (all replaced above).
+
+## Appendix A · Operational detail
+
+The deep mechanics behind §4.7's lifecycle narrative, moved here whole so the section stays readable. Nothing in this appendix changes a decision.
+
+### A.1 Stop path
+
+Constants next to `STOP_GRACE_SECS`: `JOB_STOP_GRACE_SECS=5`, `RUN_DIR=/run/claudecode`. Every run is its own process group (§4.3 step 1) and writes `/run/claudecode/jobs/<name>.pgid` — **the single PID artifact in this design**; the endpoint keeps no child table and the stop path never walks process trees. One `kill -TERM -<pgid>` takes runner + claude + MCP servers + broker atomically.
+
+New `claudecode-start` functions (same best-effort, warn-and-continue discipline as every existing step): `setup_job_dirs`, `start_job_endpoint` (respawn loop — A.5), `stop_job_spawners` (touch `stopping`, TERM the loop + current endpoint PID; ≤ 2 s), `signal_job_runs` (TERM every pgid file's group; instant), `reap_job_runs` (poll ≤ 5 s, then KILL; remove pgid files), and the composite `shutdown_jobs`. Modified `on_stop` — signal early, reap late, so runners drain while the interactive session tears down:
+
+```bash
+on_stop() {
+  trap - EXIT TERM INT HUP
+  stop_job_spawners     # nothing new can spawn
+  signal_job_runs       # TERM lands EARLY
+  stop_sessions          # existing, unchanged
+  reap_job_runs         # runners had stop_sessions' wall-clock + up to 5 s
+  stop_ttyd              # existing, unchanged
+  exit 143
+}
+```
+
+| Stage | Worst case | Cumulative |
+|---|---|---|
+| `stop_job_spawners` | 2 s | 2 s |
+| `signal_job_runs` | < 0.1 s | 2 s |
+| `stop_sessions` (existing) | 15 s | 17 s |
+| `reap_job_runs` | 5 s + KILL | 22 s |
+| `stop_ttyd` (usually already done) | 5 s | 27 s |
+| **total** | | **≤ 27 s < 30 s Supervisor deadline** |
+
+The ttyd-died path (today: `wait "$TTYD_PID"; exit $?`, orphaning everything) gains `shutdown_jobs` before its exit; `on_abort` needs no structural change because every new stop function no-ops on empty state.
+
+### A.2 Runner TERM trap
+
+Installed at §4.3 step 8; budget ≤ 4 s, inside `reap_job_runs`' 5 s: nudge the claude child with TERM idempotently, wait ≤ 2 s, then `finish aborted` — one shared `finish()` used by *all* exit paths: (a) write `state/<name>.json` durably first (tmp+rename, `published: false`), (b) append one complete JSONL line, (c) best-effort publish with `curl --max-time 2`, marking `published: true` on 2xx, (d) remove the pgid file; exit 143. A TERM-killed claude emits no envelope — the record is synthesized entirely from runner-side knowledge, never parsed from absent output.
+
+### A.3 Stuck-`running` recovery — the tick's duty 1
+
+The tick (§4.9) runs this pass every 60 s and once at every endpoint start, which covers hard container kills since the endpoint starts on every boot. Per `state/*.json` with `status == "running"`: within `deadline + 120 s` → leave alone; past margin with a live pgid → warn (the spawn watchdog SIGKILLs at `deadline + 180 s` as last resort); past margin with no live pgid → rewrite to `error` / `reason: lost` ("runner died without reporting") and publish. The runner never demotes its own kind; the auth retry (A.8) extends `deadline` in the state file so duty 1 needs no retry knowledge. Blind spot: endpoint down *and* runner hard-killed → nothing demotes until the next endpoint start; the HA-side anchor alarm covers that window — a deliberate pairing.
+
+### A.4 Durable writes — the tick's duty 2
+
+Every JSON state write is tmp+rename in the same directory (the repo's `settings_set` convention). JSONL appends are single complete lines; readers skip lines that fail to parse (torn tails tolerated, never repaired). There is **no `state/pending/` queue** — last-state-wins: `state/<name>.json` carries `published: false` until a 2xx; the tick (duty 2) retries every unpublished file every 60 s; a newer run supersedes an unpublished older one (HA needs current state, not replayed history — history lives in the JSONL). The tick's first pass publishes everything regardless of flag, which doubles as the add-on-start republish trigger (§4.10).
+
+### A.5 Endpoint supervision
+
+The endpoint runs under an in-script respawn loop (background subshell, `trap - INT QUIT`, current PID rewritten to `endpoint.pid` each spawn): backoff 1 → 60 s doubling; after 5 consecutive fast crashes (< 10 s uptime) degrade to 300 s retries and POST `sensor.claude_jobs_endpoint = error` directly to the states API — a *positive* in-container alarm complementing the HA-side anchor. Never gives up: a dead endpoint means no triggers and no tick — no demotion, no publish-retry, no prune. The loop exits (instead of respawning) when `stopping` exists. Runner processes spawned with `start_new_session=True` are detached from the endpoint's lifetime; `init: true` means tini reaps them if the endpoint dies mid-run [verify: PR 3 sandbox].
+
+### A.6 Log retention — the tick's duty 4, first half
+
+The jobs dir rides in every HA backup — bounds are correctness, not housekeeping. The runner self-prunes `logs/<name>.jsonl` in `finish()` when > 1 MiB, keeping the last 200 lines (tmp+rename); per-line caps (`detail` ≤ 8 KiB, raw tail ≤ 4 KiB); endpoint and respawn diagnostics go to **stdout** (the add-on log — Supervisor owns retention), never the backup set; the tick's duty 4 (daily) backstop-prunes anything > 2 MiB, and duty 5 deletes stray `*.tmp.*` files older than 1 h. Bound: ≈ #jobs × 1 MiB.
+
+### A.7 Transcript retention — the tick's duty 4, second half
+
+Every run writes a full CLI transcript into `/homeassistant/.claudecode/projects/-data-claude-jobs-project/` (§4.1) — inside the HA backup set, containing everything the job read. Same rationale as `logs/`: bounds are correctness, not housekeeping. The runner prunes this directory — **and only this directory; sibling `projects/` dirs belong to the interactive session** — in `finish()`: delete transcript files older than the 30-day transcript-keep constant (§4.11), then oldest-first until the directory is ≤ 50 MiB. The tick's duty 4 runs the identical rule daily as backstop (covers hard-killed runs where `finish()` never ran; deletion by mtime makes the overlap harmless). Recent transcripts stay inspectable from the terminal (§4.4); nothing ever resumes a job transcript, so pruning breaks no resume path. [verify: whether the CLI's own `cleanupPeriodDays` cleanup (default 30 days) already sweeps this directory for `-p` runs under `--setting-sources ""` — if it does, the explicit prune is belt-and-braces and both keep the same 30-day figure.]
+
+### A.8 Auth retry
+
+The shared-credentials refresh race (§4.4): if `is_error` and the envelope text matches `(oauth|authentication|unauthorized|401|token.*(expired|invalid|revoked)|please.*(log ?in|/login))` (case-insensitive) → exactly one retry after `10 + jitter` seconds (lets a concurrent interactive refresh land), with the state file's `deadline` extended and both attempts logged (`attempts: 2`, `retried_auth: true`). Second auth-shaped failure → `error` "claude.ai login expired — run /login in the terminal" (the same message the terminal shows). No-envelope failures and non-auth errors are never retried.
