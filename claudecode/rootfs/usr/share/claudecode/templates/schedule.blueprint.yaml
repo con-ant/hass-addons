@@ -1,0 +1,61 @@
+# Installed by the Claude Code add-on into /homeassistant/blueprints/automation/claudecode/schedule.yaml.
+# Do not edit this copy: the add-on re-installs it at start whenever its content differs from the shipped one.
+# To customise, duplicate it under another file name (Settings → Automations & scenes → Blueprints also offers that).
+blueprint:
+  name: "Claude Job · run on a schedule"
+  description: >-
+    Runs a Claude Code job (a file in /homeassistant/.claudecode/jobs/<name>.md) at a fixed time on the selected
+    days by calling rest_command.claude_job_run from the claudecode_jobs package. Turning this automation off is
+    the job's schedule switch; the result appears as sensor.claude_job_<slug>.
+  domain: automation
+  author: "Claude Code add-on"
+  homeassistant:
+    min_version: "2025.8.0"          # `weekday:` on the time trigger
+  input:
+    job:
+      name: Job name
+      description: "File name without .md, e.g. health-check"
+      selector:
+        text: {}
+    at:
+      name: Time of day
+      default: "07:00:00"
+      selector:
+        time: {}
+    weekdays:
+      name: Days
+      description: Days on which the job runs.
+      default: [mon, tue, wed, thu, fri, sat, sun]
+      selector:
+        select:
+          multiple: true
+          mode: list
+          options:
+            - { label: Monday, value: mon }
+            - { label: Tuesday, value: tue }
+            - { label: Wednesday, value: wed }
+            - { label: Thursday, value: thu }
+            - { label: Friday, value: fri }
+            - { label: Saturday, value: sat }
+            - { label: Sunday, value: sun }
+    job_input:
+      name: Input (optional)
+      description: Object passed to the job as trigger input (only for jobs that declare `input:`).
+      default: {}
+      selector:
+        object: {}
+
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: time
+    at: !input at
+    weekday: !input weekdays
+
+actions:
+  - action: rest_command.claude_job_run
+    continue_on_error: true          # endpoint down → connection error swallowed; 4xx / 200-declines never raise
+    data:
+      job: !input job
+      input: !input job_input

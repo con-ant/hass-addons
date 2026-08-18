@@ -31,6 +31,7 @@ RUN_DIR=/run/claudecode
 JOB_STOP_GRACE_SECS=5
 JOB_ENDPOINT_PORT=7682
 JOB_ENDPOINT_BIN=${JOB_ENDPOINT_BIN:-/usr/local/bin/claude-job-endpoint}
+JOB_LIB=/usr/local/lib/claude-job
 
 cd_work() { cd /homeassistant 2>/dev/null || cd /; }
 
@@ -502,6 +503,23 @@ ensure_job_token() {
   fi
 }
 
+# The Home Assistant side - rest_command, the anchor sensor, the alarm and the
+# schedule blueprint - is one generated package with this add-on's hostname and
+# the endpoint token filled in (§4.10, §6.4). Rendered on every start so token
+# rotation and hostname changes heal themselves; on a git-backed config dir the
+# renderer keeps the file out of git and warns if it is already tracked.
+render_job_package() {
+  [ "$ENABLE_JOBS" = "true" ] || return 0
+  timeout 60 python3 "$JOB_LIB/render_package.py"
+  case $? in
+    0) info "Wrote /homeassistant/claudecode_jobs.yaml (include it once from configuration.yaml: homeassistant: packages: claudecode_jobs: !include claudecode_jobs.yaml)" ;;
+    1) warn "claudecode_jobs.yaml written, but the schedule blueprint or the .git exclude entry could not be; see the lines above" ;;
+    2) warn "claudecode_jobs.yaml was NOT written; see the lines above" ;;
+    *) warn "Rendering claudecode_jobs.yaml failed or timed out" ;;
+  esac
+  return 0
+}
+
 # The trigger endpoint runs under a never-give-up respawn loop (Appendix A.5):
 # backoff 1 -> 60 s doubling; five fast crashes in a row degrade to 300 s retries
 # and raise sensor.claude_jobs_endpoint = error so the failure is visible in HA
@@ -604,6 +622,7 @@ apply_settings
 allow_job_commands
 setup_job_dirs
 ensure_job_token
+render_job_package
 # ttyd only spawns SHELL_CMD when a browser connects, so on a headless box
 # nothing runs after a restart until somebody opens the web terminal - and
 # Remote Control, whose whole point is running unattended, stays down. When
