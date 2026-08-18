@@ -136,6 +136,14 @@ packages would be invisible to it).
 
 ## Verified here vs. on the install
 
+The test suite is a dev-box tool and cannot run *inside* the add-on container: it writes
+small shell wrappers into a scratch directory and executes them, and under the add-on's
+AppArmor profile no writable path is executable (`/tmp`, `/data`, `/homeassistant` all
+refuse). Install-side verification is the §13 probe list, run by hand. The profile's bare
+`network,` rule covers both listeners (broker on 127.0.0.1, endpoint on the hassio bridge);
+whether the added `/run/claudecode/**` and `python3*/** mr` lines behave as intended is one
+of those probes.
+
 The test suite (≈ 320 tests) drives every component with a fake Supervisor, a fake
 `claude` that emits real envelope shapes, and the real broker; an end-to-end test goes
 endpoint → runner → broker → notifier, and a stop-path test checks the `aborted`

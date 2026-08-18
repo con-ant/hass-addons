@@ -15,6 +15,15 @@ before spawning, and the endpoint. Layout, top to bottom:
 returns `(errors, warnings)`; `load_and_validate()` combines both without raising. Error
 messages start with the offending key path (`timeout:`, `tools[2]:`, `notify.critical:`,
 `input.date:`, `actions[0].job:`) so callers and tests can match on prefixes.
+
+Where to go to change things:
+  * add a frontmatter key      -> job-frontmatter.schema.json (shape/bounds), `JobDef` + `_build()`
+                                  (default), `validate()` (cross-key rules), docs/JOBS.md table
+  * allow another tool family   -> `_validate_tools()` (T-rules) and, for `ha` verbs, the image
+                                  file job-ha-allowlist; the broker route table must agree
+  * change what the model sees  -> `assemble_prompt()` (user prompt), job-contract.md (system prompt)
+  * change the result contract  -> `result_schema()`; the runner's `judge()` consumes it
+  * change the claude invocation-> `claude_argv()` (and `tools_csv()`, `compose_settings()`, `mcp_config()`)
 """
 import copy
 import dataclasses

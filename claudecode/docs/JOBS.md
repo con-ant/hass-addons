@@ -231,6 +231,15 @@ schedule:
 | `health-check.md` | default (`fable`) | `ha core check`, resolution/supervisor info, recent error log, failing or unavailable integrations and entities, automations with errors; status by severity, counts in the headline; `stale_after: 93600`, `max_cost_usd: 1.50`, `paths: [/homeassistant/**]` |
 | `energy-report.md` | `sonnet` | finds energy/power sensors and utility meters, computes yesterday's (or `input.date`'s) consumption, production and top consumers from history, compares with the previous 7-day average; `info` normally, `warning` if consumption is > 50 % above average or a meter went unavailable |
 
+Both are **examples**, generic on purpose: they discover what they can on any install and
+say so. A job that is genuinely yours — the report you actually read every morning — is a
+copy with your knowledge pinned into the prompt: which meter is the whole-house one, which
+loads sit on a tap the mains never see, which sensors mean "somebody is home". Keep the
+`metrics` names stable once a dashboard or automation keys on them. This is also how a job
+replaces an existing report *script*: the numbers the script printed to stdout go into
+`metrics` (they become entity attributes) and the prose goes into `detail`; nothing parses
+stdout any more.
+
 They are never re-seeded (deleting one is permanent). Pristine copies live in the image:
 
 ```bash
