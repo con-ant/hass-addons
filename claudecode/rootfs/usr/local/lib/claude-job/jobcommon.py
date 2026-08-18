@@ -14,6 +14,16 @@ the other way). Rules every caller relies on:
 * Timestamps are ISO-8601 UTC `YYYY-MM-DDTHH:MM:SSZ`; money is rounded to 4 dp in files and
   2 dp in entity payloads.
 * HA calls fail soft: `ha_request` returns `(None, b"")` on connection trouble, never raises.
+
+Where to go to change things:
+  * add/rename an entity attribute -> `entity_payload()` (per-job), `cost_entity_payload()`,
+                                      `endpoint_error_payload()`; docs/JOBS.md "Entities"
+  * move a directory or file       -> the path table in `_configure()` (one place; env-overridable)
+  * change a bound or interval     -> the constants table below (§4.11); promotion to an add-on
+                                      option is documented there
+  * change what `GET /jobs` says per job -> `job_summary()` (the endpoint and `claude-job list` share it)
+  * change the state-file shape    -> the runner writes it (`claude-job` finish()); readers here are
+                                      `entity_payload()`/`job_summary()`, plus the endpoint's tick
 """
 import datetime as _dt
 import errno
