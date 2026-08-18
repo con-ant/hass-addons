@@ -1,0 +1,600 @@
+#!/usr/bin/env python3
+"""claude-job-notify — turn one finished job run into notifications (design §4.8, breakdown 2h).
+
+    claude-job-notify <name> --state-file <STATE_DIR>/<name>.json [--dry-run]
+
+The runner calls this after the terminal entity publish. It reads the state file the runner
+just wrote (`job`, `slug`, `result{status,headline,detail,run_id,ended_at,cost_usd,metrics}`,
+`prev_status`, `notify{channels,last_notified}`), decides the mode
+
+    full      push everything on the channel list
+    quiet     same status + same headline as last time: refresh `persistent` silently, no phone buzz
+    recovery  `ok` after a problem: the ok mapping, dismiss the sidebar note, optional "Resolved" push
+    none      empty channel list (`state_only`)
+
+and talks to Home Assistant through the Supervisor proxy (it holds SUPERVISOR_TOKEN; jobs don't):
+
+    persistent       persistent_notification.create, notification_id claude_job_<slug> (replaces)
+    mobile           notify.mobile_app_* (discovered, optionally narrowed by _notify.yaml)
+    mobile_critical  same targets, iOS critical sound + Android high-priority channel in one payload
+    notify_default   notify.notify {title, message}
+    webhook          POST the result JSON to _notify.yaml's URL (always; it is a data feed)
+    state_only       nothing beyond the entity the runner already published
+
+Fallback per send: mobile with no targets -> notify_default -> persistent (mobile_critical keeps
+the word: title prefixed "CRITICAL · "). This is the only component that knows about channels.
+It never changes a job's status and never writes the state file: it prints exactly ONE JSON line
+(`notify_status`, `mode`, `sent`, `fallbacks`, `errors`, `last_notified`) and the runner stores it.
+The whole run lives inside NOTIFY_DEADLINE_S (40 s < the runner's 45 s wait): HA calls first, the
+webhook last, every timeout capped by what is left. Exit 0 whenever the state file was readable
+(channel failures and even internal errors are data); exit 2 on usage/state-file errors.
+"""
+import os, sys, pathlib
+_LIB = os.environ.get("CLAUDE_JOB_LIB_DIR") or str(pathlib.Path(__file__).resolve().parent.parent / "lib" / "claude-job")
+sys.path.insert(0, _LIB)
+import jobcommon as jc, jobdef
+
+import argparse
+import hashlib
+import json
+import time
+import traceback
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+
+# ---- constants ---------------------------------------------------------------------------------
+COMPONENT = "claude-job-notify"
+STATUS_WORD = {"ok": "OK", "info": "Info", "warning": "Warning", "critical": "CRITICAL",
+               "error": "Job error", "skipped": "Skipped", "aborted": "Aborted"}
+INFRA_STATUSES = {"error", "skipped", "aborted"}          # never dedupe (§4.8)
+RECOVERS_FROM = {"info", "warning", "critical", "error", "aborted"}
+MOBILE_CHANNELS = ("mobile", "mobile_critical")
+PUSH_CHANNELS = MOBILE_CHANNELS + ("notify_default",)    # the only channels that need service discovery
+CRITICAL_PREFIX = "CRITICAL · "
+TITLE_CAP = 100                                          # ha-facts §E: FCM 4 KB total payload
+MOBILE_MESSAGE_CAP = 1000
+DETAIL_CAP = 8000
+HTTP_TIMEOUT_S = 10                                      # per HA call, further capped by the deadline
+DEFAULT_RENAG_EVERY = 3
+ANDROID_HINT = "Android: grant 'Override Do Not Disturb' to the '{channel}' channel once per phone"
+
+
+def log(msg: str) -> None:
+    jc.log(COMPONENT, msg)
+
+
+def env_seconds(name: str, default: str) -> tuple:
+    """`CLAUDE_JOB_<name>` as a comma list of non-negative floats; garbage -> default (test knobs)."""
+    try:
+        vals = tuple(float(x) for x in os.environ.get("CLAUDE_JOB_" + name, default).split(",") if x.strip())
+        if vals and all(v >= 0 for v in vals):
+            return vals
+    except ValueError:
+        pass
+    log(f"ignoring malformed CLAUDE_JOB_{name}")
+    return tuple(float(x) for x in default.split(","))
+
+
+NOTIFY_DEADLINE_S = env_seconds("NOTIFY_DEADLINE_S", "40")[0]   # whole invocation; the runner waits 45 s
+WEBHOOK_RETRY_S = env_seconds("WEBHOOK_RETRY_S", "2,5")        # sleeps before webhook attempts 2 and 3
+
+
+# ---- data --------------------------------------------------------------------------------------
+@dataclass
+class Services:
+    """What `GET /core/api/services` told us about the notify domain."""
+    mobile: list                     # notify.mobile_app_* service names
+    notify_default: bool             # notify.notify exists
+
+
+@dataclass
+class Intent:
+    """One HA/webhook call the plan wants made."""
+    channel: str                     # label for `sent`/tokens: persistent|mobile|mobile_critical|notify_default|webhook|dismiss
+    call: str                        # persistent|mobile|notify_default|dismiss|webhook
+    payload: dict
+    targets: list = field(default_factory=list)   # mobile service names
+
+
+@dataclass
+class Plan:
+    # -- output (ends up in the JSON line) --
+    mode: str
+    status: str
+    channels: list                   # effective list, `state_only` removed
+    intents: list                    # in send order: persistent, pushes, dismiss, webhook (slowest last)
+    quiet: list                      # push channels deliberately not called (quiet mode)
+    fallbacks: list                  # "mobile->notify_default", ...
+    errors: list                     # [{"channel", "error"}]
+    last_notified: dict | None       # as it will be if every intent succeeds; previous value verbatim for silent infra runs
+    # -- scratch used while planning/sending --
+    hint: str | None = None          # Android DND reminder to print on the first delivered critical push
+    prev_persistent_active: bool = False
+    persistent_title: str | None = None   # set => (re)create the sidebar notification with this title
+
+
+class Deadline:
+    """Monotonic budget for the whole invocation; every network timeout is capped by what is left."""
+
+    def __init__(self, seconds: float):
+        self.end = time.monotonic() + seconds
+
+    def remaining(self) -> float:
+        return max(0.0, self.end - time.monotonic())
+
+    def cap(self, timeout: float) -> float:
+        return min(float(timeout), self.remaining())
+
+
+# ---- small helpers -----------------------------------------------------------------------------
+def truncate(text: str, cap: int) -> str:
+    text = text or ""
+    return text if len(text) <= cap else text[: cap - 1] + "…"
+
+
+def sha256(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def as_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
+def as_int(x, default=0) -> int:
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return default
+
+
+def local_time(iso_ts) -> str:
+    dt = jc.parse_iso(iso_ts) if isinstance(iso_ts, str) else None
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z").strip() if dt else "?"
+
+
+def unique(items) -> list:
+    out = []
+    for i in items:
+        if i not in out:
+            out.append(i)
+    return out
+
+
+# ---- payload builders (A28 / ha-facts §E) ------------------------------------------------------
+def title_for(status: str, job: str) -> str:
+    return truncate(f"{STATUS_WORD.get(status, status)} · {job}", TITLE_CAP)
+
+
+def critical_title(title: str) -> str:
+    return title if title.startswith(CRITICAL_PREFIX) else truncate(CRITICAL_PREFIX + title, TITLE_CAP)
+
+
+def persistent_payload(slug: str, title: str, headline: str, res: dict) -> dict:
+    parts = [f"**{headline}**"]
+    detail = str(res.get("detail") or "")[:DETAIL_CAP]
+    if detail:
+        parts.append(detail)
+    parts.append(f"_run {res.get('run_id') or '?'} · {local_time(res.get('ended_at'))} · ${as_float(res.get('cost_usd')):.2f}_")
+    return {"notification_id": f"claude_job_{slug}", "title": title, "message": "\n\n".join(parts)}
+
+
+def mobile_payload(slug: str, title: str, message: str, cfg, critical: bool) -> dict:
+    data = {"tag": f"claude_job_{slug}", "group": "claude_jobs", "channel": cfg.android_channel}
+    if cfg.dashboard_path:
+        data["url"] = cfg.dashboard_path            # iOS
+        data["clickAction"] = cfg.dashboard_path    # Android
+    if critical:
+        data["push"] = {"sound": {"name": "default", "critical": 1, "volume": 1.0}}   # iOS
+        data["ttl"] = 0                                                              # Android
+        data["priority"] = "high"
+        data["channel"] = cfg.android_critical_channel
+        data["importance"] = "high"
+    return {"title": title, "message": truncate(message, MOBILE_MESSAGE_CAP), "data": data}
+
+
+def push_payload(title: str, message: str) -> dict:
+    return {"title": title, "message": truncate(message, MOBILE_MESSAGE_CAP)}
+
+
+def webhook_payload(state: dict, res: dict) -> dict:
+    name = str(state["job"])
+    return {"job": name, "slug": state.get("slug") or jobdef.slug(name), "status": res.get("status"),
+            "headline": res.get("headline"), "detail": res.get("detail"), "run_id": res.get("run_id"),
+            "ended_at": res.get("ended_at"), "cost_usd": res.get("cost_usd"),
+            "metrics": res.get("metrics") or {}, "entity_id": jobdef.entity_id(name),
+            "prev_status": state.get("prev_status")}
+
+
+# ---- plan (pure) --------------------------------------------------------------------------------
+def status_of(state: dict) -> str:
+    return str(state["result"].get("status") or state.get("status"))
+
+
+def previous(state: dict):
+    """`notify.last_notified` from the state file, or None (anything that is not a mapping counts as never)."""
+    prev = (state.get("notify") or {}).get("last_notified") if isinstance(state.get("notify"), dict) else None
+    return prev if isinstance(prev, dict) else None
+
+
+def effective_channels(state: dict, job, cfg) -> list:
+    """The runner's resolved `notify.channels` (re-resolved via jobdef only if absent), `state_only`
+    dropped, plus `mobile` when `notify_recovery: true` wants a one-off "Resolved" push on a recovery
+    whose ok mapping has no phone channel (§4.8)."""
+    notify = state.get("notify") if isinstance(state.get("notify"), dict) else {}
+    chans = notify.get("channels")
+    status = status_of(state)
+    if not isinstance(chans, (list, tuple)):
+        chans = jobdef.resolve_channels(status, job, cfg)
+    chans = unique(str(c) for c in chans if c != "state_only")
+    prev = previous(state)
+    recovering = status == "ok" and prev is not None and prev.get("status") in RECOVERS_FROM
+    if recovering and job is not None and job.notify_recovery and not any(c in MOBILE_CHANNELS for c in chans):
+        chans.append("mobile")
+    return chans
+
+
+def needs_discovery(channels: list) -> bool:
+    return any(c in PUSH_CHANNELS for c in channels)
+
+
+def decide_mode(status: str, channels: list, prev, same: bool, consecutive: int, renag_every: int) -> str:
+    if not channels:
+        return "none"
+    if status in INFRA_STATUSES or not prev:
+        return "full"                                   # infra failures never dedupe
+    if status == "ok" and prev.get("status") in RECOVERS_FROM:
+        return "recovery"
+    if not same:
+        return "full"                                   # rank or headline changed
+    if status == "critical" and renag_every > 0 and consecutive > 1 and (consecutive - 1) % renag_every == 0:
+        return "full"                                   # re-nag every Nth unchanged repeat
+    return "quiet"
+
+
+def pick_targets(cfg, services: Services) -> tuple:
+    """discovered ∩ configured; configured-but-absent targets become error entries."""
+    wanted = list(cfg.mobile_targets or ())
+    if not wanted:
+        return list(services.mobile), []
+    missing = [t for t in wanted if t not in services.mobile]
+    errors = [{"channel": "mobile", "error": f"target {t} not found"} for t in missing]
+    return [t for t in wanted if t in services.mobile], errors
+
+
+def plan(state: dict, job, cfg, services: Services, now=None) -> Plan:
+    """Pure: decide the mode (dedupe / re-nag per breakdown 2h) and the exact calls to make, in send order."""
+    res = state["result"]
+    status = status_of(state)
+    name = str(state["job"])
+    slug = str(state.get("slug") or jobdef.slug(name))
+    headline = str(res.get("headline") or "") or STATUS_WORD.get(status, status)
+    prev = previous(state)
+    renag_every = job.renag_every if job is not None else DEFAULT_RENAG_EVERY
+
+    sha = sha256(str(res.get("headline") or ""))
+    same = prev is not None and prev.get("status") == status and prev.get("headline_sha256") == sha
+    consecutive = (as_int(prev.get("consecutive_same"), 1) + 1) if same else 1
+    channels = effective_channels(state, job, cfg)
+    mode = decide_mode(status, channels, prev, same, consecutive, renag_every)
+
+    p = Plan(mode=mode, status=status, channels=channels, intents=[], quiet=[], fallbacks=[], errors=[],
+             last_notified=None, prev_persistent_active=bool(prev and prev.get("persistent_active")))
+    title = title_for(status, name)
+    message = f"Resolved: {headline}" if mode == "recovery" else headline
+
+    for ch in channels:
+        if ch == "persistent":
+            p.persistent_title = p.persistent_title or title
+        elif ch in PUSH_CHANNELS:
+            if mode == "quiet":
+                p.quiet.append(ch)                      # confirmation is not news
+            else:
+                plan_push(p, ch, slug, title, message, cfg, services)
+        elif ch != "webhook":
+            p.errors.append({"channel": ch, "error": "unknown channel"})
+    if any(i.payload.get("data", {}).get("push") for i in p.intents) and not (prev or {}).get("critical_hint_shown"):
+        p.hint = ANDROID_HINT.format(channel=cfg.android_critical_channel)
+    if p.persistent_title is not None:
+        p.intents.insert(0, Intent("persistent", "persistent", persistent_payload(slug, p.persistent_title, headline, res)))
+    p.intents = dedupe_intents(p.intents)
+
+    # Only a real new finding (contract status) supersedes an earlier finding's sidebar note;
+    # skipped/aborted/error never dismiss it (they leave it standing or replace it under the same id).
+    dismiss = p.prev_persistent_active and p.persistent_title is None and status not in INFRA_STATUSES
+    if dismiss:
+        p.intents.append(Intent("dismiss", "dismiss", {"notification_id": f"claude_job_{slug}"}))
+    if "webhook" in channels:                           # always posts, whatever the mode; last because it is the slow one
+        if cfg.webhook and cfg.webhook.get("url"):
+            p.intents.append(Intent("webhook", "webhook", webhook_payload(state, res)))
+        else:
+            p.errors.append({"channel": "webhook", "error": "not configured in _notify.yaml"})
+
+    if mode == "none" and status in INFRA_STATUSES:
+        p.last_notified = prev                          # a silent skip/abort/error is invisible to dedupe and recovery
+    else:
+        persistent_active = p.persistent_title is not None or (p.prev_persistent_active and not dismiss)
+        p.last_notified = {"status": status, "headline_sha256": sha, "at": jc.now_iso(now),
+                           "consecutive_same": consecutive, "persistent_active": persistent_active,
+                           "critical_hint_shown": bool((prev or {}).get("critical_hint_shown"))}
+    return p
+
+
+def plan_push(p: Plan, ch: str, slug: str, title: str, message: str, cfg, services: Services) -> None:
+    """One mobile / mobile_critical / notify_default send, walking the fallback chain
+    mobile -> notify_default -> persistent (mobile_critical keeps "CRITICAL · " in the title)."""
+    if ch in MOBILE_CHANNELS:
+        critical = ch == "mobile_critical" and p.mode != "recovery"   # a resolution is not a critical alert
+        targets, errs = pick_targets(cfg, services)
+        p.errors += [e for e in errs if e not in p.errors]
+        if targets:
+            p.intents.append(Intent(ch, "mobile", mobile_payload(slug, title, message, cfg, critical), targets))
+            return
+        if ch == "mobile_critical":
+            title = critical_title(title)
+        p.fallbacks.append(f"{ch}->notify_default")
+    if services.notify_default:
+        p.intents.append(Intent("notify_default", "notify_default", push_payload(title, message)))
+        return
+    p.fallbacks.append("notify_default->persistent")
+    p.persistent_title = title if title.startswith(CRITICAL_PREFIX) else (p.persistent_title or title)
+
+
+def dedupe_intents(intents: list) -> list:
+    """Same call to the same place once (e.g. notify_default listed and also a fallback target)."""
+    out, seen = [], set()
+    for i in intents:
+        key = (i.call, i.channel, tuple(i.targets))
+        if key not in seen:
+            seen.add(key)
+            out.append(i)
+    return out
+
+
+# ---- send --------------------------------------------------------------------------------------
+def ha_service(domain: str, service: str, payload: dict, deadline: Deadline) -> str | None:
+    """POST one HA service call; None on success else a short error."""
+    timeout = deadline.cap(HTTP_TIMEOUT_S)
+    if timeout <= 0:
+        return "deadline"
+    status, _ = jc.ha_request("POST", f"/core/api/services/{domain}/{service}", body=payload, timeout=timeout)
+    if status in (200, 201):
+        return None
+    return "connection failed" if status is None else f"HTTP {status}"
+
+
+def post_webhook(cfg, payload: dict, deadline: Deadline) -> tuple:
+    """(ok, attempts, error). Retries after WEBHOOK_RETRY_S on connection errors and 5xx only, and only
+    while the deadline leaves room for the sleep plus a full configured timeout."""
+    wh = cfg.webhook or {}
+    headers = {"Content-Type": "application/json", "User-Agent": COMPONENT}
+    headers.update({str(k): str(v) for k, v in (wh.get("headers") or {}).items()})
+    data = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+    timeout = as_float(wh.get("timeout_s"), HTTP_TIMEOUT_S) or HTTP_TIMEOUT_S
+    delays = list(WEBHOOK_RETRY_S)
+    attempts = 0
+    while True:
+        if deadline.remaining() <= 0:
+            return False, attempts, "deadline"
+        attempts += 1
+        error, retryable = webhook_once(wh["url"], data, headers, deadline.cap(timeout))
+        if error is None:
+            return True, attempts, None
+        if not retryable or not delays:
+            return False, attempts, error
+        delay = delays.pop(0)
+        if deadline.remaining() < delay + timeout:
+            return False, attempts, "deadline"
+        time.sleep(delay)
+
+
+def webhook_once(url: str, data: bytes, headers: dict, timeout: float) -> tuple:
+    """(error|None, retryable)."""
+    try:
+        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(65536)
+            return None, False
+    except urllib.error.HTTPError as e:
+        return f"HTTP {e.code}", e.code >= 500
+    except (urllib.error.URLError, OSError) as e:          # includes socket timeouts
+        reason = getattr(e, "reason", None) or e
+        return f"{type(e).__name__}: {reason}"[:120], True
+    except ValueError as e:                                # malformed URL: hopeless, do not retry
+        return f"ValueError: {e}"[:120], False
+
+
+def send(p: Plan, cfg, deadline: Deadline) -> tuple:
+    """Execute the plan in order. Returns (sent, errors, persistent_active|None, hint_shown)."""
+    sent, errors = [], []
+    persistent_active = None                             # None = as the plan assumed
+    hint_shown = False
+    for i in p.intents:
+        if i.call == "persistent":
+            err = ha_service("persistent_notification", "create", i.payload, deadline)
+            sent.append({"channel": "persistent", "ok": err is None})
+            if err:
+                errors.append({"channel": "persistent", "error": err})
+                persistent_active = p.prev_persistent_active   # whatever was showing still is
+        elif i.call == "mobile":
+            ok_targets = []
+            for t in i.targets:
+                err = ha_service("notify", t, i.payload, deadline)
+                if err:
+                    errors.append({"channel": i.channel, "error": f"{t}: {err}"})
+                else:
+                    ok_targets.append(t)
+            sent.append({"channel": i.channel, "ok": len(ok_targets) == len(i.targets), "targets": ok_targets})
+            if ok_targets and p.hint and i.payload["data"].get("push"):
+                log(p.hint)
+                hint_shown = True
+        elif i.call == "notify_default":
+            err = ha_service("notify", "notify", i.payload, deadline)
+            sent.append({"channel": "notify_default", "ok": err is None})
+            if err:
+                errors.append({"channel": "notify_default", "error": err})
+        elif i.call == "dismiss":
+            err = ha_service("persistent_notification", "dismiss", i.payload, deadline)
+            sent.append({"channel": "dismiss", "ok": err is None})
+            if err:
+                errors.append({"channel": "dismiss", "error": err})
+                persistent_active = True                 # still showing; retried next time
+        elif i.call == "webhook":
+            ok, attempts, err = post_webhook(cfg, i.payload, deadline)
+            sent.append({"channel": "webhook", "ok": ok, "attempts": attempts})
+            if err:
+                errors.append({"channel": "webhook", "error": err})
+    return sent, errors, persistent_active, hint_shown
+
+
+# ---- output ------------------------------------------------------------------------------------
+def notify_status(p: Plan, sent: list, errors: list) -> str:
+    """`;`-joined tokens: fallback:a->b · state_only · sent:ch[(n)],… · quiet:ch,… · dismissed:persistent · error:ch:short."""
+    tokens = [f"fallback:{f}" for f in p.fallbacks]
+    if p.mode == "none":
+        tokens.append("state_only")
+    done, quiet, dismissed = [], list(p.quiet), False
+    for s in sent:
+        if not s["ok"] and not s.get("targets"):
+            continue                                     # nothing delivered: only the error token speaks
+        if s["channel"] == "dismiss":
+            dismissed = True
+            continue
+        label = s["channel"] + (f"({len(s['targets'])})" if "targets" in s else "")
+        if p.mode == "quiet" and s["channel"] != "webhook":
+            quiet.append(label)                          # the persistent refresh in quiet mode is silent too
+        else:
+            done.append(label)
+    if done:
+        tokens.append("sent:" + ",".join(done))
+    if quiet:
+        tokens.append("quiet:" + ",".join(quiet))
+    if dismissed:
+        tokens.append("dismissed:persistent")
+    tokens += [f"error:{e['channel']}:{truncate(str(e['error']), 60)}" for e in errors]
+    return ";".join(tokens) or "state_only"
+
+
+def build_output(p: Plan, sent: list, errors: list, persistent_active, hint_shown: bool, dry_run: bool) -> dict:
+    last = p.last_notified
+    if p.mode != "none" and last is not None:
+        last = dict(last)
+        if persistent_active is not None:
+            last["persistent_active"] = persistent_active
+        last["critical_hint_shown"] = last["critical_hint_shown"] or hint_shown
+    elif last is not None and persistent_active is not None:      # mode none: only a dismiss can have run
+        last = dict(last, persistent_active=persistent_active)
+    out = {"notify_status": notify_status(p, sent, errors), "mode": p.mode, "sent": sent,
+           "fallbacks": p.fallbacks, "errors": errors, "last_notified": last}
+    if dry_run:
+        planned = [dict(channel=i.channel, ok=True, **({"targets": i.targets} if i.targets else {})) for i in p.intents]
+        out.update(notify_status=notify_status(p, planned, errors), dry_run=True,
+                   planned=[{"channel": i.channel, "call": i.call, "targets": i.targets, "payload": i.payload} for i in p.intents])
+    return out
+
+
+def internal_error_output(exc: Exception) -> dict:
+    """The one JSON line when planning/sending blew up: no `last_notified` key, so the runner keeps the old one."""
+    return {"notify_status": f"error:internal:{type(exc).__name__}", "mode": "none", "sent": [], "fallbacks": [],
+            "errors": [{"channel": "internal", "error": truncate(str(exc) or type(exc).__name__, 200)}]}
+
+
+# ---- inputs ------------------------------------------------------------------------------------
+def read_state(path: str):
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError) as exc:
+        log(f"cannot read state file {path}: {exc}")
+        return None
+    if not isinstance(state, dict) or not isinstance(state.get("result"), dict) or not state.get("job"):
+        log(f"state file {path} has no terminal result")
+        return None
+    if not (state["result"].get("status") or state.get("status")):
+        log(f"state file {path} has no status")
+        return None
+    return state
+
+
+def load_job(name: str):
+    try:
+        return jobdef.load(name)
+    except Exception as exc:  # noqa: BLE001 - a broken/missing job file must not stop notifications
+        detail = "; ".join(getattr(exc, "errors", []) or [str(exc)])
+        log(f"job '{name}' no longer loads ({detail}); using renag_every={DEFAULT_RENAG_EVERY}, notify_recovery=false")
+        return None
+
+
+def load_notify_config():
+    try:
+        cfg = jobdef.load_notify_config()
+    except Exception as exc:  # noqa: BLE001
+        log(f"_notify.yaml: {exc}; using defaults")
+        return jobdef.NotifyConfig()
+    for problem in list(cfg.errors) + list(getattr(cfg, "warnings", [])):
+        log(f"_notify.yaml: {problem}")
+    return cfg
+
+
+def discover_services(deadline: Deadline) -> tuple:
+    """(Services, error|None) from GET /core/api/services. Failure = no mobile targets, no notify.notify."""
+    status, body = jc.ha_json("GET", "/core/api/services", timeout=max(0.1, deadline.cap(HTTP_TIMEOUT_S)))
+    if status != 200:
+        return Services([], False), ("connection failed" if status is None else f"HTTP {status}")
+    if not isinstance(body, list):
+        return Services([], False), "unexpected body"
+    names = []
+    for dom in body:
+        if isinstance(dom, dict) and dom.get("domain") == "notify":
+            svcs = dom.get("services") or {}
+            if isinstance(svcs, dict):
+                names = [str(k) for k in svcs]
+            elif isinstance(svcs, list):                 # defensive: list of names or {"service"|"name": …}
+                names = [str(s.get("service") or s.get("name")) if isinstance(s, dict) else str(s) for s in svcs]
+    return Services(sorted(n for n in names if n.startswith("mobile_app_")), "notify" in names), None
+
+
+# ---- main --------------------------------------------------------------------------------------
+def notify(name: str, state: dict, dry_run: bool, deadline: Deadline) -> dict:
+    job = load_job(name)
+    cfg = load_notify_config()
+    services, discovery_error = Services([], False), None
+    if needs_discovery(effective_channels(state, job, cfg)):
+        services, discovery_error = discover_services(deadline)
+    p = plan(state, job, cfg, services)
+    if discovery_error:
+        p.errors.insert(0, {"channel": "discovery", "error": discovery_error})
+    if dry_run:
+        return build_output(p, [], p.errors, None, False, dry_run=True)
+    sent, errors, persistent_active, hint_shown = send(p, cfg, deadline)
+    return build_output(p, sent, p.errors + errors, persistent_active, hint_shown, dry_run=False)
+
+
+def main(argv=None) -> int:
+    deadline = Deadline(NOTIFY_DEADLINE_S)
+    ap = argparse.ArgumentParser(prog=COMPONENT, description="Send notifications for a finished Claude job run.")
+    ap.add_argument("name", help="job name (file name without .md)")
+    ap.add_argument("--state-file", required=True, help="path of state/<name>.json written by the runner")
+    ap.add_argument("--dry-run", action="store_true", help="print the plan as the JSON line; make no calls")
+    args = ap.parse_args(argv)
+
+    state = read_state(args.state_file)
+    if state is None:
+        return 2
+    if state.get("job") != args.name:
+        log(f"warning: state file is for job '{state.get('job')}', not '{args.name}'")
+    try:
+        out = notify(args.name, state, args.dry_run, deadline)
+    except Exception as exc:  # noqa: BLE001 - the runner needs one JSON line, not a traceback
+        log("internal error:\n" + traceback.format_exc().rstrip())
+        out = internal_error_output(exc)
+    sys.stdout.write(json.dumps(out, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

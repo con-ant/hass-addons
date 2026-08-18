@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.8] - 2026-08-18
+
+### Added
+- **Notifications for Claude Jobs** (`claude-job-notify`). Results are routed by state to
+  channels: `persistent` (sidebar notification, replaced in place per job, dismissed on
+  recovery), `mobile` (every `notify.mobile_app_*` phone or a configured subset, with
+  per-job `tag`/`group`), `mobile_critical` (iOS critical alert; Android high priority on a
+  "Claude Jobs Critical" channel — grant it *Override Do Not Disturb* once per phone),
+  `notify_default`, `webhook` (sent last), `state_only`. Fallback chain mobile →
+  notify.notify → persistent; repeats with an unchanged headline refresh silently instead
+  of buzzing again; unchanged `critical` re-nags every `renag_every` runs; recovery to `ok`
+  dismisses the sidebar note and sends the job's `ok` mapping as "Resolved: …"
+  (`notify_recovery: true` adds a phone push when that mapping has none). All sends share
+  a 40 s budget. Optional `~/.claude/jobs/_notify.yaml` (example refreshed
+  at every start as `_notify.example.yaml`) sets phone targets, Android channels, a webhook
+  and a dashboard path. The entity's `notify_status` attribute records what was sent.
+  Design: `docs/DESIGN-claude-jobs.md` §4.8.
+
 ## [1.2.65-con.7] - 2026-08-18
 
 ### Added
