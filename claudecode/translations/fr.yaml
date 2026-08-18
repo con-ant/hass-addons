@@ -72,5 +72,9 @@ configuration:
     name: Modèle par défaut des tâches planifiées
     description: >-
       Alias du modèle utilisé par les Claude Jobs (~/.claude/jobs/*.md) qui ne définissent pas model: eux-mêmes. fable est le plus capable et le plus coûteux ; une tâche peut fixer un modèle moins cher dans son frontmatter.
+  enable_job_endpoint:
+    name: Activer le point d'accès des tâches
+    description: >-
+      Permet à Home Assistant de déclencher les Claude Jobs : démarre un point d'accès HTTP sur le port 7682 (réseau interne des add-ons uniquement, jeton dans /data/claude-jobs/token ; voir `claude-job token show`) et écrit le paquet claudecode_jobs.yaml dans votre répertoire de configuration à chaque démarrage. Désactivé = les tâches ne se lancent que depuis le terminal.
 network:
   7681/tcp: Terminal Web (ttyd)

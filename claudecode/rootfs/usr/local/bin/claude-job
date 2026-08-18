@@ -129,6 +129,7 @@ class Run:
     started_at: Optional[str] = None  # ISO; set when the job lock is taken, reset when the run clock starts (step 8)
     t0: float = 0.0                   # monotonic twin of started_at
     deadline: Optional[str] = None
+    phase: str = "waiting"            # pgid file: "waiting" (lock held, queued on the semaphore) → "running" (step 8)
     staged: bool = False              # THIS invocation wrote run/<name>.* (only then may cleanup remove them)
     nonce: Optional[str] = None
     broker: Any = None                # Popen
@@ -406,6 +407,10 @@ def take_job_lock(run: Run) -> bool:
     run.started_at, run.t0 = jc.now_iso(), time.monotonic()
     jc.write_lock_info(run.job_lock, {"pid": os.getpid(), "pgid": os.getpgrp(), "run_id": run.run_id,
                                       "started_at": run.started_at})   # diagnostics only, never logic
+    # The stop path finds runs through pgid files only: be findable while queued on the semaphore too.
+    timeout = run.job.timeout if run.job else jc.JOB_DEFAULT_TIMEOUT
+    run.deadline = iso_plus(run.started_at, float(jc.JOB_GLOBAL_WAIT_S) + timeout + float(jc.JOB_KILL_GRACE_S))
+    write_pgid_file(run)
     return True
 
 
@@ -426,6 +431,13 @@ def install_abort_handlers() -> None:
     """Handlers only set the flag; the polling loops do the work (R3)."""
     for s in ABORT_SIGNALS:
         signal.signal(s, lambda signum, frame: ABORT.set())
+
+
+def stop_requested() -> bool:
+    """A signal, or the stop path's RUN_DIR/stopping marker (a queued runner may see the file before any signal)."""
+    if not ABORT.is_set() and os.path.exists(jc.STOPPING_FILE):
+        ABORT.set()
+    return ABORT.is_set()
 
 
 def check_abort(run: Run) -> None:
@@ -473,7 +485,8 @@ def kill_child(run: Run) -> None:
 
 def acquire_global_lock(run: Run) -> None:
     """The concurrency-1 semaphore: wait up to JOB_GLOBAL_WAIT_S, interruptible (R4). Expiry → skipped."""
-    run.global_lock = jc.flock_wait(jc.GLOBAL_LOCK, jc.JOB_GLOBAL_WAIT_S, should_abort=ABORT.is_set)
+    run.global_lock = jc.flock_wait(jc.GLOBAL_LOCK, jc.JOB_GLOBAL_WAIT_S, should_abort=stop_requested)
+    stop_requested()                                  # acquired just as the add-on stops → still an abort, spawn nothing
     check_abort(run)
     if run.global_lock is None:
         raise Concluded(Verdict("skipped", "concurrency limit: another job is running", reason="concurrency_limit",
@@ -589,7 +602,7 @@ def fetch_time_zone(run: Run) -> str:
 
 def publish_running(run: Run) -> None:
     """State marker `running` (what the tick's duty 1 reads), the minimal running entity, and the pgid file."""
-    run.started_at, run.t0 = jc.now_iso(), time.monotonic()      # the job's clock starts after the semaphore
+    run.started_at, run.t0, run.phase = jc.now_iso(), time.monotonic(), "running"   # the job's clock starts now
     run.deadline = iso_plus(run.started_at, run.job.timeout)
     state = read_state(run)
     state.update(base_state_fields(run, state))
@@ -606,9 +619,10 @@ def publish_running(run: Run) -> None:
 
 
 def write_pgid_file(run: Run) -> None:
-    """2f/A30: the single PID artifact the stop path and the tick read. child_pgid names the live timeout/claude group."""
+    """2f/A30: the single PID artifact the stop path reads (the tick too, for `running` states). Written when the
+    job lock is taken (phase waiting), again at step 8 (running, real deadline); child_pgid names the live claude group."""
     body = {"pgid": os.getpgrp(), "pid": os.getpid(), "run_id": run.run_id, "job": run.name,
-            "started_at": run.started_at, "deadline": run.deadline}
+            "phase": run.phase, "started_at": run.started_at, "deadline": run.deadline}
     if run.claude is not None:
         body["child_pgid"] = run.claude.pid
     jc.atomic_write_json(run.pgid_path, body, mode=0o600)
@@ -1030,12 +1044,14 @@ def cleanup(run: Run) -> None:
     stop_broker(run)
     if run.job_lock is not None and run.input_file:  # the inbox hand-off is single-use — but only the run's owner may
         consume_inbox_file(run.input_file)            # eat it (a detaching parent or a skipper leaves it; the tick sweeps)
+    mine = [run.pgid_path] if run.job_lock is not None else []          # written by take_job_lock()
     if run.staged:                                    # never touch a live sibling's per-run files (overlap/stopping/detach)
-        for path in (run.settings_path, run.mcp_path, run.port_path, run.out_path, run.err_path, run.pgid_path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        mine += [run.settings_path, run.mcp_path, run.port_path, run.out_path, run.err_path]
+    for path in mine:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def consume_inbox_file(path: str) -> None:

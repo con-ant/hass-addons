@@ -380,6 +380,7 @@ add-on release having re-verified it: flag *removal* still fails closed and loud
 change in a flag's *behaviour* under the same name would not be caught — you trade the
 per-release verification for freshness. Every run records `claude_version` in the log
 and the state file, so a regression is at least attributable.
+`GET /jobs` (and with the package, `sensor.claude_jobs_attention`) carries
 `cli_drift: true` whenever the running CLI version differs from the one the image was
 built with, plus `preflight: {"ok": …, "missing": […]}`.
 
@@ -496,3 +497,153 @@ suppressed), `fallback:mobile->notify_default`, `dismissed:persistent`,
 `error:mobile:target mobile_app_x not found`, `state_only`, `skipped_aborting` (add-on was
 stopping), `skipped_no_notifier`, `error:notifier_failed` (the notifier crashed or did not
 answer within 45 s; the result itself is unaffected).
+
+## Triggering jobs from Home Assistant
+
+Set **`enable_job_endpoint: true`** and restart the add-on. At start it then:
+
+- generates a bearer token once into `/data/claude-jobs/token` (64 hex characters, mode
+  0600, outside your config directory and therefore outside HA backups and every job's
+  reach). `claude-job token show` prints it in the terminal; `claude-job token rotate`
+  replaces it — the endpoint reads the file on every request, so rotation is live;
+- starts `claude-job-endpoint` on port **7682** under a supervising loop that restarts it
+  if it dies. The port is not published to the host: it is reachable only on Home
+  Assistant's internal add-on network — from HA Core, from other add-ons, and from inside
+  this container — as `http://<add-on hostname>:7682`. The hostname is derived from the
+  repository URL, `d7e97e69-claudecode` for this repository; confirm yours by running
+  `hostname` in the add-on terminal. Every route except `/health` requires
+  `Authorization: Bearer <token>`.
+
+With the option off, `claude-job` in the terminal keeps working; only the endpoint, the
+token and (next section) the generated package are gated.
+
+| Route | Returns |
+|---|---|
+| `GET /health` (no auth) | `{"status": "ok" / "degraded", "jobs_dir", "token_set", "uptime_s", "version", "claude_version", "cli_preflight", "stopping"}` — booleans and versions only, never the token. `degraded` = CLI preflight failed, jobs directory missing, no token, or the add-on is stopping |
+| `POST /jobs/<name>/run`, body `{}` or `{"input": {…}}` | `202 {"accepted": true, "job", "run_id"}` — the run was spawned; the *result* arrives via the entity, not this response. Benign declines are **200** so a scheduled trigger never errors its automation trace: `{"accepted": false, "reason": "disabled", "gate": "flag" / "frontmatter"}`, `{"accepted": false, "reason": "rate_limited", "retry_after_s": N}`. Errors: `401`, `404 unknown_job`, `400 bad_json`, `411 length_required` (POST bodies need a `Content-Length`; chunked is refused), `413` (body > 64 KiB), `422 invalid_input` (with `errors`) or `not_triggerable` (a `kind: action` file), `503 stopping` / `cli_preflight_failed` (with `missing`) / `no_token` |
+| `GET /jobs` | the summary the anchor sensor polls: `attention` (= stale + failed count), `worst_status`, `stale_jobs`, `failed_jobs` (state `error`, plus any job whose state file is unreadable — listed with `status: "invalid_state"`), `disabled_jobs` (slugs), `running`, `job_count`, `cost_month_usd`, `cost_month_start`, `claude_version`, `built_claude_version`, `cli_drift`, `preflight`, `endpoint_version` (the add-on version), and `jobs: [{name, slug, description, status, headline, last_run, enabled, stale, stale_after, model, valid, run_count, cost_usd_last}]` |
+| `GET /jobs/<name>/detail` | `text/markdown`: the untruncated `detail` of the last run (`204` if the job never finished one) |
+| `POST /jobs/<name>/enable` · `/disable` | `{"job", "enabled": true / false}`; idempotent; `enable` on a job whose frontmatter says `enabled: false` removes the flag but answers `{"enabled": false, "reason": "frontmatter"}` |
+| `POST /republish` (body `{}`) | `{"republished": N, "failed": M}` — re-posts every job entity from `state/*.json` plus the cost entity (used after an HA restart, which erases them) |
+
+`<name>` accepts the hyphenated job name or its underscore slug. Every `POST` needs a
+body with a `Content-Length` — with curl always pass `-d '{}'` (a bare `-X POST` gets
+`411`). Quick check from the add-on terminal:
+
+```bash
+curl -s http://localhost:7682/health | jq
+curl -s -H "Authorization: Bearer $(claude-job token show)" http://localhost:7682/jobs | jq '.attention, .jobs[].name'
+curl -s -H "Authorization: Bearer $(claude-job token show)" -d '{}' http://localhost:7682/jobs/health-check/run
+curl -s -H "Authorization: Bearer $(claude-job token show)" \
+     -d '{"input": {"date": "2026-08-17"}}' http://localhost:7682/jobs/energy-report/run
+```
+
+### A schedule, with its off-switch (by hand)
+
+Until the generated package arrives in the next release, wire the trigger yourself. Keep the token in `secrets.yaml`, define the two REST commands, restart Home Assistant once (`rest_command` is only loaded at startup the first time; later edits need just Developer tools → YAML → *RESTful Command* reload):
+
+```yaml
+# secrets.yaml
+claude_job_auth: "Bearer <paste the output of: claude-job token show>"
+```
+
+```yaml
+# configuration.yaml — merge into an existing rest_command: block if you have one.
+# Use exactly these two names: the generated package defines the same commands,
+# so automations written against either keep working.
+rest_command:
+  claude_job_run:
+    url: "http://d7e97e69-claudecode:7682/jobs/{{ job }}/run"
+    method: post
+    content_type: "application/json"
+    headers:
+      Authorization: !secret claude_job_auth
+    payload: "{{ {'input': (input | default({}, true))} | to_json }}"
+    timeout: 10
+  claude_job_set_enabled:
+    url: "http://d7e97e69-claudecode:7682/jobs/{{ job }}/{{ 'enable' if (enabled | default(true) | bool(true)) else 'disable' }}"
+    method: post
+    content_type: "application/json"
+    headers:
+      Authorization: !secret claude_job_auth
+    payload: "{}"
+    timeout: 10
+```
+
+Then create the schedule as an ordinary automation (Settings → Automations & scenes →
+Create automation → ⋮ → Edit in YAML):
+
+```yaml
+alias: "Claude Jobs · health-check every morning"
+mode: single
+triggers:
+  - trigger: time
+    at: "07:15:00"
+actions:
+  - action: rest_command.claude_job_run
+    continue_on_error: true    # add-on down = connection refused, which would otherwise abort the trace
+    data:
+      job: health-check
+      # input: {date: "2026-08-17"}   # only for jobs that declare input:
+```
+
+**Pausing it — two layers, both honored:**
+
+- *Schedule gate:* toggle the automation off in the UI. Free, native, and what you will
+  usually reach for. Nothing triggers, nothing runs.
+- *Hard gate:* `claude-job disable health-check` in the terminal, or from HA
+  Developer tools → Actions: `rest_command.claude_job_set_enabled` with
+  `data: {job: health-check, enabled: false}`. This creates the flag file
+  `state/disabled/health_check`, which the runner checks on **every** path — schedule,
+  run-now button, `curl`, terminal. A triggered-but-disabled job costs nothing: the
+  endpoint answers `{"accepted": false, "reason": "disabled"}` without spawning, the entity
+  keeps its last result with `enabled: false`, and the job appears in the anchor's
+  `disabled_jobs`. Undo with `claude-job enable <name>` (or `enabled: true` in the action).
+  Frontmatter `enabled: false` is honored the same way ("born disabled"); only
+  `claude-job force-run` at the terminal overrides either.
+
+### Rate limit, overlap, concurrency
+
+- Per job, accepted triggers closer together than `min_interval` (default 60 s) are
+  declined with `rate_limited` — cost protection against a misfiring automation, not
+  security. The counter lives in memory and resets whenever the endpoint or add-on
+  restarts. Terminal runs bypass it.
+- There is deliberately no "already running" HTTP error: the runner's own lock decides. A
+  trigger that overlaps a live run of the same job is logged as `skipped_overlap`, changes
+  no entity, and shows up as `skipped_since_last` on the next result.
+- Only one job runs at a time; others wait up to 60 s for the slot, then publish
+  `skipped` / `concurrency_limit`. Stagger daily schedules by a few minutes rather than
+  stacking them all at 07:00.
+
+### `aborted`, and how stuck states heal
+
+Stopping or restarting the add-on now signals in-flight job runs first: each receives
+SIGTERM, stops its Claude process, publishes `aborted — add-on stopping` and exits within
+about 4 s, while the interactive session shuts down in parallel; stragglers are killed
+after 5 s. The whole stop sequence stays under 27 s, inside the Supervisor's 30 s limit. An
+`aborted` entity is expected after every restart that interrupted a run — even one whose
+Claude process had just finished, since a result judged mid-shutdown is not trustworthy;
+the raw envelope stays in `logs/<name>.jsonl` — and is healed by the next run; no
+notification is sent for it, and no cost is added to the month for it.
+
+If a run dies without reporting at all (container killed, host power loss), its entity
+would otherwise say `running` forever. The endpoint's background tick (every 60 s, and
+once at every start) demotes any `running` state that is more than 2 minutes past its
+deadline (`started_at + timeout`) with no live process to `error` — "runner died without
+reporting" — and kills a process that is somehow still alive 3 minutes past its deadline.
+The same tick re-posts results that could not be published because HA was down
+(`published: false` in the state file) and, at most every 10 minutes, notices that HA
+restarted and re-posts every job entity.
+
+### `sensor.claude_jobs_endpoint`
+
+This entity exists only while something is wrong with the endpoint itself; nothing ever
+sets it to `ok`. `state: error` with attribute `reason`:
+
+| `reason` | Meaning | Fix |
+|---|---|---|
+| `cli_preflight_failed` | the installed `claude --help` no longer lists one of the flags the job cage depends on (`missing` names them); every trigger gets `503` and no tokens are spent | usually an auto-updated CLI: set `auto_update_claude: false` and restart (the image's bundled CLI is known-good), or update the add-on |
+| `respawn_degraded` | the endpoint crashed 5 times in a row within 10 s of starting; the loop now retries every 300 s (`fast_crashes` counts them) | read the add-on log for the Python traceback; report it |
+
+Because it is a plain state-machine entity it disappears at the next Home Assistant
+restart once the cause is fixed.

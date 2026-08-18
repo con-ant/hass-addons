@@ -66,5 +66,9 @@ configuration:
     name: Modelo padrão para jobs agendados
     description: >-
       Alias do modelo usado pelos Claude Jobs (~/.claude/jobs/*.md) que não definem model: por conta própria. fable é o mais capaz e o mais caro; um job pode fixar um modelo mais barato no próprio frontmatter.
+  enable_job_endpoint:
+    name: Ativar o endpoint de jobs
+    description: >-
+      Permite que o Home Assistant dispare os Claude Jobs: inicia um endpoint HTTP na porta 7682 (apenas rede interna de add-ons, token em /data/claude-jobs/token; veja `claude-job token show`) e grava o pacote claudecode_jobs.yaml no seu diretório de configuração a cada inicialização. Desativado = os jobs só rodam pelo terminal.
 network:
   7681/tcp: Terminal Web (ttyd)

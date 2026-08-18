@@ -1,6 +1,6 @@
 name: Claude Code
 description: Run Claude Code AI assistant inside Home Assistant to create automations, debug issues, and manage your smart home configuration
-version: "1.2.65-con.8"
+version: "1.2.65-con.9"
 slug: claudecode
 url: https://github.com/con-ant/hass-addons
 arch:
@@ -10,9 +10,10 @@ startup: application
 boot: auto
 init: true
 # Seconds the Supervisor waits after SIGTERM before killing the container.
-# claudecode-start hands a running Claude a SIGTERM and waits up to
-# STOP_GRACE_SECS (10) for it before tearing down tmux and ttyd; the default
-# 10 is too tight for that.
+# claudecode-start signals in-flight job runs first, hands a running Claude a
+# SIGTERM and waits up to STOP_GRACE_SECS (10), reaps job runs
+# (JOB_STOP_GRACE_SECS, 5), then tears down tmux and ttyd: <= 27 s worst case
+# (docs/DESIGN-claude-jobs.md Appendix A.1). The default 10 is too tight.
 timeout: 30
 ingress: true
 ingress_port: 7681
@@ -47,6 +48,7 @@ options:
   remote_control_session_prefix: HomeAssistant
   extra_npm_packages: []
   job_default_model: fable
+  enable_job_endpoint: false
 schema:
   enable_mcp: bool
   enable_playwright_mcp: bool
@@ -63,5 +65,6 @@ schema:
   extra_npm_packages:
     - str?
   job_default_model: list(fable|opus|sonnet|haiku)
+  enable_job_endpoint: bool
 environment:
   TERM: xterm-256color

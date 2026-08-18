@@ -62,5 +62,9 @@ configuration:
     name: Default model for scheduled jobs
     description: >-
       Model alias used by Claude Jobs (~/.claude/jobs/*.md) that do not set model: themselves. fable is the most capable and most expensive; a job can pin a cheaper model in its own frontmatter.
+  enable_job_endpoint:
+    name: Enable the job trigger endpoint
+    description: >-
+      Let Home Assistant trigger Claude Jobs: starts an HTTP endpoint on port 7682 (add-on network only, bearer token in /data/claude-jobs/token; see `claude-job token show`) and writes the claudecode_jobs.yaml package into your config directory at every start. Off = jobs can still be run from the terminal.
 network:
   7681/tcp: Web Terminal (ttyd)
