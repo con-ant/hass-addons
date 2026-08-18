@@ -35,6 +35,11 @@ Env:  SUPERVISOR_TOKEN (required), CLAUDE_JOB_BROKER_NONCE (required, >= 32 char
       heuristic), CLAUDE_JOB_BROKER_TEMPLATE_ALLOWLIST_FILE (JSON list of allowed templates)
       -- test seams only.
 Ready signal: exactly one stdout line {"event":"ready","port":N}; SIGTERM/SIGINT -> exit 0.
+
+Where to go to change things: a new read-only route is one row in `ROUTES` (method, path
+regex, body cap, upstream timeout, optional response filter) plus a matching line in
+job-ha-allowlist if an `ha` verb should reach it; anything that filters a response body is a
+pure function next to `scrub_states()`/`filter_addon_info()` with its own test.
 """
 import argparse
 from collections import namedtuple
