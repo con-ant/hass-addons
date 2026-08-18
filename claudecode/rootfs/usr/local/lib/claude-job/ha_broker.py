@@ -118,7 +118,8 @@ TEMPLATE_DENY_RE = re.compile(
 
 
 def load_template_allowlist():
-    """-> (frozenset_or_None, note). None = heuristic mode. Production: hass-mcp's fixed templates."""
+    """-> (frozenset_or_None, note). Production: hass-mcp's fixed templates (empty set = allow none).
+    None = deny-regex heuristic only, reachable solely through the explicit env seam (tests)."""
     if (os.environ.get("CLAUDE_JOB_BROKER_TEMPLATE_ALLOWLIST") or "").lower() == "off":
         return None, "template allow-list disabled by env; using the deny-regex heuristic"
     path = os.environ.get("CLAUDE_JOB_BROKER_TEMPLATE_ALLOWLIST_FILE")
@@ -134,7 +135,8 @@ def load_template_allowlist():
     try:
         from app.areas import _AREA_TEMPLATE       # hass-mcp, pip-installed in the image
     except Exception:                               # ImportError, or its config module objecting
-        return None, "hass-mcp not importable; template route guarded by the deny-regex heuristic only"
+        # Fail closed: without hass-mcp nothing legitimate calls /api/template at all.
+        return frozenset(), "hass-mcp not importable; allowing no templates"
     return frozenset((_AREA_TEMPLATE,)), None
 
 

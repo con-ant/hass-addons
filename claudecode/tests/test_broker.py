@@ -258,7 +258,7 @@ class TestModuleSurface(unittest.TestCase):
                 from app.areas import _AREA_TEMPLATE        # noqa: F401
                 self.assertEqual((allowed, note), (frozenset((_AREA_TEMPLATE,)), None))
             except ImportError:
-                self.assertIsNone(allowed)
+                self.assertEqual(allowed, frozenset())        # fail closed: no hass-mcp -> no templates
                 self.assertIn("hass-mcp not importable", note)
         finally:
             for k, v in saved.items():
@@ -327,7 +327,9 @@ class TestProxy(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.sup = FakeSupervisor().start()
-        cls.b = BrokerProc(cls.sup.url).wait_ready()
+        # heuristic template mode via the explicit seam: hass-mcp is not importable on a dev box,
+        # and the production fallback for that is "allow no templates" (fail closed)
+        cls.b = BrokerProc(cls.sup.url, extra_env={"CLAUDE_JOB_BROKER_TEMPLATE_ALLOWLIST": "off"}).wait_ready()
 
     @classmethod
     def tearDownClass(cls):
@@ -507,7 +509,7 @@ class TestProxy(unittest.TestCase):
         self.assertEqual(st, 400)
         self.assertEqual(self.sup.requests, [])
 
-    # ---- A32: template request pre-check (heuristic mode here: hass-mcp is not importable on the test box) ----
+    # ---- A32: template request pre-check (heuristic mode via the env seam set in setUpClass) ----
     def test_template_body_precheck(self):
         hdr = {"Content-Type": "application/json"}
         ok = json.dumps({"template": "{{ states('sensor.x') }} / {{ state_attr('sensor.x','unit_of_measurement') }}"}).encode()
@@ -812,11 +814,16 @@ class TestTimeoutsCapsAndUpstreamFailures(unittest.TestCase):
                     self.assertNotIn("heuristic", b.stderr())
                 finally:
                     b.stop()
-                # default mode on this box (no hass-mcp): the broker says once at startup that it fell back
+                # default mode on this box (no hass-mcp): the broker fails CLOSED - it says so once at
+                # startup and refuses every template, even an innocuous one
                 b = BrokerProc(sup.url).wait_ready()
                 try:
-                    expect_note = importlib.util.find_spec("app") is None
-                    self.assertEqual("deny-regex heuristic" in b.stderr(), expect_note)
+                    no_hass_mcp = importlib.util.find_spec("app") is None
+                    self.assertEqual("allowing no templates" in b.stderr(), no_hass_mcp)
+                    if no_hass_mcp:
+                        st, _, out = http_call(b.url, "POST", "/core/api/template",
+                                               body=json.dumps({"template": "{{ states('sensor.x') }}"}).encode(), headers=hdr)
+                        self.assertEqual(st, 403)
                     self.assertNotIn(NONCE, b.stderr())
                 finally:
                     b.stop()
