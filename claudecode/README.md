@@ -111,6 +111,7 @@ claude --continue
 | `remote_control_session_prefix` | Prefix for auto-generated Remote Control session names shown in claude.ai/code and the mobile app (e.g. `HomeAssistant-graceful-unicorn`). Only applies when `enable_remote_control` is on | HomeAssistant |
 | `extra_npm_packages` | List of npm package specs to install at every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). Bin dir is on `PATH`. Use to add custom MCP servers without forking the Dockerfile. | `[]` |
 | `job_default_model` | Model alias used by scheduled jobs (`~/.claude/jobs/*.md`) that do not set `model:` themselves: `fable`, `opus`, `sonnet` or `haiku`. `fable` is the most capable and the most expensive; a job can pin a cheaper model in its own frontmatter. See [Scheduled jobs](#scheduled-jobs-claude-jobs) | fable |
+| `enable_job_endpoint` | Start the job trigger endpoint (port 7682, add-on network only, bearer token), generate its token on first start, and write the `claudecode_jobs.yaml` package into your config directory on every start. Off = jobs can still be run from the terminal with `claude-job`, but Home Assistant cannot trigger or watch them | false |
 
 ### Playwright MCP setup
 

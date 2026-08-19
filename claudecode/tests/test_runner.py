@@ -294,7 +294,8 @@ class TestJudgmentRows(RunnerCase):
         pgid_file = self.s.run_dir / "jobs" / f"{JOB}.pgid"
         self.assertTrue(wait_for(lambda: "child_pgid" in (self.s.read_json(pgid_file) or {}), timeout=15))
         body = self.s.read_json(pgid_file)
-        self.assertEqual({"pgid", "pid", "run_id", "job", "started_at", "deadline", "child_pgid"}, set(body))
+        self.assertEqual({"pgid", "pid", "run_id", "job", "phase", "started_at", "deadline", "child_pgid"}, set(body))
+        self.assertEqual(body["phase"], "running")
         self.assertTrue(wait_for(lambda: self.s.fake_claude_calls(), timeout=10))
         os.killpg(body["child_pgid"], signal.SIGKILL)
         out, err = proc.communicate(timeout=20)
@@ -359,20 +360,47 @@ class TestAbort(RunnerCase):
         self.assertOutcome(proc.returncode, 1, "aborted", "killed", 4)
         self.assertEqual((self.result()["exit_code"], self.result()["hard_killed"]), (143, False))
 
-    def test_int_during_global_wait_aborts(self):
+    def start_queued_runner(self):
+        """A runner parked in step 5 behind a held global lock; returns (proc, pgid file body)."""
         self.hold_lock(self.s.state / "_global.lock", {"job": "other", "run_id": "run-x"})
         self.s.setenv(CLAUDE_JOB_GLOBAL_WAIT_S="30")
         proc = self.spawn_job()
+        pgid_file = self.s.run_dir / "jobs" / f"{JOB}.pgid"
         lock = self.s.state / f"{JOB}.lock"
         self.assertTrue(wait_for(lambda: (self.s.read_json(lock) or {}).get("pid") == proc.pid, timeout=15))
-        time.sleep(0.3)
-        t0 = time.monotonic()
-        os.kill(proc.pid, signal.SIGINT)                  # A14: INT ≡ TERM
+        self.assertTrue(wait_for(lambda: self.s.read_json(pgid_file), timeout=1))   # findable by the stop path already
+        body = self.s.read_json(pgid_file)
+        self.assertEqual((body["phase"], body["pgid"], body["run_id"][:4]), ("waiting", proc.pid, "run-"))
+        self.assertNotIn("child_pgid", body)
+        self.assertIsNone(self.state())                   # nothing `running` yet, so the tick has nothing to judge
+        return proc, body
+
+    def assert_queued_abort(self, proc, t0):
         proc.communicate(timeout=20)
-        self.assertLess(time.monotonic() - t0, 4.5)
+        self.assertLess(time.monotonic() - t0, 4.0)
         self.assertOutcome(proc.returncode, 143, "aborted", "addon_stopping", 2)
+        self.assertFalse((self.s.run_dir / "jobs" / f"{JOB}.pgid").exists())
         self.assertEqual(self.s.fake_claude_calls(), [])
         self.assertEqual(self.result()["cost_usd"], 0.0)
+
+    def test_int_during_global_wait_aborts(self):
+        proc, _ = self.start_queued_runner()
+        t0 = time.monotonic()
+        os.kill(proc.pid, signal.SIGINT)                  # A14: INT ≡ TERM
+        self.assert_queued_abort(proc, t0)
+
+    def test_stop_path_term_to_the_waiting_pgid_aborts(self):
+        proc, body = self.start_queued_runner()
+        t0 = time.monotonic()
+        os.killpg(body["pgid"], signal.SIGTERM)           # what signal_job_runs does with the pgid file
+        self.assert_queued_abort(proc, t0)
+
+    def test_stopping_file_during_global_wait_aborts(self):
+        """No signal at all: the queued runner sees RUN_DIR/stopping and takes the same aborted/143 path."""
+        proc, _ = self.start_queued_runner()
+        t0 = time.monotonic()
+        (self.s.run_dir / "stopping").write_text("")
+        self.assert_queued_abort(proc, t0)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -512,6 +540,7 @@ class TestGates(RunnerCase):
         self.assertEqual(self.result()["holder"]["job"], "energy-report")
         self.assertEqual(self.s.fake_claude_calls(), [])
         self.assertEqual(self.s.job_log(JOB)[-1]["event"], "skipped_concurrency")
+        self.assertEqual(list((self.s.run_dir / "jobs").iterdir()), [])
 
     def test_ha_down_persists_unpublished_and_exits_zero(self):
         self.sup.route("POST", STATES, (500, {"message": "down"}), prefix=True)
@@ -534,6 +563,7 @@ class TestValidation(RunnerCase):
         self.assertEqual(self.last_post()["attributes"]["validation_errors"], res["validation_errors"])
         self.assertEqual(self.s.fake_claude_calls(), [])
         self.assertEqual(self.s.job_log(JOB)[-1]["argv"], None)
+        self.assertEqual(list((self.s.run_dir / "jobs").iterdir()), [])     # the early (waiting) pgid file is gone
 
     def test_structurally_broken_file_still_publishes(self):
         self.s.write_raw_job(f"{JOB}.md", "no frontmatter here\n")

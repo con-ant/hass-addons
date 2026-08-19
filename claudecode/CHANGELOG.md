@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.9] - 2026-08-18
+
+### Added
+- **Home Assistant can trigger Claude Jobs.** New option `enable_job_endpoint` (default
+  off) starts `claude-job-endpoint` on port 7682 — internal add-on network only, no host
+  port — behind a bearer token generated once into `/data/claude-jobs/token`
+  (`claude-job token show|rotate`; rotation is live). Routes: `POST /jobs/<name>/run`
+  (optional `{"input": {...}}`; benign declines such as disabled or rate-limited answer 200
+  with `accepted: false` so automation traces stay green), `GET /jobs` (summary for the
+  anchor sensor), `GET /jobs/<name>/detail`, `POST /jobs/<name>/enable|disable`,
+  `POST /republish`, unauthenticated `GET /health`. A background tick demotes runs whose
+  process died to `error` ("runner died without reporting"), re-posts results Home
+  Assistant missed, re-posts all job entities after an HA restart, and prunes logs and
+  transcripts daily. The endpoint runs under a respawn loop; five fast crashes publish
+  `sensor.claude_jobs_endpoint = error`. `docs/JOBS.md` carries a copy-paste `rest_command` +
+  schedule automation with the kill switch next to it. Design:
+  `docs/DESIGN-claude-jobs.md` §4.9, Appendix A.
+
+### Changed
+- **Stop sequence.** On stop/restart the add-on now signals in-flight job runs first
+  (each publishes `aborted` within ~4 s), then shuts down the interactive Claude session
+  as before, reaps remaining runs after 5 s, then stops ttyd — at most 27 s against the
+  Supervisor's 30 s limit. Installs without jobs are unaffected.
+- The job runner now records its process group as soon as it holds the job lock, so an
+  add-on stop also reaches runs still queued for the concurrency slot; a queued or running
+  job interrupted by a stop always ends as `aborted` (never "killed externally").
+
 ## [1.2.65-con.8] - 2026-08-18
 
 ### Added

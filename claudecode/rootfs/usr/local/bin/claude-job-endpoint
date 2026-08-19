@@ -1,0 +1,1028 @@
+#!/usr/bin/env python3
+"""claude-job-endpoint -- the Claude Jobs trigger endpoint and its 60 s "tick"
+(design §4.9, §4.10 republish triggers, §9, Appendix A.3-A.7; breakdown 2k; CONTRACTS A23/A30).
+
+A tiny bearer-authenticated HTTP API on 0.0.0.0:7682 (hassio bridge only; no `ports:` entry)
+that Home Assistant's generated package calls, plus one daemon thread that keeps the on-disk
+state and the HA entities honest. Python stdlib only.
+
+Routes (JSON `application/json; charset=utf-8` unless noted; all but /health need
+`Authorization: Bearer <token>`; the token file is read per request, so rotation is live):
+
+  GET  /health               200 {status ok|degraded, jobs_dir, token_set, uptime_s, version,
+                             claude_version, cli_preflight, stopping}      (unauthenticated)
+  GET  /jobs                 200 summary object the anchor REST sensor consumes (2k + A23)
+  GET  /jobs/<tok>/detail    200 text/markdown = last result's `detail`; 204 if none
+  POST /jobs/<tok>/run       202 {accepted, job, run_id}; benign declines are 200
+                             {accepted:false, reason: disabled|rate_limited}; 401/404/413/411/400/408/
+                             503 stopping/503 cli_preflight_failed/422 not_triggerable|invalid_input
+  POST /jobs/<tok>/enable    200 {job, enabled[, reason:"frontmatter"]}
+  POST /jobs/<tok>/disable   200 {job, enabled:false}
+  POST /republish            200 {republished: N, failed: M}  (synchronous duty-2 pass, forced)
+  POST /action               404 {error: reserved_v1_1}
+  anything else              404 {error: not_found} / 405 {error: method_not_allowed}
+
+`<tok>` is a job name or slug (`^[a-z0-9]+(?:[-_][a-z0-9]+)*$`, <= 48 chars) checked before
+any path is built; `_` maps to `-`. POST bodies must be Content-Length framed (chunked or a
+missing Content-Length -> 411; HA's rest_command and the runner always send one).
+
+Spawning is the single authority described in §4.9: mint run_id, write any input to
+state/inbox/<run_id>.json (0600), `Popen([claude-job, run, <name>, --run-id, <id>, --trigger,
+endpoint, (--input-file, <inbox>)], start_new_session=True)`, answer 202. There is no child
+table and no endpoint-side overlap check: the runner's flock is the only overlap authority,
+and the stop path finds runs through the runner-written pgid files, never through us.
+
+The tick (one daemon thread; first pass at start, then every TICK_INTERVAL_S; every duty in
+its own try/except so one failure never stops the others):
+  1. demote stuck `running` state files past deadline+120 s whose job lock is free (the runner
+     holds that flock for its whole life, so free == dead) to error/lost, under the lock, and
+     publish; if the lock is still busy at deadline+180 s, SIGKILL the run's process groups
+     named by its pgid file (pgid and child_pgid, A30) so the lock frees and the next pass demotes;
+  2. re-POST every state file with published != true (all files while force_republish is set)
+     plus sensor.claude_jobs_cost_raw; flip published:true under a non-blocking job lock; a
+     corrupt file is logged and skipped; the pass stops at the first "HA unreachable";
+  3. canary every >= 600 s: GET sensor.claude_jobs_cost_raw from Core; 404 => force + duty 2
+     (also run lazily from GET /jobs);
+  4. daily backstop prune of logs/*.jsonl (> 2 MiB -> last 200 lines) and the transcript dir;
+  5. every pass: unlink *.tmp.* under state/ and logs/ and inbox/*.json older than 1 h.
+
+CLI: claude-job-endpoint [--bind ADDR] [--port N] [--no-tick] [--tick-once]
+Env test seams: CLAUDE_JOB_ENDPOINT_BIND/_PORT, CLAUDE_JOB_TICK_INTERVAL_S, _STUCK_MARGIN_S,
+_WATCHDOG_KILL_S, _CANARY_INTERVAL_S, _PRUNE_INTERVAL_S, _PRUNE_FIRST_DELAY_S, _TMP_MAX_AGE_S,
+plus every jobcommon path override. SIGTERM/SIGINT -> stop serving, exit 0; runner processes
+are never touched on shutdown.
+"""
+import os, sys, pathlib  # noqa: E401 -- shared bootstrap (breakdown §0)
+_LIB = os.environ.get("CLAUDE_JOB_LIB_DIR") or str(pathlib.Path(__file__).resolve().parent.parent / "lib" / "claude-job")
+sys.path.insert(0, _LIB)
+import jobcommon as jc, jobdef  # noqa: E401,E402
+
+import argparse  # noqa: E402
+import hmac  # noqa: E402
+import json  # noqa: E402
+import math  # noqa: E402
+import re  # noqa: E402
+import signal  # noqa: E402
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+COMPONENT = "claude-job-endpoint"
+FORCE_RETRY_OFFSETS_S = (10.0, 30.0)      # extra duty-2 passes after start while HA Core lags
+WORST_RANK = ("never_run", "running", "ok", "skipped", "info", "aborted", "warning", "invalid_state", "error", "critical")
+FAILED_STATUSES = ("error", "invalid_state")     # invalid_state = unreadable/corrupt state file (GET /jobs only)
+STATE_WRITE_LOCK = threading.Lock()              # serializes this process's state-file writes: jc.atomic_write_json's
+                                                 # tmp name is per-pid, so two threads must not write one path at once
+COST_SEED_RETRY_S = 60.0
+LOST_DETAIL = ("The runner process disappeared before it reported a result (container killed, "
+               "out of memory, or a crash). The next run of this job replaces this state.")
+
+
+def log(msg: str) -> None:
+    jc.log(COMPONENT, msg)
+
+
+def epoch(iso_text) -> float | None:
+    """ISO-8601 string -> POSIX seconds, or None."""
+    dt = jc.parse_iso(iso_text)
+    return dt.timestamp() if dt is not None else None
+
+
+def group_alive(pgid) -> bool:
+    """True when process group `pgid` still has a member (EPERM counts as alive)."""
+    try:
+        os.killpg(int(pgid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def valid_pgid(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 1 and value != os.getpgrp()
+
+
+def state_files():
+    """`[(name, path)]` for every per-job state file (skips `_cost.json`, tmp files, junk)."""
+    out = []
+    try:
+        names = sorted(os.listdir(jc.STATE_DIR))
+    except OSError:
+        return out
+    for fn in names:
+        if not fn.endswith(".json") or fn.startswith("_") or ".tmp." in fn:
+            continue
+        name = fn[:-5]
+        if jobdef.NAME_RE.match(name) and len(name) <= jobdef.NAME_MAX:
+            out.append((name, os.path.join(jc.STATE_DIR, fn)))
+    return out
+
+
+def load_job(name: str):
+    """`(JobDef|None, errors)`; never raises (a broken jobdef must not take a route down)."""
+    try:
+        job, errors, _warnings = jobdef.load_and_validate(name)
+        return job, list(errors or [])
+    except Exception as exc:  # noqa: BLE001
+        return None, [f"internal: {exc!r}"]
+
+
+# ---- shared process state -----------------------------------------------------------------
+class Endpoint:
+    """Everything the handlers and the tick share. Locks: `rate_lock` guards `last_accepted`;
+    `flag_lock` guards `force_republish`/`last_canary`/`last_prune`; `publish_lock` serializes
+    duty-2 passes (tick, /republish, canary); `child_lock` guards the reap list."""
+
+    def __init__(self, preflight: dict):
+        self.started_mono = time.monotonic()
+        self.preflight = preflight
+        self.addon_version = jc.addon_version()
+        self.built_claude_version = preflight.get("built_version") or jc.built_cli_version()
+        self.rate_lock = threading.Lock()
+        self.last_accepted = {}                     # job name -> monotonic of last 202
+        self.flag_lock = threading.Lock()
+        self.force_republish = True                 # republish trigger 1: endpoint start
+        self.last_canary = self.started_mono        # first canary CANARY_INTERVAL_S after start
+        self.last_prune = None
+        self.publish_lock = threading.Lock()
+        self.child_lock = threading.Lock()
+        self.children = []                          # Popen objects, kept only so we can reap them
+        self.watchdog_seen = set()                   # run_ids already reported by the watchdog (M5)
+        self.last_cost_seed_try = None
+
+    # -- flags --
+    def preflight_ok(self) -> bool:
+        return bool(self.preflight.get("ok"))
+
+    def set_force(self, value: bool = True) -> None:
+        with self.flag_lock:
+            self.force_republish = bool(value)
+
+    def force_set(self) -> bool:
+        with self.flag_lock:
+            return self.force_republish
+
+    def canary_due(self) -> bool:
+        """True (and the timestamp advanced) at most once per CANARY_INTERVAL_S."""
+        with self.flag_lock:
+            now = time.monotonic()
+            if now - self.last_canary >= jc.CANARY_INTERVAL_S:
+                self.last_canary = now
+                return True
+            return False
+
+    def prune_due(self) -> bool:
+        with self.flag_lock:
+            now = time.monotonic()
+            if self.last_prune is None:
+                due = now - self.started_mono >= jc.PRUNE_FIRST_DELAY_S
+            else:
+                due = now - self.last_prune >= jc.PRUNE_INTERVAL_S
+            if due:
+                self.last_prune = now
+            return due
+
+    def first_watchdog_report(self, run_id) -> bool:
+        """True exactly once per run_id (bounded memory), so a group we cannot kill (EPERM) or a
+        runner that shrugs off SIGKILL does not grow the JSONL every pass."""
+        with self.flag_lock:
+            if run_id in self.watchdog_seen:
+                return False
+            if len(self.watchdog_seen) > 256:
+                self.watchdog_seen.clear()
+            self.watchdog_seen.add(run_id)
+            return True
+
+    def stopping(self) -> bool:
+        return os.path.exists(jc.STOPPING_FILE)
+
+    # -- cost accumulator seeding: pin the accounting tz before the first run (integration review #11) --
+    def seed_cost_file(self, lazy: bool = False) -> None:
+        """If state/_cost.json does not exist yet, create a zero accumulator in HA's time zone so
+        `cost_month_start` carries HA's offset from the start (a later flip from +00:00 to HA's
+        offset would look like a spurious `last_reset` to HA statistics). No HA answer -> skip."""
+        if os.path.exists(jc.COST_FILE):
+            return
+        if lazy:
+            with self.flag_lock:
+                now = time.monotonic()
+                if self.last_cost_seed_try is not None and now - self.last_cost_seed_try < COST_SEED_RETRY_S:
+                    return
+                self.last_cost_seed_try = now
+        status, cfg = jc.ha_json("GET", "/core/api/config", timeout=5)
+        tz = (cfg or {}).get("time_zone") if status == 200 and isinstance(cfg, dict) else None
+        if not tz:
+            return
+        fd = jc.flock_nb(jc.COST_LOCK)              # a runner adding cost right now owns the file
+        if fd is None:
+            return
+        try:
+            if not os.path.exists(jc.COST_FILE):
+                jc.atomic_write_json(jc.COST_FILE, {"schema": 1, "month": jc.month_key(tz), "time_zone": tz,
+                                                    "total_usd": 0.0, "runs": 0, "by_job": {},
+                                                    "updated_at": jc.now_iso()}, mode=0o644)
+                log(f"seeded {jc.COST_FILE} (time zone {tz})")
+        finally:
+            jc.unlock(fd)
+
+    # -- rate limit (cost protection, §4.9): reserve the slot before spawning --
+    def rate_check_and_reserve(self, name: str, min_interval: float):
+        """None if the run may proceed (slot reserved), else retry_after_s."""
+        with self.rate_lock:
+            now = time.monotonic()
+            last = self.last_accepted.get(name)
+            if min_interval > 0 and last is not None and now - last < min_interval:
+                return max(1, math.ceil(min_interval - (now - last)))
+            self.last_accepted[name] = now
+            return None
+
+    def rate_release(self, name: str) -> None:
+        with self.rate_lock:
+            self.last_accepted.pop(name, None)
+
+    # -- children: never used for logic (no child table); we only poll() them so finished runners
+    #    are reaped -- tini adopts orphans only after we exit, it does not reap a live parent's children --
+    def remember_child(self, proc) -> None:
+        with self.child_lock:
+            self.children.append(proc)
+
+    def reap_children(self) -> None:
+        with self.child_lock:
+            self.children = [p for p in self.children if p.poll() is None]
+
+    # -- spawning (2k spawn contract) --
+    def spawn_run(self, name: str, input_data: dict | None) -> str:
+        """Mint run_id, write the inbox file if there is input, start the runner detached.
+        Returns run_id; raises OSError if the runner cannot be started."""
+        run_id = jc.new_run_id()
+        argv = [jc.RUNNER_BIN, "run", name, "--run-id", run_id, "--trigger", "endpoint"]
+        inbox_path = None
+        if input_data:
+            inbox_path = os.path.join(jc.INBOX_DIR, f"{run_id}.json")
+            jc.atomic_write_json(inbox_path, {"run_id": run_id, "job": name, "input": input_data,
+                                              "received_at": jc.now_iso()}, mode=0o600)
+            argv += ["--input-file", inbox_path]
+        try:
+            proc = subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=None, close_fds=True, cwd="/")
+        except OSError:
+            if inbox_path:
+                try:
+                    os.unlink(inbox_path)
+                except OSError:
+                    pass
+            raise
+        self.remember_child(proc)
+        self.reap_children()
+        return run_id
+
+    # -- publishing (duty 2 core; also POST /republish and the canary) --
+    def publish_pass(self, force: bool | None = None):
+        """POST every state file that needs it (+ cost_raw). Returns (ok_count, fail_count).
+        `force=None` means "whatever force_republish says"; a fully successful forced pass
+        clears the flag. A corrupt state file is logged and counted as failed, never fatal to the
+        pass; the pass stops at the first transport failure (HA unreachable: one timeout, not
+        one per entity) leaving everything pending for the next pass."""
+        with self.publish_lock:
+            forced = self.force_set() if force is None else bool(force)
+            todo = []
+            for name, path in state_files():
+                st = jc.read_json(path, None)
+                if not isinstance(st, dict) or not st.get("status"):
+                    continue
+                if forced or st.get("published") is not True:
+                    todo.append((name, path, st))
+            ok_n = fail_n = 0
+            for i, (name, path, st) in enumerate(todo):
+                try:
+                    ok, status = self.publish_state(name, path, st)
+                except Exception as exc:  # noqa: BLE001 - one hand-edited file must not starve the rest
+                    log(f"state/{name}.json cannot be published (corrupt?): {exc!r}")
+                    fail_n += 1
+                    continue
+                if status is None:
+                    log(f"Home Assistant unreachable; publish pass stopped with {len(todo) - i} state file(s) "
+                        "and cost_raw pending")
+                    return ok_n, fail_n + (len(todo) - i) + 1
+                if ok:
+                    ok_n += 1
+                else:
+                    fail_n += 1
+            try:
+                ok, _status = self.publish_cost()
+            except Exception as exc:  # noqa: BLE001
+                log(f"cost_raw cannot be published (corrupt _cost.json?): {exc!r}")
+                ok = False
+            if ok:
+                ok_n += 1
+            else:
+                fail_n += 1
+            if forced and fail_n == 0:
+                self.set_force(False)
+            return ok_n, fail_n
+
+    def publish_state(self, name: str, path: str, st: dict):
+        """POST one job entity -> `(ok, http_status|None)`; flips `published` on 2xx. Raises on
+        a state dict too broken to build a payload from."""
+        eid, sval, attrs = jc.entity_payload(st)
+        ok, status = jc.ha_post_state(eid, sval, attrs, timeout=5)
+        if ok and st.get("published") is not True:
+            self.flip_published(name, path, st)
+        elif not ok and status is not None:
+            log(f"publish {eid} failed (HTTP {status})")
+        return ok, status
+
+    def flip_published(self, name: str, path: str, published_st: dict) -> None:
+        """Set published:true under LOCK_NB. Skip if the lock is busy (a live runner will
+        write a fresher file) or the file changed since we read it (its writer owns the flag)."""
+        fd = jc.flock_nb(jc.lock_path(name))
+        if fd is None:
+            return
+        try:
+            cur = jc.read_json(path, None)
+            if not isinstance(cur, dict):
+                return
+            same = (cur.get("updated_at") == published_st.get("updated_at")
+                    and cur.get("status") == published_st.get("status")
+                    and (cur.get("result") or {}).get("run_id") == (published_st.get("result") or {}).get("run_id"))
+            if same and cur.get("published") is not True:
+                cur["published"] = True
+                with STATE_WRITE_LOCK:
+                    jc.atomic_write_json(path, cur, mode=0o644, indent=1)
+        finally:
+            jc.unlock(fd)
+
+    def publish_cost(self):
+        eid, sval, attrs = jc.cost_entity_payload()
+        ok, status = jc.ha_post_state(eid, sval, attrs, timeout=5)
+        if not ok:
+            log(f"publish {eid} failed ({'Home Assistant unreachable' if status is None else f'HTTP {status}'})")
+        return ok, status
+
+    def canary(self, background: bool = False) -> None:
+        """Duty 3 / republish trigger 3: a 404 for cost_raw means Core restarted and lost
+        every states-API entity -> force a full republish now (in a thread when called from
+        a request handler, so GET /jobs stays fast)."""
+        if not self.canary_due():
+            return
+        status, _ = jc.ha_request("GET", f"/core/api/states/{jc.COST_ENTITY}", timeout=5)
+        if status != 404:
+            return
+        log("canary: sensor.claude_jobs_cost_raw is gone (Core restarted?) -> full republish")
+        self.set_force(True)
+        if background:
+            threading.Thread(target=self.publish_pass, kwargs={"force": True}, daemon=True,
+                             name="canary-republish").start()
+        else:
+            self.publish_pass(force=True)
+
+    def publish_endpoint_error(self) -> None:
+        eid, sval, attrs = jc.endpoint_error_payload(
+            "cli_preflight_failed", missing=self.preflight.get("missing") or [],
+            claude_version=self.preflight.get("claude_version"))
+        ok, status = jc.ha_post_state(eid, sval, attrs, timeout=5)
+        if not ok:
+            log(f"publish {eid} failed (HTTP {status})")
+
+    # -- GET /jobs summary (2k rules + A23) --
+    def summary(self) -> dict:
+        now = jc.now_utc()
+        try:
+            files, _ignored = jobdef.list_job_files()
+        except Exception as exc:  # noqa: BLE001 - missing jobs dir etc.
+            log(f"cannot list jobs: {exc!r}")
+            files = []
+        jobs = []
+        for name, path in files:
+            try:
+                job, errors = load_job(name)
+                if job is not None and getattr(job, "kind", "job") == "action":
+                    continue                         # action jobs are not triggerable/countable (a structurally
+                                                     # broken action file cannot say its kind and IS counted)
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    mtime = None
+                jobs.append(jc.job_summary(name, job, jc.read_state(name), now, load_errors=errors, mtime=mtime))
+            except Exception as exc:  # noqa: BLE001 - a corrupt state file is a finding, not a 500
+                log(f"GET /jobs: {name} reported as invalid_state: {exc!r}")
+                jobs.append(self.invalid_state_entry(name, exc))
+        try:
+            self.seed_cost_file(lazy=True)
+        except Exception as exc:  # noqa: BLE001
+            log(f"cost file seeding failed: {exc!r}")
+        stale = [j["slug"] for j in jobs if j["stale"] and j["enabled"]]
+        failed = [j["slug"] for j in jobs if j["status"] in FAILED_STATUSES]
+        disabled = [j["slug"] for j in jobs if not j["enabled"]]
+        worst = max((j["status"] for j in jobs), default="never_run",
+                    key=lambda s: WORST_RANK.index(s) if s in WORST_RANK else WORST_RANK.index("error"))
+        cost = jc.cost_current(now)
+        pf = self.preflight
+        return {
+            "attention": len(stale) + len(failed),
+            "worst_status": worst,
+            "stale_jobs": stale,
+            "failed_jobs": failed,
+            "disabled_jobs": disabled,
+            "running": sum(1 for j in jobs if j["status"] == "running"),
+            "job_count": len(jobs),
+            "cost_month_usd": round(float(cost.get("total_usd") or 0.0), 2) if cost.get("current") else 0.0,
+            "cost_month_start": cost.get("month_start_iso"),
+            "claude_version": pf.get("claude_version"),
+            "built_claude_version": self.built_claude_version,
+            "cli_drift": bool(pf.get("cli_drift")),
+            "cli_preflight": bool(pf.get("ok")),
+            "cli_missing": list(pf.get("missing") or []),
+            "preflight": {"ok": bool(pf.get("ok")), "missing": list(pf.get("missing") or [])},
+            "addon_version": self.addon_version,
+            "endpoint_version": self.addon_version,
+            "generated_at": jc.iso(now),
+            "jobs": jobs,
+        }
+
+    @staticmethod
+    def invalid_state_entry(name: str, exc: Exception) -> dict:
+        """The jobs[] row for a job whose state file cannot be summarized (same keys as jc.job_summary)."""
+        try:
+            flag = jc.is_flag_disabled(name)
+        except Exception:  # noqa: BLE001
+            flag = False
+        return {"name": name, "slug": jc.slug(name), "kind": "job", "description": "", "status": "invalid_state",
+                "headline": f"state file unreadable: {type(exc).__name__}", "last_run": None, "enabled": not flag,
+                "enabled_frontmatter": True, "flag_disabled": flag, "stale": False, "stale_after": None,
+                "model": None, "valid": False, "errors": 1, "run_count": 0, "cost_usd_last": None}
+
+
+# ---- HTTP -----------------------------------------------------------------------------------
+class TooLarge(Exception):
+    pass
+
+
+class BadJSON(Exception):
+    pass
+
+
+class LengthRequired(Exception):
+    pass
+
+
+class BodyTimeout(Exception):
+    pass
+
+
+ROUTES = (
+    # method, path regex, handler name, needs auth
+    ("GET", re.compile(r"^/health$"), "health", False),
+    ("GET", re.compile(r"^/jobs$"), "jobs_summary", True),
+    ("GET", re.compile(r"^/jobs/([^/]+)/detail$"), "job_detail", True),
+    ("POST", re.compile(r"^/jobs/([^/]+)/run$"), "job_run", True),
+    ("POST", re.compile(r"^/jobs/([^/]+)/enable$"), "job_enable", True),
+    ("POST", re.compile(r"^/jobs/([^/]+)/disable$"), "job_disable", True),
+    ("POST", re.compile(r"^/republish$"), "republish", True),
+    ("POST", re.compile(r"^/action$"), "action_reserved", True),
+)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = COMPONENT
+    sys_version = ""
+    timeout = 30                                     # idle/slow clients cannot pin a handler thread forever
+    error_content_type = "application/json; charset=utf-8"
+    error_message_format = '{"error":"bad_request","code":%(code)d}'
+
+    @property
+    def ep(self) -> Endpoint:
+        return self.server.ep
+
+    def version_string(self):
+        return COMPONENT
+
+    # -- logging: only non-2xx, never headers, bodies, query strings, or the token --
+    def log_request(self, code="-", size="-"):
+        if not str(code).startswith("2"):      # self.path/command are unset when the request line was garbage
+            path = (getattr(self, "path", None) or "-").split("?", 1)[0]
+            log(f"{code} {getattr(self, 'command', None) or '-'} {path}")
+
+    def log_message(self, fmt, *args):
+        log(fmt % args)
+
+    # -- router --
+    def do_GET(self):
+        self.route()
+
+    def do_POST(self):
+        self.route()
+
+    def do_PUT(self):
+        self.send_json(405, {"error": "method_not_allowed"})
+
+    do_DELETE = do_PATCH = do_OPTIONS = do_PUT
+
+    def do_HEAD(self):
+        self.send_bytes(405, b"", "application/json; charset=utf-8")     # no body on HEAD
+
+    def route(self):
+        path = self.path.split("?", 1)[0].split("#", 1)[0]
+        other_method = False
+        for method, rx, handler, needs_auth in ROUTES:
+            m = rx.match(path)
+            if not m:
+                continue
+            if method != self.command:
+                other_method = True
+                continue
+            if needs_auth:
+                verdict = self.authorized()
+                if verdict is not True:
+                    return self.send_json(*verdict)
+            try:
+                return getattr(self, handler)(*m.groups())
+            except TooLarge:
+                return self.send_json(413, {"error": "too_large"})
+            except LengthRequired:
+                return self.send_json(411, {"error": "length_required"})
+            except BadJSON:
+                return self.send_json(400, {"error": "bad_json"})
+            except BodyTimeout:
+                try:
+                    return self.send_json(408, {"error": "request_timeout"})
+                except OSError:
+                    return None
+            except Exception as exc:  # noqa: BLE001 - one bad request must not kill the server
+                log(f"internal error on {self.command} {path}: {exc!r}")
+                return self.send_json(500, {"error": "internal"})
+        if other_method:
+            return self.send_json(405, {"error": "method_not_allowed"})
+        return self.send_json(404, {"error": "not_found"})
+
+    # -- helpers --
+    def authorized(self):
+        """True, or the (status, body) to answer with. Token read per request (rotation live)."""
+        token = jc.read_token()
+        if not token:
+            return (503, {"error": "no_token"})
+        scheme, _, presented = (self.headers.get("Authorization") or "").strip().partition(" ")
+        if scheme.lower() == "bearer" and hmac.compare_digest(presented.strip().encode(), token.encode()):
+            return True
+        return (401, {"error": "unauthorized"})
+
+    def send_json(self, status: int, obj) -> None:
+        body = json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        self.send_bytes(status, body, "application/json; charset=utf-8")
+
+    def send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.close_connection = True
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body) if status != 204 else 0))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if status != 204 and body:
+            self.wfile.write(body)
+
+    def check_length(self) -> int:
+        """Declared Content-Length. POST bodies must be Content-Length framed: `Transfer-Encoding`
+        present or Content-Length absent on a POST -> 411 (never guess "no body" and drop input);
+        non-digit value -> 400; over the cap -> 413 before anything is read."""
+        if self.headers.get("Transfer-Encoding"):
+            raise LengthRequired()
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            if self.command == "POST":
+                raise LengthRequired()
+            return 0
+        raw = raw.strip()
+        if not re.fullmatch(r"[0-9]{1,12}", raw):
+            raise BadJSON()
+        n = int(raw)
+        if n > jc.JOB_ENDPOINT_BODY_CAP:
+            raise TooLarge()
+        return n
+
+    def read_json_body(self) -> dict:
+        n = self.check_length()
+        try:
+            raw = self.rfile.read(n) if n else b""
+        except OSError:                          # TimeoutError / ConnectionError: slow or vanished client
+            raise BodyTimeout()
+        if len(raw) < n:
+            raise BodyTimeout()
+        if not raw.strip():
+            return {}
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise BadJSON()
+        if not isinstance(obj, dict):
+            raise BadJSON()
+        return obj
+
+    def resolve_job(self, tok: str):
+        """Path token -> job name whose file exists, else None (regex first: traversal guard)."""
+        if len(tok) > jobdef.NAME_MAX or not jobdef.SLUG_TOKEN_RE.fullmatch(tok):
+            return None
+        name = jobdef.name_from_token(tok)
+        return name if os.path.isfile(jobdef.job_path(name)) else None
+
+    # -- routes --
+    def health(self):
+        ep = self.ep
+        jobs_dir = os.path.isdir(jc.JOBS_DIR)
+        token_set = jc.read_token() is not None
+        stopping = ep.stopping()
+        ok = ep.preflight_ok() and jobs_dir and token_set and not stopping
+        self.send_json(200, {
+            "status": "ok" if ok else "degraded",
+            "jobs_dir": jobs_dir,
+            "token_set": token_set,
+            "uptime_s": int(time.monotonic() - ep.started_mono),
+            "version": ep.addon_version,
+            "claude_version": ep.preflight.get("claude_version"),
+            "cli_preflight": ep.preflight_ok(),
+            "stopping": stopping,
+        })
+
+    def jobs_summary(self):
+        try:
+            self.ep.canary(background=True)          # duty 3, lazily, same guard as the tick
+        except Exception as exc:  # noqa: BLE001
+            log(f"canary failed: {exc!r}")
+        self.send_json(200, self.ep.summary())
+
+    def job_detail(self, tok):
+        name = self.resolve_job(tok)
+        if name is None:
+            return self.send_json(404, {"error": "unknown_job"})
+        result = (jc.read_state(name) or {}).get("result")
+        if not isinstance(result, dict) or result.get("detail") is None:
+            return self.send_bytes(204, b"", "text/markdown; charset=utf-8")
+        self.send_bytes(200, str(result.get("detail")).encode("utf-8"), "text/markdown; charset=utf-8")
+
+    def job_run(self, tok):
+        """2k order: (401 done) -> 404 -> 413/400 -> stopping -> disabled -> preflight ->
+        kind action -> invalid_input -> rate limit -> spawn."""
+        ep = self.ep
+        name = self.resolve_job(tok)
+        if name is None:
+            return self.send_json(404, {"error": "unknown_job"})
+        body = self.read_json_body()
+        input_data = body.get("input")
+        if ep.stopping():
+            return self.send_json(503, {"error": "stopping"})
+        job, def_errors = load_job(name)
+        gate = "flag" if jc.is_flag_disabled(name) else (
+            "frontmatter" if job is not None and not job.enabled else None)
+        if gate:
+            return self.send_json(200, {"accepted": False, "job": name, "reason": "disabled", "gate": gate})
+        if not ep.preflight_ok():
+            return self.send_json(503, {"error": "cli_preflight_failed",
+                                        "missing": list(ep.preflight.get("missing") or [])})
+        if job is not None and job.kind == "action":
+            return self.send_json(422, {"error": "not_triggerable", "reason": "kind_action"})
+        if input_data is not None and not isinstance(input_data, dict):
+            return self.send_json(422, {"error": "invalid_input", "errors": ["input: must be a JSON object"]})
+        if job is not None and not def_errors:       # an invalid definition is the runner's to report (one authority)
+            errors = jobdef.validate_input(job, input_data)
+            if errors:
+                return self.send_json(422, {"error": "invalid_input", "errors": list(errors)})
+        min_interval = float(job.min_interval) if job is not None else 60.0
+        retry_after = ep.rate_check_and_reserve(name, min_interval)
+        if retry_after is not None:
+            return self.send_json(200, {"accepted": False, "job": name, "reason": "rate_limited",
+                                        "retry_after_s": retry_after})
+        try:
+            run_id = ep.spawn_run(name, input_data or None)
+        except OSError as exc:
+            ep.rate_release(name)
+            log(f"cannot start {jc.RUNNER_BIN} for {name}: {exc}")
+            return self.send_json(500, {"error": "spawn_failed"})
+        self.send_json(202, {"accepted": True, "job": name, "run_id": run_id})
+
+    def job_enable(self, tok):
+        self.set_enabled(tok, True)
+
+    def job_disable(self, tok):
+        self.set_enabled(tok, False)
+
+    def set_enabled(self, tok, enabled: bool):
+        name = self.resolve_job(tok)
+        if name is None:
+            return self.send_json(404, {"error": "unknown_job"})
+        self.check_length()
+        job, _errors = load_job(name)
+        fm_enabled = bool(job.enabled) if job is not None else True
+        with STATE_WRITE_LOCK:                   # jc.set_enabled rewrites the state file
+            res = jc.set_enabled(name, enabled, frontmatter_enabled=fm_enabled)
+        out = {"job": name, "enabled": bool(res.get("enabled"))}
+        if enabled and not fm_enabled:
+            out["reason"] = "frontmatter"
+        self.send_json(200, out)
+
+    def republish(self):
+        self.check_length()
+        self.ep.set_force(True)                  # stays armed until a pass fully succeeds (duty 2 clears it)
+        ok_n, fail_n = self.ep.publish_pass(force=True)
+        self.send_json(200, {"republished": ok_n, "failed": fail_n})
+
+    def action_reserved(self):
+        self.send_json(404, {"error": "reserved_v1_1"})
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, addr, ep: Endpoint):
+        self.ep = ep
+        super().__init__(addr, Handler)
+
+    def handle_error(self, request, client_address):
+        """One line instead of socketserver's traceback dump (client hung up mid-response etc.)."""
+        log(f"connection from {client_address[0]} failed: {sys.exc_info()[1]!r}")
+
+
+# ---- the tick ---------------------------------------------------------------------------------
+class Tick(threading.Thread):
+    """The single background loop (§4.9). `run_once()` is one full pass of duties 1-5."""
+
+    def __init__(self, ep: Endpoint):
+        super().__init__(name="tick", daemon=True)
+        self.ep = ep
+        self.stop_event = threading.Event()
+
+    def run(self):
+        t0 = time.monotonic()
+        self.run_once()
+        extras = [t0 + s for s in FORCE_RETRY_OFFSETS_S if s < jc.TICK_INTERVAL_S]
+        next_regular = t0 + jc.TICK_INTERVAL_S
+        while True:
+            target = min([next_regular] + extras[:1])
+            if self.stop_event.wait(max(0.0, target - time.monotonic())):
+                return
+            if extras and time.monotonic() >= extras[0]:
+                extras.pop(0)
+                if self.ep.force_set():              # Core still lagging at boot: retry early
+                    self.safely("duty2", self.duty2_publish_pending)
+                continue
+            next_regular = time.monotonic() + jc.TICK_INTERVAL_S
+            self.run_once()
+
+    def run_once(self):
+        self.safely("duty1 demote_stuck", self.duty1_demote_stuck)
+        self.safely("duty2 publish_pending", self.duty2_publish_pending)
+        self.safely("duty3 canary", self.duty3_canary)
+        self.safely("duty4 daily_prune", self.duty4_daily_prune)
+        self.safely("duty5 tmp_cleanup", self.duty5_tmp_cleanup)
+        self.safely("reap", self.ep.reap_children)
+
+    @staticmethod
+    def safely(label, fn):
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            log(f"tick {label} failed: {exc!r}")
+
+    # -- duty 1 (A.3 + A30) --
+    def duty1_demote_stuck(self):
+        now = time.time()
+        for name, path in state_files():
+            try:
+                self.check_running(name, path, now)
+            except Exception as exc:  # noqa: BLE001 - one corrupt file must not shield the others
+                log(f"tick duty1: state/{name}.json skipped: {exc!r}")
+
+    def check_running(self, name: str, path: str, now: float) -> None:
+        """Liveness is the job lock: the runner holds `state/<name>.lock` from step 4 until it
+        exits (children do not inherit it), so a `running` file whose lock is free belongs to a
+        dead runner. Busy lock past deadline+180 s -> watchdog SIGKILL of the run's own process
+        groups (pgid file with the same run_id), which frees the lock for the next pass."""
+        st = jc.read_json(path, None)
+        if not isinstance(st, dict) or st.get("status") != "running":
+            return
+        run = st.get("run") if isinstance(st.get("run"), dict) else {}
+        deadline = self.deadline_of(run, path)
+        if now <= deadline + jc.STUCK_MARGIN_S:
+            return
+        overdue = int(now - deadline)
+        fd = jc.flock_nb(jc.lock_path(name))
+        if fd is None:
+            self.overdue_but_alive(name, run, overdue, kill=now > deadline + jc.WATCHDOG_KILL_S)
+            return
+        try:
+            cur = jc.read_json(path, None)           # re-read under the lock: a fresh run may own the file now
+            cur_run = cur.get("run") if isinstance(cur, dict) and isinstance(cur.get("run"), dict) else {}
+            if not isinstance(cur, dict) or cur.get("status") != "running" or cur_run.get("run_id") != run.get("run_id"):
+                return
+            self.demote(name, path, cur, cur_run, now)
+        finally:
+            jc.unlock(fd)
+
+    @staticmethod
+    def deadline_of(run: dict, path: str) -> float:
+        dl = epoch(run.get("deadline"))
+        if dl is not None:
+            return dl
+        started = epoch(run.get("started_at"))
+        if started is not None:
+            return started + float(run.get("timeout_s") or jc.JOB_DEFAULT_TIMEOUT) + jc.JOB_KILL_GRACE_S
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    @staticmethod
+    def groups_of(name: str, run: dict) -> list:
+        """Live process groups named by THIS run's pgid file (`pgid`, `child_pgid`); a pgid file
+        carrying another run_id is not ours to act on."""
+        info = jc.read_json(os.path.join(jc.PGID_DIR, f"{name}.pgid"), None)
+        if not isinstance(info, dict) or info.get("run_id") != run.get("run_id"):
+            return []
+        named = dict.fromkeys(info.get(k) for k in ("pgid", "child_pgid"))     # ordered, de-duplicated
+        return [g for g in named if valid_pgid(g) and group_alive(g)]
+
+    def overdue_but_alive(self, name: str, run: dict, overdue: int, kill: bool) -> None:
+        groups = self.groups_of(name, run) if kill else []
+        if not groups:
+            log(f"{name}: run {run.get('run_id')} is {overdue}s past its deadline but its runner still holds "
+                f"the job lock; watchdog kills its process group at deadline+{int(jc.WATCHDOG_KILL_S)}s"
+                + (" (no pgid file names it, nothing to kill)" if kill else ""))
+            return
+        denied = []
+        for g in groups:
+            try:
+                os.killpg(g, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                denied.append(g)
+        if not self.ep.first_watchdog_report(run.get("run_id")):
+            return
+        log(f"{name}: watchdog SIGKILL to process group(s) {groups} of run {run.get('run_id')} "
+            f"({overdue}s past deadline){'; EPERM for ' + str(denied) if denied else ''}; "
+            "demotion follows once the job lock frees")
+        jc.append_jsonl(jc.log_path(name), {"ts": jc.now_iso(), "event": "watchdog_kill", "job": name,
+                                            "run_id": run.get("run_id"), "pgid": groups[0], "by": "tick"})
+
+    def demote(self, name, path, st, run, now):
+        """Caller holds the job lock. Rewrite to error/lost, log, publish, drop the stale pgid file."""
+        ended = jc.now_iso()
+        started = epoch(run.get("started_at"))
+        prev_result = st.get("result") if isinstance(st.get("result"), dict) else None
+        st["prev_status"] = prev_result.get("status") if prev_result else None
+        st["result"] = {
+            "run_id": run.get("run_id"), "session_id": None, "status": "error",
+            "headline": "runner died without reporting", "detail": LOST_DETAIL,
+            "reason": "lost", "judgment_row": 0, "envelope_subtype": None, "is_error": None,
+            "exit_code": None, "hard_killed": False,
+            "started_at": run.get("started_at"), "ended_at": ended,
+            "duration_s": round(now - started, 1) if started is not None else None,
+            "cost_usd": 0.0, "over_budget": False, "model": run.get("model"),
+            "trigger": run.get("trigger"), "attempts": run.get("attempt") or 1, "retried_auth": False,
+            "claude_version": self.ep.preflight.get("claude_version"), "num_turns": None,
+            "permission_denials": [], "validation_errors": [], "metrics": {}, "actions_selected": [],
+            "input": None, "raw_tail": None, "result_tail": None,
+        }
+        st["status"] = "error"
+        st["run"] = None
+        st["published"] = False
+        st["updated_at"] = ended
+        stats = st.get("stats") if isinstance(st.get("stats"), dict) else {}
+        stats["run_count"] = int(stats.get("run_count") or 0) + 1
+        st["stats"] = stats
+        with STATE_WRITE_LOCK:
+            jc.atomic_write_json(path, st, mode=0o644, indent=1)
+        jc.append_jsonl(jc.log_path(name), {"ts": ended, "event": "demoted_lost", "job": name,
+                                            "run_id": run.get("run_id"), "by": "tick"})
+        log(f"{name}: run {run.get('run_id')} demoted to error/lost (job lock free past deadline: runner is gone)")
+        eid, sval, attrs = jc.entity_payload(st)
+        ok, status = jc.ha_post_state(eid, sval, attrs, timeout=5)
+        if ok:                                       # we hold the lock, so flip the flag ourselves
+            st["published"] = True
+            with STATE_WRITE_LOCK:
+                jc.atomic_write_json(path, st, mode=0o644, indent=1)
+        else:
+            log(f"publish {eid} failed ({'Home Assistant unreachable' if status is None else f'HTTP {status}'})")
+        pgid_file = os.path.join(jc.PGID_DIR, f"{name}.pgid")
+        info = jc.read_json(pgid_file, None)
+        if isinstance(info, dict) and info.get("run_id") == run.get("run_id"):
+            try:
+                os.unlink(pgid_file)
+            except OSError:
+                pass
+
+    # -- duties 2-5 --
+    def duty2_publish_pending(self):
+        self.ep.publish_pass()
+
+    def duty3_canary(self):
+        self.ep.canary()
+
+    def duty4_daily_prune(self):
+        if not self.ep.prune_due():
+            return
+        try:
+            logs = [os.path.join(jc.LOGS_DIR, f) for f in os.listdir(jc.LOGS_DIR) if f.endswith(".jsonl")]
+        except OSError:
+            logs = []
+        for p in logs:
+            try:
+                if jc.prune_jsonl(p, max_bytes=jc.JOB_LOG_BACKSTOP_BYTES):
+                    log(f"pruned {p} to the last {jc.JOB_LOG_KEEP_LINES} lines")
+            except OSError as exc:
+                log(f"prune {p} failed: {exc}")
+        res = jc.prune_transcripts()
+        if res.get("deleted"):
+            log(f"pruned {res['deleted']} transcript file(s); {res['remaining_bytes']} bytes remain")
+
+    def duty5_tmp_cleanup(self):
+        cutoff = time.time() - jc.TMP_MAX_AGE_S
+        victims = []
+        for root, _dirs, files in os.walk(jc.STATE_DIR):
+            victims += [os.path.join(root, f) for f in files if ".tmp." in f]
+        try:
+            victims += [os.path.join(jc.LOGS_DIR, f) for f in os.listdir(jc.LOGS_DIR) if ".tmp." in f]
+        except OSError:
+            pass
+        try:
+            victims += [os.path.join(jc.INBOX_DIR, f) for f in os.listdir(jc.INBOX_DIR) if f.endswith(".json")]
+        except OSError:
+            pass
+        for p in victims:
+            try:
+                if os.path.getmtime(p) < cutoff and os.path.isfile(p):
+                    os.unlink(p)
+            except OSError:
+                pass
+
+
+# ---- main ---------------------------------------------------------------------------------------
+def run_preflight() -> dict:
+    try:
+        return jc.cli_preflight()
+    except Exception as exc:  # noqa: BLE001
+        log(f"cli preflight crashed: {exc!r}")
+        return {"ok": False, "missing": list(jc.CLI_PREFLIGHT_FLAGS), "json_schema_fallback": False,
+                "claude_version": None, "built_version": jc.built_cli_version(), "cli_drift": False,
+                "error": repr(exc)}
+
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(prog=COMPONENT, description="Claude Jobs trigger endpoint + tick")
+    ap.add_argument("--bind", default=jc.JOB_ENDPOINT_BIND, help="listen address (default %(default)s)")
+    ap.add_argument("--port", type=int, default=jc.JOB_ENDPOINT_PORT, help="listen port (default %(default)s)")
+    ap.add_argument("--no-tick", action="store_true", help="serve HTTP only; do not start the tick thread")
+    ap.add_argument("--tick-once", action="store_true", help="run one tick pass synchronously and exit 0")
+    return ap.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    preflight = run_preflight()
+    ep = Endpoint(preflight)
+    if not ep.preflight_ok():
+        log(f"cli preflight FAILED (missing: {', '.join(preflight.get('missing') or []) or '?'}); "
+            "POST /jobs/*/run answers 503 until the CLI is fixed")
+        ep.publish_endpoint_error()
+    elif preflight.get("json_schema_fallback"):
+        log("cli preflight: --json-schema is not listed by claude --help; runs will refuse (A16)")
+    try:
+        ep.seed_cost_file()
+    except Exception as exc:  # noqa: BLE001
+        log(f"cost file seeding failed: {exc!r}")
+    if args.tick_once:
+        Tick(ep).run_once()
+        return 0
+    try:
+        server = Server((args.bind, args.port), ep)
+    except OSError as exc:
+        log(f"cannot bind {args.bind}:{args.port}: {exc}")
+        return 1
+
+    def on_signal(signum, _frame):
+        log(f"signal {signum}; shutting down (runner processes are left alone)")
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+    tick = None
+    if not args.no_tick:
+        tick = Tick(ep)
+        tick.start()
+    log(f"listening on {args.bind}:{server.server_address[1]} (addon {ep.addon_version}, "
+        f"claude {preflight.get('claude_version') or 'unknown'}, tick {'off' if args.no_tick else 'on'})")
+    try:
+        server.serve_forever(poll_interval=0.25)
+    finally:
+        if tick is not None:
+            tick.stop_event.set()
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

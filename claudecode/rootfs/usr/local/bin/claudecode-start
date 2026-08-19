@@ -26,6 +26,11 @@ STOP_GRACE_SECS=10
 JOBS_DIR=$PERSIST_DIR/jobs
 JOB_DATA_DIR=/data/claude-jobs
 RUN_DIR=/run/claudecode
+# In-flight job runs get this long after SIGTERM before SIGKILL; part of the
+# on_stop budget below (Appendix A.1: <= 27 s against config.yaml timeout: 30).
+JOB_STOP_GRACE_SECS=5
+JOB_ENDPOINT_PORT=7682
+JOB_ENDPOINT_BIN=${JOB_ENDPOINT_BIN:-/usr/local/bin/claude-job-endpoint}
 
 cd_work() { cd /homeassistant 2>/dev/null || cd /; }
 
@@ -47,7 +52,9 @@ start_ttyd() {
     ${SHELL_CMD:-bash --login} ) &
   TTYD_PID=$!
   wait "$TTYD_PID"
-  exit $?
+  local rc=$?
+  shutdown_jobs   # ttyd died on its own: don't orphan the endpoint or in-flight runs
+  exit $rc
 }
 on_abort() {
   echo "[ERROR] Startup aborted (exit $1); starting a bare terminal so you can debug from inside the add-on"
@@ -107,9 +114,69 @@ stop_ttyd() {
   wait "$TTYD_PID" 2>/dev/null
   TTYD_PID=""
 }
+# Claude Jobs stop path (Appendix A.1). Every run is tracked by exactly one file,
+# $RUN_DIR/jobs/<name>.pgid = {"pgid": <runner group>, "child_pgid": <timeout+
+# claude group>, ...}; the endpoint keeps no child table and nothing here walks
+# process trees. All three functions are no-ops when nothing is running.
+job_groups() {  # $1 = jq filter over each pgid file (default: runner AND claude groups)
+  local f
+  for f in "$RUN_DIR"/jobs/*.pgid; do
+    [ -e "$f" ] || continue
+    jq -r "${1:-(.pgid // empty), (.child_pgid // empty)}" "$f" 2>/dev/null
+  done
+}
+stop_job_spawners() {  # <= 2 s: nothing new can spawn after this
+  touch "$RUN_DIR/stopping" 2>/dev/null
+  local ep i
+  ep=$(cat "$RUN_DIR/endpoint.pid" 2>/dev/null)
+  [ -n "$JOB_LOOP_PID" ] && kill -TERM "$JOB_LOOP_PID" 2>/dev/null
+  [ -n "$ep" ] || return 0
+  kill -TERM "$ep" 2>/dev/null
+  for ((i = 0; i < 4; i++)); do
+    kill -0 "$ep" 2>/dev/null || return 0
+    sleep 0.5
+  done
+  kill -KILL "$ep" 2>/dev/null
+  return 0
+}
+signal_job_runs() {  # instant: TERM lands early so runners publish `aborted` while sessions wind down
+  # Only the RUNNER's group gets TERM: the runner relays it to claude and owns
+  # the `aborted` record. Signalling claude's group directly would make the
+  # runner see an external kill instead (integration review #1).
+  local pg n=0
+  for pg in $(job_groups '.pgid // empty'); do
+    case "$pg" in (''|*[!0-9]*) continue ;; esac
+    kill -TERM -- "-$pg" 2>/dev/null && n=$((n + 1))
+  done
+  [ "$n" -gt 0 ] && info "Signalled $n job process group(s) to stop"
+  return 0
+}
+reap_job_runs() {  # <= JOB_STOP_GRACE_SECS, then KILL whatever is left
+  local pg alive i f
+  for ((i = 0; i < JOB_STOP_GRACE_SECS * 2; i++)); do
+    alive=""
+    for pg in $(job_groups); do
+      case "$pg" in (''|*[!0-9]*) continue ;; esac
+      kill -0 -- "-$pg" 2>/dev/null && alive=1
+    done
+    [ -n "$alive" ] || break
+    sleep 0.5
+  done
+  for pg in $(job_groups); do
+    case "$pg" in (''|*[!0-9]*) continue ;; esac
+    kill -KILL -- "-$pg" 2>/dev/null
+  done
+  [ -n "$alive" ] && warn "Job runs did not exit within ${JOB_STOP_GRACE_SECS}s; killed"
+  for f in "$RUN_DIR"/jobs/*.pgid; do [ -e "$f" ] && rm -f "$f"; done
+  return 0
+}
+shutdown_jobs() { stop_job_spawners; signal_job_runs; reap_job_runs; }
 on_stop() {
   trap - EXIT TERM INT HUP
-  stop_sessions
+  stop_job_spawners   # nothing new can spawn
+  signal_job_runs     # TERM lands early ...
+  stop_sessions       # ... so runners drain while the interactive session tears down
+  reap_job_runs
   stop_ttyd
   exit 143
 }
@@ -225,11 +292,12 @@ read_options() {
   AUTO_LAUNCH=$(opt '.auto_launch_claude // "continue"')
   EXTRA_PKGS=$(opt '.extra_npm_packages // [] | join(" ")')
   JOB_DEFAULT_MODEL=$(opt '.job_default_model // "fable"')
+  ENABLE_JOBS=$(opt '.enable_job_endpoint // false')
   # Sane fallbacks if options.json itself was unreadable.
   : "${FONT_SIZE:=14}" "${THEME:=dark}" "${SESSION_PERSIST:=true}" "${ENABLE_MCP:=true}"
   : "${ENABLE_PLAYWRIGHT:=false}" "${AUTO_UPDATE:=false}" "${DEFAULT_MODE:=auto}"
   : "${ENABLE_RC:=false}" "${RC_PREFIX:=HomeAssistant}" "${AUTO_LAUNCH:=continue}"
-  : "${JOB_DEFAULT_MODEL:=fable}"
+  : "${JOB_DEFAULT_MODEL:=fable}" "${ENABLE_JOBS:=false}"
 }
 
 scrub_legacy_token() {
@@ -422,6 +490,67 @@ allow_job_commands() {
   fi
 }
 
+# The endpoint's bearer token: 64 hex chars in /data (not in the HA backup set,
+# not readable through any job path grant). Generated once; `claude-job token
+# rotate` replaces it and the endpoint picks it up on the next request (§4.9).
+ensure_job_token() {
+  [ "$ENABLE_JOBS" = "true" ] || return 0
+  if timeout 30 claude-job token ensure > /dev/null; then
+    info "Job endpoint token present in $JOB_DATA_DIR/token (show it with: claude-job token show)"
+  else
+    warn "Could not create the job endpoint token; HA will not be able to trigger jobs"
+  fi
+}
+
+# The trigger endpoint runs under a never-give-up respawn loop (Appendix A.5):
+# backoff 1 -> 60 s doubling; five fast crashes in a row degrade to 300 s retries
+# and raise sensor.claude_jobs_endpoint = error so the failure is visible in HA
+# even though nothing HA-side is polling yet. The loop ends when on_stop
+# touches $RUN_DIR/stopping.
+publish_endpoint_error() {  # $1 = reason, $2 = fast crash count
+  local body
+  body=$(jq -nc --arg r "$1" --arg n "$2" \
+    --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{state: "error", attributes: {reason: $r, fast_crashes: ($n | tonumber), since: $t, friendly_name: "Claude Jobs endpoint", icon: "mdi:server-off"}}') || return 0
+  curl -fsS --max-time 5 -o /dev/null -X POST \
+    -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H 'Content-Type: application/json' \
+    -d "$body" http://supervisor/core/api/states/sensor.claude_jobs_endpoint 2>/dev/null || true
+}
+start_job_endpoint() {
+  if [ "$ENABLE_JOBS" != "true" ]; then
+    info "Job endpoint disabled (enable_job_endpoint: false); jobs can still be run from the terminal"
+    return 0
+  fi
+  (
+    trap - INT QUIT
+    exec < /dev/null
+    backoff=1 fast=0
+    while [ ! -e "$RUN_DIR/stopping" ]; do
+      started=$SECONDS
+      "$JOB_ENDPOINT_BIN" &
+      ep=$!
+      echo "$ep" > "$RUN_DIR/endpoint.pid"
+      printf '{"status":"running","pid":%s,"fast_crashes":%s}\n' "$ep" "$fast" > "$RUN_DIR/endpoint.status"
+      wait "$ep"
+      rc=$?
+      [ -e "$RUN_DIR/stopping" ] && break
+      if [ $((SECONDS - started)) -lt 10 ]; then fast=$((fast + 1)); else fast=0; backoff=1; fi
+      if [ "$fast" -ge 5 ]; then
+        backoff=300
+        publish_endpoint_error respawn_degraded "$fast"
+      fi
+      echo "[WARN] claude-job-endpoint exited ($rc); respawning in ${backoff}s"
+      printf '{"status":"respawning","rc":%s,"backoff_s":%s,"fast_crashes":%s}\n' "$rc" "$backoff" "$fast" > "$RUN_DIR/endpoint.status"
+      sleep "$backoff" &
+      wait $!
+      [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
+    done
+    exit 0
+  ) &
+  JOB_LOOP_PID=$!
+  info "Job endpoint started on port $JOB_ENDPOINT_PORT (supervised; pid $JOB_LOOP_PID)"
+}
+
 build_shell_cmd() {
   if [ "$THEME" = "dark" ]; then
     COLORS='background=#1e1e2e,foreground=#cdd6f4,cursor=#f5e0dc'
@@ -474,6 +603,7 @@ configure_mcp
 apply_settings
 allow_job_commands
 setup_job_dirs
+ensure_job_token
 # ttyd only spawns SHELL_CMD when a browser connects, so on a headless box
 # nothing runs after a restart until somebody opens the web terminal - and
 # Remote Control, whose whole point is running unattended, stays down. When
@@ -502,6 +632,7 @@ prestart_session() {
 
 build_shell_cmd
 prestart_session
+start_job_endpoint
 
 trap - EXIT
 start_ttyd
