@@ -375,6 +375,7 @@ mechanical report rarely needs fable's judgment — set `model: sonnet` or `mode
 its frontmatter, or change `job_default_model` for everything that does not pin a model.
 The month's running total is kept in `state/_cost.json` (month boundaries in Home
 Assistant's time zone) and published as `sensor.claude_jobs_cost_raw`.
+The statistics-grade entity is the package's `sensor.claude_jobs_monthly_cost`
 (see "Entities" below).
 
 ## Claude Code updates and `cli_drift`
@@ -549,7 +550,7 @@ curl -s -H "Authorization: Bearer $(claude-job token show)" \
 
 ### A schedule, with its off-switch (by hand)
 
-Until the generated package arrives in the next release, wire the trigger yourself. Keep the token in `secrets.yaml`, define the two REST commands, restart Home Assistant once (`rest_command` is only loaded at startup the first time; later edits need just Developer tools → YAML → *RESTful Command* reload):
+With the generated package (see [Setting up the Home Assistant package](#setting-up-the-home-assistant-package-one-line-once)) none of this is needed. If you prefer to keep the endpoint token in `secrets.yaml` and wire the trigger by hand instead of including the package, this is the manual alternative — restart Home Assistant once after adding it (`rest_command` is only loaded at startup the first time; later edits need just Developer tools → YAML → *RESTful Command* reload):
 
 ```yaml
 # secrets.yaml
@@ -656,3 +657,315 @@ sets it to `ok`. `state: error` with attribute `reason`:
 
 Because it is a plain state-machine entity it disappears at the next Home Assistant
 restart once the cause is fixed.
+
+## Setting up the Home Assistant package (one line, once)
+
+With `enable_job_endpoint: true`, every add-on start writes two files into your config
+directory, with this add-on's hostname, port and token already filled in:
+
+- `/homeassistant/claudecode_jobs.yaml` — a Home Assistant *package*: the REST commands,
+  the anchor sensor, the cost sensor and three automations described below. Regenerated on
+  every start; **do not edit it** (changes are overwritten). It contains the endpoint
+  token — see the git note below.
+- `/homeassistant/blueprints/automation/claudecode/schedule.yaml` — the scheduling
+  blueprint (written once, re-installed whenever it differs from the shipped copy — so
+  edits to that exact file are overwritten; duplicate it under another name to customise).
+  It needs Home Assistant 2025.8 or newer (weekday selection on the time trigger).
+
+Add exactly this to `configuration.yaml` and restart Home Assistant **once**:
+
+```yaml
+homeassistant:
+  packages:
+    claudecode_jobs: !include claudecode_jobs.yaml
+```
+
+(If you already organise packages with `packages: !include_dir_named packages`, do not add
+a second `packages:` key; instead make the file visible inside that directory, e.g.
+`ln -s ../claudecode_jobs.yaml /homeassistant/packages/claudecode_jobs.yaml`.) If you set
+up the interim `rest_command:` block from the previous release, delete it first — the
+package defines the same command names and Home Assistant rejects duplicate keys.
+
+The restart is needed only the first time, because `rest`, `rest_command` and `template`
+are not loaded until something configures them. After that the add-on keeps the file
+current by itself: when a start re-renders it with different content (rotated token,
+changed hostname) it also asks Home Assistant to reload RESTful commands and REST
+sensors. Automations and the template sensor are not reloaded automatically; after an
+add-on *update* that changed those parts, reload Automations/Template entities from
+Developer tools → YAML or restart HA. You can re-render by hand at any time with
+`python3 /usr/local/lib/claude-job/render_package.py` (add `--no-reload` to skip the
+reload calls).
+
+Honest statement: **without the package there is no anchor sensor and therefore no
+alarm.** Jobs still run and per-job entities still appear, but those live only in Home
+Assistant's state machine — they vanish at every HA restart until the add-on re-posts
+them, and nothing would notice a job that silently stopped running.
+
+## Entities
+
+`claude_job_<slug>` entities are per job; `claude_jobs_*` entities are platform-level.
+
+| Entity | Comes from | Purpose |
+|---|---|---|
+| `sensor.claude_job_<slug>` | posted by the add-on after every run; re-posted after HA restarts (on the `homeassistant` start event, and by a 10-minute canary) | the job's last result: state, `headline`, `detail` (900 chars), cost, timing, `enabled`, `notify_status`, `metrics` — dashboards and history. Best-effort across HA restarts (a gap of seconds to ≤ 10 min) |
+| `sensor.claude_jobs_attention` | package REST sensor, polls `GET /jobs` every 60 s; registry-backed (`unique_id`), so it survives restarts | **the alarm anchor.** State = number of stale + failed jobs. `unavailable` = the endpoint is unreachable, which is itself the alarm condition. Attributes: `worst_status`, `stale_jobs`, `failed_jobs`, `disabled_jobs`, `running`, `job_count`, `cost_month_usd`, `cost_month_start`, `cli_drift`, `claude_version`, `preflight`, `endpoint_version` |
+| `sensor.claude_jobs_cost_raw` | posted by the add-on | month-to-date spend (USD, HA's time zone); doubles as the add-on's "did HA restart and lose my entities?" canary. Long-term statistics are **not promised** for it |
+| `sensor.claude_jobs_monthly_cost` | package template sensor mirroring the anchor's `cost_month_usd`; `device_class: monetary`, `state_class: total`, unit `USD`, `last_reset` = start of the month | the statistics-grade cost entity — use this one in the Energy-style statistics graphs and for budget automations |
+| `sensor.claude_jobs_endpoint` | posted by the add-on only when the endpoint itself is broken | see "Triggering jobs from Home Assistant" |
+
+A job is **stale** when it is enabled, declares `stale_after`, and its last *finished* run
+(or, if it never ran, its file's modification time) is older than that — so a new daily
+job you forgot to schedule raises the alarm about a day after you wrote it, and a job that
+is running right now but has not finished within `stale_after` still counts. **Failed**
+means state `error` (or a state file the endpoint cannot read, reported as
+`invalid_state`); `warning` and `critical` are findings, i.e. successful runs, and notify
+on their own. A job file too broken to parse is counted too — a broken file needs
+attention.
+
+**The shipped alarm** (the package automation "Claude Jobs · attention alarm") watches
+only the anchor: attention above 0 for 5 minutes (message lists `stale_jobs` and
+`failed_jobs`), or the anchor `unavailable`/`unknown` for 10 minutes (add-on stopped,
+endpoint dead, stale token or hostname in the file). It re-checks 10½ minutes after every
+Home Assistant start, because sidebar notifications do not survive a restart. Actions: a
+persistent notification `claude_jobs_alarm`, then `notify.notify` (skipped harmlessly if
+you have no notify platform — the trace shows an error for that last step only). A
+companion automation dismisses the notification once attention has been back at 0 for 2
+minutes, and a third one asks the add-on to re-post the per-job entities whenever Home
+Assistant starts. All three are ordinary automations you can disable in the UI.
+
+## Scheduling a job (the blueprint)
+
+Settings → Automations & scenes → Blueprints → **"Claude Job · run on a schedule"** →
+fill in the job name (`health-check`), a time, optionally the weekdays and an input
+object → Save. The result is a normal automation whose own on/off toggle is the job's
+schedule switch; the flag file (`claude-job disable`, or the disable button below) remains
+the hard switch that every trigger path honors. One automation per job and time; for
+several times a day create several, a few minutes apart from other jobs.
+
+The blueprint appears in the list on a page refresh as soon as the file exists — no
+restart. If an add-on update rewrites it, the add-on log says so; run Developer tools →
+YAML → *Automations* reload to pick up the new version. The package also contains a
+commented-out example schedule for those who prefer YAML; it is commented out because a
+live daily run on the default model is a spending decision only you should make.
+
+## Run now, and a dashboard
+
+There are no button entities; "run now" is a stock dashboard button calling the package's
+`rest_command.claude_job_run`. From Developer tools → Actions the same thing is:
+
+```yaml
+action: rest_command.claude_job_run
+data:
+  job: health-check
+  # input: {date: "2026-08-17"}
+```
+
+An example view built from stock cards — a Markdown card listing every
+`sensor.claude_job_*` with a footer comparing the count against the anchor's `job_count`
+(so a re-post gap is visible rather than silent), an entities card for the anchor and the
+monthly cost, and per-job run/disable buttons:
+
+## Example dashboard (stock cards only)
+
+Three stock cards make a complete Claude Jobs view; nothing here needs a custom card or HACS. Paste
+each block into a dashboard via *Edit dashboard → Add card → Manual* (or into a YAML-mode view's
+`cards:` list).
+
+**1 · All jobs at a glance — a Markdown card.** It enumerates every `sensor.claude_job_*` entity the
+add-on has published, and its footer compares that count with the anchor's `job_count` so a
+republish gap after a Home Assistant restart is visible instead of silent (the entities come back
+within a minute of the add-on noticing; `rest_command.claude_job_republish` forces it).
+
+```yaml
+type: markdown
+title: Claude Jobs
+content: |
+  {%- set icon = {'ok': 'mdi:check-circle', 'info': 'mdi:information', 'warning': 'mdi:alert',
+                  'critical': 'mdi:alert-octagon', 'error': 'mdi:close-circle', 'skipped': 'mdi:debug-step-over',
+                  'aborted': 'mdi:stop-circle', 'running': 'mdi:progress-clock'} -%}
+  {%- set jobs = states.sensor | selectattr('entity_id', 'match', 'sensor.claude_job_')
+                 | sort(attribute='entity_id') | list -%}
+  | | Job | Headline | Last run | Cost |
+  |---|---|---|---|---:|
+  {% for s in jobs -%}
+  {% set a = s.attributes -%}
+  {% set last = (as_timestamp(a.last_run, default=0) | timestamp_custom('%a %d %b %H:%M', true, default='—')) if a.last_run else '—' -%}
+  | <ha-icon icon="{{ icon.get(s.state, 'mdi:help-circle') }}"></ha-icon> {{ s.state }} | {{ a.job | default(s.name, true) }}{{ ' *(disabled)*' if a.enabled is defined and not a.enabled else '' }} | {{ a.headline | default('—', true) }} | {{ last }} | {{ '$%.2f' % (a.cost_usd | float(0)) }} |
+  {% endfor %}
+
+  {% set expected = state_attr('sensor.claude_jobs_attention', 'job_count') | int(-1) -%}
+  {{ jobs | count }} of {{ expected if expected >= 0 else '?' }} jobs shown
+  {%- if expected >= 0 and jobs | count != expected %} — **some per-job entities are missing** (Home Assistant restarted and the add-on has not republished yet; it will within a minute, or run `rest_command.claude_job_republish`){% endif %}.
+  {% set month = states('sensor.claude_jobs_monthly_cost') -%}
+  This month: {{ '$' ~ month if month | is_number else '—' }}.
+```
+
+(Each table row must stay on one line — Markdown tables break on line wraps, which is why the card
+uses a literal `|` block and Jinja `-%}` whitespace control.)
+
+**2 · The platform sensors — an Entities card.** `sensor.claude_jobs_attention` is the alarm anchor
+(its state is the number of jobs needing attention; `unavailable` means the endpoint is down) and
+`sensor.claude_jobs_monthly_cost` is the statistics-grade spend sensor.
+
+```yaml
+type: entities
+title: Claude Jobs · platform
+entities:
+  - entity: sensor.claude_jobs_attention
+    name: Jobs needing attention
+  - type: attribute
+    entity: sensor.claude_jobs_attention
+    attribute: worst_status
+    name: Worst status
+  - type: attribute
+    entity: sensor.claude_jobs_attention
+    attribute: claude_version
+    name: Claude Code CLI
+  - entity: sensor.claude_jobs_monthly_cost
+    name: Spend this month
+```
+
+**3 · Per-job buttons — Button cards.** "Run now" and the hard kill switch are five lines of
+*dashboard* config per job (edit them in the UI; no `configuration.yaml` change, no script or button
+entities). Both call the package's generic `rest_command`s; replace `health-check` with your job's
+file name (without `.md`).
+
+```yaml
+type: horizontal-stack
+cards:
+  - type: button
+    name: Run health-check now
+    icon: mdi:play-circle
+    tap_action:
+      action: perform-action              # dashboards older than 2024.8 spell this `action: call-service` + `service:`
+      perform_action: rest_command.claude_job_run
+      data:
+        job: health-check
+        # input: {date: "2026-08-17"}     # only for jobs that declare `input:` in their frontmatter
+  - type: button
+    name: Disable health-check
+    icon: mdi:pause-circle
+    tap_action:
+      action: perform-action
+      perform_action: rest_command.claude_job_set_enabled
+      data:
+        job: health-check
+        enabled: false
+      confirmation:
+        text: Disable the health-check job? Scheduled triggers will be declined until it is enabled again.
+  - type: button
+    name: Enable health-check
+    icon: mdi:play-pause
+    tap_action:
+      action: perform-action
+      perform_action: rest_command.claude_job_set_enabled
+      data:
+        job: health-check
+        enabled: true
+  - type: entity
+    entity: sensor.claude_job_health_check   # the job's result entity: state + headline attribute
+    name: Last result
+```
+
+The disable button creates the add-on's flag file (`state/disabled/<job>`), which every trigger path
+honours; the job's entity keeps its last result and shows `enabled: false`. The schedule
+automation's own on/off toggle remains the everyday "schedule switch".
+
+
+## Token rotation
+
+```bash
+claude-job token rotate     # new token, live immediately for the endpoint
+```
+
+then restart the add-on: the start re-renders `claudecode_jobs.yaml` with the new token
+and reloads RESTful commands and REST sensors in Home Assistant, so nothing 401s. Without a
+restart, run `python3 /usr/local/lib/claude-job/render_package.py` in the terminal for the
+same effect. Until one of the two happens, triggers and the anchor poll fail with 401 and
+the anchor goes `unavailable` (→ alarm after 10 minutes).
+
+## Git-backed config directories
+
+The rendered `claudecode_jobs.yaml` contains the bearer token, and it lives in
+`/homeassistant` — inside your HA backups and inside any git repository you keep your
+configuration in. The token is useless off your host (the endpoint is reachable only on the
+internal add-on network) and one command rotates it, but it should still not be published.
+What the add-on does about it:
+
+- If `/homeassistant/.git` exists, the renderer adds `/claudecode_jobs.yaml` to
+  `.git/info/exclude` (repo-local, untracked, same effect as `.gitignore`; your own
+  `.gitignore` is never touched).
+- If the file is **already tracked** — committed before that guard existed — no ignore rule
+  helps. The add-on log then warns at every start:
+  `claudecode_jobs.yaml is TRACKED by git: the endpoint token is in your repository history`.
+  Fix: `claude-job token rotate`, `git rm --cached claudecode_jobs.yaml`, purge the file
+  from history if the repository was ever pushed anywhere, restart the add-on.
+
+Related, and not specific to jobs: if your config repository's remote URL embeds
+credentials (`https://user:token@…` in `.git/config`), move them to a credential helper
+outside the working tree. Jobs cannot read `.git/` (deny baseline), but the interactive
+session and anything else with file access can.
+
+## Monitoring Home Assistant itself (dead-man check)
+
+Everything above runs *inside* Home Assistant, so none of it can tell you that Home
+Assistant is down. The robust pattern is an external dead-man switch: a service such as
+healthchecks.io (or Uptime Kuma, or an ntfy/cron pair on another machine) that alerts when
+it *stops* hearing from you. Create a check there with a 10-minute period and a few
+minutes' grace, then let HA ping it:
+
+```yaml
+rest_command:
+  deadman_ping:
+    url: "https://hc-ping.com/<your-check-uuid>"
+    method: get
+    timeout: 10
+
+automation:
+  - id: deadman_ping
+    alias: "Dead-man ping · Home Assistant is alive"
+    mode: single
+    triggers:
+      - trigger: time_pattern
+        minutes: "/10"
+    actions:
+      - action: rest_command.deadman_ping
+        continue_on_error: true
+```
+
+Silence — HA down, host down, network down — is what raises the alert, which is the one
+property no in-HA automation can have. No add-on machinery is involved.
+
+## Troubleshooting jobs
+
+Where to look, in order: the entity's state and attributes (`reason`, `notify_status`,
+`detail`); `~/.claude/jobs/state/<name>.json` (untruncated result, `validation_errors`,
+`permission_denials`); `~/.claude/jobs/logs/<name>.jsonl` (one line per run: exit code,
+judgment row, envelope, cost); the run transcript under
+`/homeassistant/.claudecode/projects/-data-claude-jobs-project/`; the add-on log
+(`[claude-job]`, `[claude-job-endpoint]`, `[claude-job-notify]`, `[ha-broker]` lines); and
+`curl -s http://localhost:7682/health` from the add-on terminal.
+
+| Symptom | Meaning / what to do |
+|---|---|
+| `sensor.claude_jobs_attention` is `unavailable` | HA cannot reach the endpoint: add-on stopped, `enable_job_endpoint` off, token rotated or hostname changed without a re-render (restart the add-on), or the endpoint is degraded (`/health`). The alarm fires after 10 min by design |
+| `sensor.claude_jobs_attention` does not exist at all | the `packages:` include is missing, HA was not restarted after adding it, or HA rejected the package — Settings → System → Logs, search `claudecode_jobs` (a duplicate `rest_command` name from the interim setup is the usual cause) |
+| job entity `error`, headline `runner died without reporting` (`reason: lost`) | the run's process disappeared without writing a result — container killed, host reboot, out of memory. Demoted by the tick; the next run heals it. Check the add-on log around `started_at` |
+| `error` · `claude.ai login expired — run /login in the terminal` | the OAuth login is gone (one automatic retry already happened). Open the terminal, start `claude`, run `/login` |
+| `error` · `stopped at budget cap $1.00` (`reason: max_budget`) | the run hit `max_cost_usd` mid-flight. Raise it (≤ 5.00), narrow the prompt, or use a cheaper `model:` |
+| `error` · `hit max turns (50) before finishing` | raise `max_turns` (≤ 200) or narrow the job; keep `timeout ≥ max_turns × 10 s` |
+| `error` · `timed out after 600s` | no result at all was produced. Raise `timeout` (≤ 3600) or find the slow tool call in the transcript |
+| `error` · `completed without submitting a result` | the model finished without using the result tool — usually a `tools:` list too narrow to do the job, or a prompt that invites conversation. Read the transcript |
+| `error` · `invalid definition: …` (`cost_usd: 0`) | run `claude-job validate <name>`; all errors are listed in the `validation_errors` attribute |
+| `error` · `reason: cli_preflight_failed` | see `sensor.claude_jobs_endpoint` above; typically an auto-updated CLI |
+| `warning` (or higher) with a `[denied: Bash×2]` prefix | the job attempted tool calls outside its `tools:`; the result is still valid, the prefix names the gap and `detail` lists the denied calls. Add the rule if the allow-list permits it, or adjust the prompt |
+| `[over budget]` prefix | the final cost exceeded `max_cost_usd` slightly (the cap stops the *next* turn); informational |
+| `skipped` · `concurrency_limit` | another job held the single run slot for more than 60 s; stagger the schedules |
+| `aborted` | the add-on was stopped or restarted mid-run (or the process was killed externally); the next run heals it; no notification is sent for add-on stops |
+| per-job entities missing after an HA restart | expected briefly; the package's start automation re-posts them about 30 s after start, the canary within 10 min. `rest_command.claude_job_republish` (Developer tools → Actions) forces it |
+| `GET /jobs` lists a job with `status: "invalid_state"` | its `state/<name>.json` is corrupt (counts as failed); the next run rewrites it, or delete the file |
+| every `curl -X POST` to the endpoint answers `411` | send a body: `-d '{}'` |
+| a run was triggered but nothing happened | check the automation trace: `{"accepted": false, "reason": "disabled"}` (flag file or `enabled: false`), `"rate_limited"` (`min_interval`), or connection refused (endpoint down). `claude-job list` shows ENABLED and STATUS |
+| no phone notification | read the entity's `notify_status` (`quiet:` = deduplicated repeat, `fallback:` = no phone target found, `error:` = service call failed); check `_notify.yaml` `mobile.targets`; for critical alerts on Android grant the DND override |
+| blueprint not in the list | refresh the page; the file must exist at `/homeassistant/blueprints/automation/claudecode/schedule.yaml` (written only with `enable_job_endpoint: true`) |
+| add-on log: `claudecode_jobs.yaml is TRACKED by git` | see "Git-backed config directories": rotate the token and remove the file from the repository history |
