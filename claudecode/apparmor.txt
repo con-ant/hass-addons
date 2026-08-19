@@ -49,6 +49,12 @@ profile claudecode flags=(attach_disconnected,mediate_deleted) {
   # Add-on data
   /data/** rwk,
 
+  # Claude Jobs runtime files (pgid files, per-run settings, endpoint pid).
+  # Nothing under /run was writable before; the job runner and endpoint need it
+  # (docs/DESIGN-claude-jobs.md §4.1).
+  /run/claudecode/ rw,
+  /run/claudecode/** rwk,
+
   # Home Assistant config - main working directory
   /homeassistant/ r,
   /homeassistant/** rwk,
@@ -74,6 +80,10 @@ profile claudecode flags=(attach_disconnected,mediate_deleted) {
 
   # Node.js modules
   /usr/lib/node_modules/** ixmr,
+
+  # Python C extensions (pydantic-core for hass-mcp, rpds for jsonschema) are
+  # mmap'ed from site-packages; abstractions/base only covers /usr/lib*/lib*.so*.
+  /usr/local/lib/python3*/** mr,
 
   # Playwright MCP server (installed under /opt to avoid /usr/local/bin/mcp
   # collision with hass-mcp; the /usr/local/bin/playwright-mcp symlink

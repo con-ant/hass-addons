@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/con-ant/hass-addons/claudecode/job-frontmatter.schema.json",
+  "title": "Claude job frontmatter (design §4.2)",
+  "description": "Structural validation of /homeassistant/.claudecode/jobs/<name>.md frontmatter. Semantic rules (model allow-list, path roots, tool rules, channel names, cross-file action checks) live in jobdef.validate(). The numeric ceilings for timeout and max_cost_usd are patched from jobcommon image constants at load time.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["description", "tools"],
+  "properties": {
+    "description": {"type": "string", "minLength": 1, "maxLength": 200},
+    "kind": {"enum": ["job", "action"]},
+    "model": {"type": "string", "minLength": 1, "maxLength": 64},
+    "timeout": {"type": "integer", "minimum": 30, "maximum": 3600},
+    "max_cost_usd": {"type": "number", "minimum": 0.01, "maximum": 5.0},
+    "max_turns": {"type": "integer", "minimum": 2, "maximum": 200},
+    "enabled": {"type": "boolean"},
+    "min_interval": {"type": "integer", "minimum": 0, "maximum": 86400},
+    "stale_after": {"type": "integer", "minimum": 60, "maximum": 31708800},
+    "paths": {
+      "type": "array", "minItems": 1, "maxItems": 16,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "tools": {
+      "type": "array", "minItems": 1, "maxItems": 64,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"$ref": "#/$defs/channels"},
+        "info": {"$ref": "#/$defs/channels"},
+        "warning": {"$ref": "#/$defs/channels"},
+        "critical": {"$ref": "#/$defs/channels"},
+        "error": {"$ref": "#/$defs/channels"},
+        "skipped": {"$ref": "#/$defs/channels"},
+        "aborted": {"$ref": "#/$defs/channels"}
+      }
+    },
+    "renag_every": {"type": "integer", "minimum": 0, "maximum": 100},
+    "notify_recovery": {"type": "boolean"},
+    "input": {
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+      "additionalProperties": {"$ref": "#/$defs/input_param"}
+    },
+    "actions": {
+      "type": "array", "maxItems": 4,
+      "items": {"$ref": "#/$defs/action"}
+    }
+  },
+  "$defs": {
+    "channels": {
+      "type": "array", "maxItems": 8,
+      "items": {"type": "string", "minLength": 1, "maxLength": 32}
+    },
+    "input_param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["string", "integer", "number", "boolean"]},
+        "description": {"type": "string", "maxLength": 200},
+        "required": {"type": "boolean"},
+        "default": {"type": ["string", "number", "boolean"]},
+        "pattern": {"type": "string", "minLength": 1, "maxLength": 200},
+        "enum": {
+          "type": "array", "minItems": 1, "maxItems": 32,
+          "items": {"type": ["string", "number", "boolean"]}
+        },
+        "max_length": {"type": "integer", "minimum": 1, "maximum": 2000},
+        "minimum": {"type": "number"},
+        "maximum": {"type": "number"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "job"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9_]{1,32}$"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 40},
+        "job": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 48},
+        "ttl_min": {"type": "integer", "minimum": 1, "maximum": 10080}
+      }
+    }
+  }
+}

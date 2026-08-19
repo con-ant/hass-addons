@@ -62,5 +62,9 @@ configuration:
       "HomeAssistant", produciendo nombres como "HomeAssistant-graceful-unicorn".
       Solo aplica cuando Control Remoto está habilitado.
 
+  job_default_model:
+    name: Modelo predeterminado para trabajos programados
+    description: >-
+      Alias del modelo que usan los Claude Jobs (~/.claude/jobs/*.md) que no definen model: por sí mismos. fable es el más capaz y el más caro; cada trabajo puede fijar un modelo más barato en su frontmatter.
 network:
   7681/tcp: Terminal Web (ttyd)

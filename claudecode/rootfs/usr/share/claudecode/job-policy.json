@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "deny": [
+      "Read(//homeassistant/.claudecode/**)",
+      "Read(//homeassistant/secrets.yaml)",
+      "Read(//homeassistant/.storage/**)",
+      "Read(//homeassistant/.cloud/**)",
+      "Read(//homeassistant/home-assistant_v2.db*)",
+      "Read(//homeassistant/backups/**)",
+      "Read(//homeassistant/known_devices.yaml)",
+      "Read(//homeassistant/claudecode_jobs.yaml)",
+      "Read(//homeassistant/.git/**)",
+      "Read(//homeassistant/**/.git/**)",
+      "Read(//share/**/.git/**)",
+      "Read(//media/**/.git/**)",
+      "Read(//addon_configs/**)",
+      "Read(//config/**)",
+      "Read(//backup/**)",
+      "Read(//ssl/**)",
+      "Read(//root/**)",
+      "Read(//data/**)",
+      "Read(//proc/**)",
+      "Read(//run/claudecode/**)",
+      "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"
+    ]
+  },
+  "sandbox": {
+    "autoAllowBashIfSandboxed": false
+  }
+}

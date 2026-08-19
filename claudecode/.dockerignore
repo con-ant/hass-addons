@@ -11,3 +11,8 @@ config.yaml
 build.yaml
 apparmor.txt
 translations/
+docs/
+tests/
+# Bytecode from dev-box test runs must not ride into the image via COPY rootfs/
+**/__pycache__
+**/*.pyc

@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.7] - 2026-08-18
+
+### Added
+- **Claude Jobs: scheduled, read-only Claude runs** — the runner half. A job is a
+  Markdown file in `~/.claude/jobs/` (YAML frontmatter: model, timeout, cost cap, turn
+  cap, `tools:`, `paths:`, notify map, optional typed `input:`; body: the prompt). New
+  `claude-job` command: `list`, `validate [--all] [--json]`, `dry-run`, `run`, `force-run`,
+  `disable`/`enable`, `token show|rotate`. A run executes `claude -p` headlessly with no
+  user settings, no `CLAUDE.md`, no MCP registrations and a scrubbed environment, in its
+  own working directory, with a tool set shrunk to read-only `ha` subcommands, hass-mcp
+  reads and the job's declared `paths:` under an image-shipped deny baseline; the
+  Supervisor token stays in a per-run localhost broker that forwards only read-only routes.
+  The schema-enforced result becomes `sensor.claude_job_<slug>` (states `ok`, `info`,
+  `warning`, `critical`, plus runner-owned `error`, `skipped`, `aborted`, `running`), one
+  JSONL log line and a monthly cost rollup (`sensor.claude_jobs_cost_raw`). Two example
+  jobs (`health-check`, `energy-report`) are seeded on first start; pristine copies live in
+  `/usr/share/claudecode/jobs/`. Home Assistant triggering, notifications and the HA
+  package follow in the next releases; until then jobs run from the terminal. Design and
+  security argument: `docs/DESIGN-claude-jobs.md`.
+- New option `job_default_model` (`fable` | `opus` | `sonnet` | `haiku`, default `fable`)
+  for jobs that do not pin `model:`.
+- The interactive session may run `claude-job list|validate|dry-run|run|disable` without a
+  permission prompt (`enable`, `force-run`, `token` still ask); `claude-job run` invoked by
+  Claude starts the run in the background. `~/.claude/CLAUDE.md` gains a "Scheduled jobs"
+  section.
+
+### Changed
+- AppArmor profile grants `/run/claudecode/**` (per-run policy files, process-group files).
+- Image installs `pyyaml` and `jsonschema` via pip for the job validator, adds `tzdata`
+  (job timestamps and the monthly cost rollup follow Home Assistant's time zone), pins
+  `hass-mcp==0.6.0` (the job broker allow-lists hass-mcp's one fixed template query by
+  importing it), and records the add-on version in `/etc/claudecode-addon-version`.
+- At start the add-on checks that the installed `claude --help` still lists the flags the
+  job cage relies on and warns if not; jobs refuse to run in that case rather than run
+  with weaker isolation (relevant with `auto_update_claude: true`).
+
 ## [1.2.65-con.6] - 2026-08-17
 
 ### Fixed

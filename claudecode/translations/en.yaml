@@ -58,5 +58,9 @@ configuration:
       and the Claude mobile app. Defaults to "HomeAssistant", producing names like
       "HomeAssistant-graceful-unicorn". Only applies when Enable Remote Control is on.
 
+  job_default_model:
+    name: Default model for scheduled jobs
+    description: >-
+      Model alias used by Claude Jobs (~/.claude/jobs/*.md) that do not set model: themselves. fable is the most capable and most expensive; a job can pin a cheaper model in its own frontmatter.
 network:
   7681/tcp: Web Terminal (ttyd)

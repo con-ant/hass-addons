@@ -21,6 +21,11 @@ OPTS=/data/options.json
 # is killed. Must fit inside config.yaml's `timeout:` (30) together with the
 # ttyd teardown below; the README/CHANGELOG quote this number.
 STOP_GRACE_SECS=10
+# Claude Jobs (docs/DESIGN-claude-jobs.md §4.1): definitions and state live on
+# the HA volume, the job cwd and endpoint token on /data, runtime files on /run.
+JOBS_DIR=$PERSIST_DIR/jobs
+JOB_DATA_DIR=/data/claude-jobs
+RUN_DIR=/run/claudecode
 
 cd_work() { cd /homeassistant 2>/dev/null || cd /; }
 
@@ -219,10 +224,12 @@ read_options() {
   RC_PREFIX=$(opt '.remote_control_session_prefix // "HomeAssistant"')
   AUTO_LAUNCH=$(opt '.auto_launch_claude // "continue"')
   EXTRA_PKGS=$(opt '.extra_npm_packages // [] | join(" ")')
+  JOB_DEFAULT_MODEL=$(opt '.job_default_model // "fable"')
   # Sane fallbacks if options.json itself was unreadable.
   : "${FONT_SIZE:=14}" "${THEME:=dark}" "${SESSION_PERSIST:=true}" "${ENABLE_MCP:=true}"
   : "${ENABLE_PLAYWRIGHT:=false}" "${AUTO_UPDATE:=false}" "${DEFAULT_MODE:=auto}"
   : "${ENABLE_RC:=false}" "${RC_PREFIX:=HomeAssistant}" "${AUTO_LAUNCH:=continue}"
+  : "${JOB_DEFAULT_MODEL:=fable}"
 }
 
 scrub_legacy_token() {
@@ -348,6 +355,73 @@ apply_settings() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Claude Jobs (docs/DESIGN-claude-jobs.md). The runner (`claude-job`) works from
+# the terminal on every install; the HTTP endpoint and the generated HA package
+# are opt-in (enable_job_endpoint). Same discipline as every step above: warn
+# and move on.
+# ---------------------------------------------------------------------------
+setup_job_dirs() {
+  local fresh=""
+  [ -d "$JOBS_DIR" ] || fresh=1
+  if mkdir -p "$JOBS_DIR/logs" "$JOBS_DIR/state/inbox" "$JOBS_DIR/state/disabled" "$JOBS_DIR/state/actions"; then
+    # Seed the two shipped example jobs once, when the directory is first
+    # created - never again, so a job the user deleted stays deleted. Pristine
+    # copies remain in /usr/share/claudecode/jobs/.
+    if [ -n "$fresh" ]; then
+      cp /usr/share/claudecode/jobs/*.md "$JOBS_DIR/" 2>/dev/null \
+        && info "Seeded example jobs into $JOBS_DIR (health-check, energy-report)"
+    fi
+    [ -e /usr/share/claudecode/notify.example.yaml ] \
+      && cp /usr/share/claudecode/notify.example.yaml "$JOBS_DIR/_notify.example.yaml" 2>/dev/null
+  else
+    warn "Could not create $JOBS_DIR; scheduled jobs will not work this boot"
+  fi
+  # The job cwd is deliberately empty and on /data: no mapped-volume ancestor
+  # can inject a CLAUDE.md, and nothing here rides in the HA backup (§4.1).
+  if ! { mkdir -p "$JOB_DATA_DIR/project" && chmod 700 "$JOB_DATA_DIR"; }; then
+    warn "Could not create $JOB_DATA_DIR"
+  fi
+  # /run is wiped with the container; a leftover `stopping` flag or pgid file
+  # can only be from a previous life of this container (restart without
+  # recreate), so clear them.
+  if mkdir -p "$RUN_DIR/jobs" "$RUN_DIR/run" && chmod 700 "$RUN_DIR"; then
+    rm -f "$RUN_DIR/stopping" "$RUN_DIR/endpoint.pid" "$RUN_DIR/endpoint.status" "$RUN_DIR"/jobs/*.pgid "$RUN_DIR"/run/* 2>/dev/null
+  else
+    warn "Could not create $RUN_DIR (AppArmor?); job runs cannot be tracked or stopped cleanly"
+  fi
+  info "Default job model: $JOB_DEFAULT_MODEL"
+}
+
+# The job runner isolates every run with CLI flags that auto_update_claude could
+# in principle take away. The runner and endpoint refuse to run when one is
+# missing (cli_preflight, §4.9); this only makes the reason visible at boot.
+cli_preflight_log() {
+  [ "$CLAUDE_OK" = "true" ] || return 0
+  local help missing="" f
+  help=$(timeout 30 claude --help < /dev/null 2>/dev/null) || { warn "claude --help failed; skipping job CLI preflight"; return 0; }
+  for f in --setting-sources --settings --tools --json-schema --strict-mcp-config; do
+    printf '%s' "$help" | grep -q -- "$f" || missing="$missing $f"
+  done
+  if [ -n "$missing" ]; then
+    warn "claude --help does not list:$missing - scheduled jobs will refuse to run until the CLI has them (see cli_preflight in the docs)"
+  else
+    info "Job CLI preflight: all isolation flags present"
+  fi
+}
+
+# The interactive Claude may list, validate, dry-run, run and disable jobs
+# without a prompt; enable, force-run and token deliberately still ask (§7):
+# disabling is fail-safe, enabling undoes a human decision.
+allow_job_commands() {
+  local rules='["Bash(claude-job list)","Bash(claude-job list:*)","Bash(claude-job validate:*)","Bash(claude-job dry-run:*)","Bash(claude-job run:*)","Bash(claude-job disable:*)"]'
+  if settings_set --argjson r "$rules" '.permissions.allow = ((.permissions.allow // []) + $r | unique)'; then
+    info "Pre-authorized read-only claude-job commands for the interactive session"
+  else
+    warn "Could not add claude-job allow rules to settings.json"
+  fi
+}
+
 build_shell_cmd() {
   if [ "$THEME" = "dark" ]; then
     COLORS='background=#1e1e2e,foreground=#cdd6f4,cursor=#f5e0dc'
@@ -395,8 +469,11 @@ check_avx
 maybe_update_claude
 install_extra_npm_packages
 check_claude
+cli_preflight_log
 configure_mcp
 apply_settings
+allow_job_commands
+setup_job_dirs
 # ttyd only spawns SHELL_CMD when a browser connects, so on a headless box
 # nothing runs after a restart until somebody opens the web terminal - and
 # Remote Control, whose whole point is running unattended, stays down. When

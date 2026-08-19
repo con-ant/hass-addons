@@ -1,0 +1,1265 @@
+#!/usr/bin/env python3
+"""claude-job — the Claude Jobs runner (design §4.3, §4.6, §4.7, Appendix A.2/A.8).
+
+A *run* is one headless `claude -p` invocation of a job definition
+(`~/.claude/jobs/<name>.md`), caged by the composed settings file, judged by the
+§4.6 table, persisted to `state/<name>.json` + `logs/<name>.jsonl`, published as
+`sensor.claude_job_<slug>`, and handed to the notifier.  `cmd_run()` below is
+the design's numbered sequence, one function per step:
+
+     1 ensure_own_process_group      6 validate_everything        11 ┐
+     2 nesting_guard                 7 stage_run                  12 │ finish(): persist, publish,
+     2½ refuse_if_stopping           8 publish_running            13 │ notify, cleanup — the single
+     3 load_definition/disabled_gate 9 spawn_claude               14 ┘ exit funnel for every path
+     4 acquire_job_lock             10 wait_and_judge (+ one auth retry, A.8)
+     5 acquire_global_lock
+
+Steps that end a run early raise `Concluded(verdict)` (job lock held → goes through
+`finish()`) or `EarlyExit(code)` (owns nothing, or the overlap rule forbids an
+entity write → touches nothing a live sibling run owns).
+Signals (TERM, INT, HUP alike — A14) only set a flag once the job lock is held; every
+wait is a short polling loop that notices it and takes the abort path
+(`finish("aborted")`, exit 143).
+
+Exit codes (CONTRACTS A2): 0 contract status or non-run verb ok · 1 runner-judged
+error (rows 3–10), preflight refusal, runner crash · 2 invalid definition/input,
+usage, unknown job · 3 skipped (overlap, disabled, concurrency, stopping,
+force-run refused) · 143 aborted by TERM/INT/HUP.
+
+Other verbs: force-run, dry-run, list, validate, enable, disable, token, --version
+(breakdown 2g).
+"""
+import os
+import sys
+import pathlib
+
+_LIB = os.environ.get("CLAUDE_JOB_LIB_DIR") or str(pathlib.Path(__file__).resolve().parent.parent / "lib" / "claude-job")
+sys.path.insert(0, _LIB)
+import jobcommon as jc, jobdef  # noqa: E402
+
+import argparse  # noqa: E402
+import collections  # noqa: E402
+import dataclasses  # noqa: E402
+import datetime  # noqa: E402
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import random  # noqa: E402
+import re  # noqa: E402
+import secrets  # noqa: E402
+import select  # noqa: E402
+import shlex  # noqa: E402
+import shutil  # noqa: E402
+import signal  # noqa: E402
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import traceback  # noqa: E402
+import urllib.request  # noqa: E402
+from typing import Any, Optional  # noqa: E402
+
+COMPONENT = "claude-job"
+NESTING_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT")   # A1
+ABORT_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)                        # A14 (+ HUP: closed terminal)
+AUTH_RE = re.compile(r"(oauth|authentication|unauthorized|401|token.*(expired|invalid|revoked)|please.*(log ?in|/login))", re.I)  # A.8
+LOGIN_EXPIRED_HEADLINE = "claude.ai login expired — run /login in the terminal"
+POLL_S = 0.1                     # every wait is a polling loop this fine (R3)
+BROKER_READY_WAIT_S = 5.0        # 2i: one ready line within 5 s
+PUBLISH_TIMEOUT_S = 5.0          # terminal publish; the abort path uses jc.JOB_TERM_PUBLISH_TIMEOUT_S (1.5 s, A.2)
+INFLIGHT_HTTP_TIMEOUT_S = 2.0    # tz fetch + `running` publish: short, so a TERM is noticed within budget
+HEADLINE_CAP = 300
+TAIL_CHARS = 500
+ABORT_RACE_WAIT_S = 0.5          # child died by signal: give a stop-path TERM aimed at us this long to arrive too
+ENVELOPE_RESULT_LOG_CAP = 2048   # 2c
+JSONL_LINE_CAP = 16 * 1024       # 2c
+DENIALS_CAP = 20
+NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # 127.0.0.1 never goes via a proxy
+
+# The abort flag: signal handlers set it, polling loops read it (R3).
+ABORT = threading.Event()
+
+
+def log(msg: str) -> None:
+    sys.stderr.write(f"[{COMPONENT}] {msg}\n")
+    sys.stderr.flush()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-run context and the two ways a step can end a run early
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclasses.dataclass
+class Verdict:
+    status: str                       # ok|info|warning|critical|error|skipped|aborted
+    headline: str
+    reason: Optional[str] = None      # machine reason (2b result.reason)
+    row: Optional[int] = None         # judgment row, None for skips/crash
+    extra: dict = dataclasses.field(default_factory=dict)   # detail, metrics, raw_tail, …
+
+
+class Concluded(Exception):
+    """A step reached a verdict before step 10 while holding the job lock; cmd_run hands it to finish()."""
+    def __init__(self, verdict: Verdict):
+        super().__init__(verdict.headline)
+        self.verdict = verdict
+
+
+class EarlyExit(Exception):
+    """Leave without finish(): nothing is owned yet, or the overlap rule forbids an entity write."""
+    def __init__(self, code: int, message: str, *, status: str = "skipped", reason: Optional[str] = None):
+        super().__init__(message)
+        self.code, self.message, self.status, self.reason = code, message, status, reason
+
+
+@dataclasses.dataclass
+class Run:
+    name: str
+    trigger: str                      # endpoint | manual | manual_forced
+    forced: bool
+    run_id: str
+    json_out: bool
+    input_file: Optional[str] = None
+    input_pairs: Optional[list] = None
+    input: Optional[dict] = None
+    input_errors: list = dataclasses.field(default_factory=list)
+    job: Any = None                   # jobdef.JobDef once loaded
+    notify_cfg: Any = None
+    preflight: Optional[dict] = None
+    job_lock: Optional[int] = None    # fd; held for the rest of the process
+    global_lock: Optional[int] = None
+    started_at: Optional[str] = None  # ISO; set when the job lock is taken, reset when the run clock starts (step 8)
+    t0: float = 0.0                   # monotonic twin of started_at
+    deadline: Optional[str] = None
+    staged: bool = False              # THIS invocation wrote run/<name>.* (only then may cleanup remove them)
+    nonce: Optional[str] = None
+    broker: Any = None                # Popen
+    broker_port: Optional[int] = None
+    tz: str = "UTC"
+    schema: Optional[dict] = None
+    argv: Optional[list] = None
+    claude: Any = None                # Popen of `env -i … timeout … claude`
+    spawn_t: float = 0.0
+    attempts: int = 0
+    retried_auth: bool = False
+    exit_code: Optional[int] = None
+    elapsed: float = 0.0
+    envelope: Optional[dict] = None
+    aborting: bool = False
+    finishing: bool = False
+
+    def __post_init__(self):          # file locations (2b, 2f); all keyed by name
+        self.slug = jobdef.slug(self.name)
+        self.state_path, self.lock_path, self.log_path = jc.state_path(self.name), jc.lock_path(self.name), jc.log_path(self.name)
+        self.skipcount_path = f"{jc.STATE_DIR}/{self.name}.skipcount"                       # A7
+        self.pgid_path = f"{jc.PGID_DIR}/{self.name}.pgid"
+        run_dir = f"{jc.PERRUN_DIR}/{self.name}"
+        self.settings_path, self.mcp_path, self.port_path = f"{run_dir}.settings.json", f"{run_dir}.mcp.json", f"{run_dir}.port"
+        self.out_path, self.err_path = f"{run_dir}.out", f"{run_dir}.err"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="claude-job", description="Run and manage Claude Jobs (headless, read-only Claude runs).")
+    p.add_argument("--version", action="store_true", help="print the add-on version and exit")
+    sub = p.add_subparsers(dest="verb", metavar="VERB")
+    for verb, help_ in (("run", "run a job now (honours the disabled gate)"),
+                        ("force-run", "run a job even if disabled (human at the terminal only)")):
+        sp = sub.add_parser(verb, help=help_)
+        sp.add_argument("name")
+        sp.add_argument("--run-id")
+        g = sp.add_mutually_exclusive_group()
+        g.add_argument("--input-file", metavar="PATH", help="JSON file with an 'input' object (endpoint inbox format)")
+        g.add_argument("--input", metavar="KEY=VALUE", action="append",
+                       help="one input parameter; repeatable. VALUE is JSON when it parses to a string/number/"
+                            "boolean (n=3, flag=true, name='\"x y\"'), otherwise the raw text (date=2026-08-17)")
+        sp.add_argument("--trigger", choices=("endpoint", "manual"), default="manual")
+        sp.add_argument("--json", action="store_true", help="print the result object as JSON on stdout")
+    sp = sub.add_parser("dry-run", help="show exactly what a run would do; spends nothing")
+    sp.add_argument("name")
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument("--input-file", metavar="PATH")
+    g.add_argument("--input", metavar="KEY=VALUE", action="append")
+    sp = sub.add_parser("list", help="list job definitions and their last status")
+    sp.add_argument("--json", action="store_true")
+    sp = sub.add_parser("validate", help="validate one job (or --all)")
+    sp.add_argument("name", nargs="?")
+    sp.add_argument("--all", action="store_true")
+    sp.add_argument("--json", action="store_true")
+    for verb in ("disable", "enable"):
+        sub.add_parser(verb, help=f"{verb} a job (runtime flag file)").add_argument("name")
+    sp = sub.add_parser("token", help="show, rotate or ensure the job-endpoint bearer token")
+    sp.add_argument("action", choices=("show", "rotate", "ensure"))
+    return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.version:
+        print(f"claude-job {jc.addon_version()}")
+        return 0
+    if getattr(args, "name", None):
+        args.name = normalize_name_or_die(args.name)
+    if args.verb in ("run", "force-run"):
+        return cmd_run(args, forced=args.verb == "force-run")
+    if args.verb == "dry-run":
+        return cmd_dry_run(args)
+    if args.verb == "list":
+        return cmd_list(args)
+    if args.verb == "validate":
+        return cmd_validate(args)
+    if args.verb in ("enable", "disable"):
+        return cmd_set_enabled(args.name, args.verb == "enable")
+    if args.verb == "token":
+        return cmd_token(args.action)
+    parser.print_usage(sys.stderr)
+    return 2
+
+
+def normalize_name_or_die(token: str) -> str:
+    """Accept the job name or its slug (names forbid '_', so the mapping is bijective)."""
+    name = jobdef.name_from_token(token)
+    if not jobdef.NAME_RE.match(name) or len(name) > jobdef.NAME_MAX:
+        log(f"invalid job name {token!r}: lowercase letters, digits and hyphens, at most {jobdef.NAME_MAX} chars")
+        sys.exit(2)
+    return name
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# run / force-run — the 14 steps
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cmd_run(args, *, forced: bool) -> int:
+    run = Run(name=args.name, trigger="manual_forced" if forced else args.trigger, forced=forced,
+              run_id=args.run_id or jc.new_run_id(), json_out=args.json,
+              input_file=args.input_file, input_pairs=args.input)
+    if not jobdef.RUN_ID_RE.match(run.run_id):
+        log(f"--run-id must look like run-YYYYMMDDTHHMMSSZ-xxxx, got {run.run_id!r}")
+        return 2
+
+    ensure_own_process_group()                        # step 1
+    exit_143_on_signals()                             #   until the job lock is held nothing is owned: a signal = plain exit 143
+    try:
+        nesting_guard(run)                            # step 2  (A1: detach, or refuse force-run)
+        refuse_if_stopping(run)                       # step 2½ (the add-on stop path forbids new runs)
+        load_definition(run)                          # step 3  (+ CLI preflight, gathered here, judged at step 6)
+        disabled_gate(run)                            # step 3
+        acquire_job_lock(run)                         # step 4  (overlap rule; abort handlers armed with the lock)
+        acquire_global_lock(run)                      # step 5
+        validate_everything(run)                      # step 6  (fail-before-tokens ends here)
+        stage_run(run)                                # step 7: broker, tz, settings/mcp files, schema
+        publish_running(run)                          # step 8: state marker, entity, pgid file
+        spawn_claude(run)                             # step 9
+        verdict = wait_and_judge(run)                 # step 10 (+ one auth retry)
+    except Concluded as done:
+        verdict = done.verdict
+    except EarlyExit as early:
+        return leave_early(run, early)
+    except Exception as exc:                          # a runner bug must still leave a trace (A2 code 1)
+        traceback.print_exc(file=sys.stderr)
+        if run.job_lock is None:
+            return leave_early(run, EarlyExit(1, f"runner crashed: {exc}", status="error", reason="runner_crash"))
+        kill_child(run)
+        verdict = Verdict("error", f"runner crashed: {exc}", reason="runner_crash")
+    return finish(run, verdict)                       # steps 11–14
+
+
+def leave_early(run: Run, early: EarlyExit) -> int:
+    log(early.message)
+    if run.json_out and early.reason:                 # A2: every non-usage exit prints a result object under --json
+        print(json.dumps({"run_id": run.run_id, "job": run.name, "status": early.status, "reason": early.reason,
+                          "headline": early.message}))
+    cleanup(run)
+    return early.code
+
+
+# ── step 1 ──────────────────────────────────────────────────────────────────
+
+def ensure_own_process_group() -> None:
+    """Every run is its own process group so the stop path can signal the whole tree (§4.7, R2)."""
+    if os.getpgrp() == os.getpid():
+        return
+    try:
+        os.setsid()
+    except OSError:
+        try:
+            os.setpgid(0, 0)
+        except OSError:
+            pass
+
+
+# ── step 2 ──────────────────────────────────────────────────────────────────
+
+def nesting_guard(run: Run) -> None:
+    """Inside the interactive Claude (markers in env): `run` detaches, `force-run` refuses (A1)."""
+    if not any(k in os.environ for k in NESTING_MARKERS):
+        return
+    if run.forced:
+        raise EarlyExit(3, "refusing: force-run bypasses the disabled gate and must be typed by a human "
+                           "at the terminal, not run from inside Claude", reason="refused_nested")
+    exe = shutil.which(jc.RUNNER_BIN)
+    argv = ([exe] if exe else [sys.executable, os.path.abspath(__file__)]) + \
+        ["run", run.name, "--run-id", run.run_id, "--trigger", "manual"]
+    if run.input_file:
+        argv += ["--input-file", run.input_file]
+    for pair in run.input_pairs or []:
+        argv += ["--input", pair]
+    env = {k: v for k, v in os.environ.items()
+           if k != "CLAUDECODE" and not k.startswith("CLAUDE_CODE_") and k != "CLAUDE_PID"}
+    subprocess.Popen(argv, cwd="/", env=env, start_new_session=True, close_fds=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(json.dumps({"accepted": True, "job": run.name, "run_id": run.run_id, "detached": True}))
+    raise EarlyExit(0, f"started in the background; check with: claude-job list (state: ~/.claude/jobs/state/{run.name}.json)")
+
+
+# ── step 2½ ─────────────────────────────────────────────────────────────────
+
+def refuse_if_stopping(run: Run) -> None:
+    if os.path.exists(jc.STOPPING_FILE):
+        raise EarlyExit(3, "add-on is stopping; not starting", reason="addon_stopping")
+
+
+# ── step 3 ──────────────────────────────────────────────────────────────────
+
+def load_definition(run: Run) -> None:
+    """Parse the job file structurally. Unknown job → exit 2; unparsable → row 1 (published if the lock is free)."""
+    path = jobdef.job_path(run.name)
+    if not os.path.isfile(path):
+        raise EarlyExit(2, f"unknown job: {run.name} (no {path})", status="error", reason="unknown_job")
+    # A5: `claude --help/--version` can take seconds uncached; do it before signals mean "abort within 4 s".
+    run.preflight = quietly("cli preflight", jc.cli_preflight, {"ok": False, "missing": ["(preflight crashed)"]})
+    try:
+        run.job = jobdef.load(run.name)
+    except jobdef.JobDefError as exc:
+        errors = list(exc.errors or [str(exc)])
+        if not take_job_lock(run):                    # a live run owns the entity; just report locally
+            raise EarlyExit(2, f"invalid definition: {errors[0]} (another run holds the job lock; not publishing)",
+                            status="error", reason="invalid_definition")
+        raise Concluded(invalid_verdict("invalid_definition", errors))
+    run.notify_cfg = quietly("_notify.yaml", jobdef.load_notify_config, None)
+
+
+def invalid_verdict(reason: str, errors: list) -> Verdict:
+    """Judgment row 1: validation failed before spawn — error, cost 0, the list attached."""
+    label = "invalid definition" if reason == "invalid_definition" else "invalid input"
+    return Verdict("error", f"{label}: {errors[0]}", reason=reason, row=1, extra={"validation_errors": errors})
+
+
+def quietly(what: str, fn, default):
+    """Config/probe readers whose failure must never block a run."""
+    try:
+        return fn()
+    except Exception as exc:
+        log(f"warning: {what}: {exc}")
+        return default
+
+
+def disabled_gate(run: Run) -> None:
+    """Flag file or frontmatter enabled:false → the disabled path, unless force-run (§4.10)."""
+    if run.forced:
+        return
+    gate = "flag" if jc.is_flag_disabled(run.name) else ("frontmatter" if not run.job.enabled else None)
+    if gate is not None:
+        take_disabled_path(run, gate)
+
+
+def take_disabled_path(run: Run, gate: str) -> None:
+    """Has run before → keep the last result (and any marker the tick still has to judge), publish enabled:false;
+    never ran → publish skipped/disabled. Only with the job lock (R9): a live run owns the entity."""
+    jc.append_jsonl(run.log_path, {"ts": jc.now_iso(), "event": "skipped_disabled", "job": run.name,
+                                   "run_id": run.run_id, "trigger": run.trigger, "gate": gate})
+    if not take_job_lock(run):
+        raise EarlyExit(3, f"{run.name} is disabled ({gate}) and a run is in flight; nothing to do", reason="disabled")
+    state = read_state(run)
+    if not isinstance(state.get("result"), dict):
+        raise Concluded(Verdict("skipped", f"disabled ({gate}); enable the job to run it", reason="disabled"))
+    state.update({"enabled": False, "published": False})
+    write_state(run, state)
+    if post_state(jc.entity_payload(state), PUBLISH_TIMEOUT_S):
+        state["published"] = True
+        write_state(run, state)
+    raise EarlyExit(3, f"{run.name} is disabled ({gate}); last result kept, enabled=false published", reason="disabled")
+
+
+# ── step 4 ──────────────────────────────────────────────────────────────────
+
+def acquire_job_lock(run: Run) -> None:
+    """Contention = a live run owns the entity: log, count, exit 3, NO entity write, none of its files touched."""
+    if take_job_lock(run):
+        return
+    holder = jc.read_lock_info(run.lock_path)
+    jc.append_jsonl(run.log_path, {"ts": jc.now_iso(), "event": "skipped_overlap", "job": run.name,
+                                   "run_id": run.run_id, "trigger": run.trigger, "holder": holder})
+    bump_skipcount(run)
+    raise EarlyExit(3, f"{run.name}: another run is in flight (holder: {json.dumps(holder)}); skipping", reason="overlap")
+
+
+def take_job_lock(run: Run) -> bool:
+    """flock -n on state/<name>.lock — the one place the lock is taken. Holding it makes this process the writer of
+    state/<name>.json, so from here on TERM/INT/HUP mean finish("aborted"), not a silent exit (repo-fit K)."""
+    run.job_lock = jc.flock_nb(run.lock_path)
+    if run.job_lock is None:
+        return False
+    install_abort_handlers()
+    run.started_at, run.t0 = jc.now_iso(), time.monotonic()
+    jc.write_lock_info(run.job_lock, {"pid": os.getpid(), "pgid": os.getpgrp(), "run_id": run.run_id,
+                                      "started_at": run.started_at})   # diagnostics only, never logic
+    return True
+
+
+def bump_skipcount(run: Run) -> None:
+    """state/<name>.skipcount (A7): incremented WITHOUT the lock; the lock holder folds it at its next finish()."""
+    current = as_int(jc.read_text(run.skipcount_path, "0").strip())
+    jc.atomic_write_text(run.skipcount_path, f"{current + 1}\n", mode=0o644)
+
+
+# ── signals ─────────────────────────────────────────────────────────────────
+
+def exit_143_on_signals() -> None:
+    for s in ABORT_SIGNALS:
+        signal.signal(s, lambda signum, frame: os._exit(143))
+
+
+def install_abort_handlers() -> None:
+    """Handlers only set the flag; the polling loops do the work (R3)."""
+    for s in ABORT_SIGNALS:
+        signal.signal(s, lambda signum, frame: ABORT.set())
+
+
+def check_abort(run: Run) -> None:
+    """Called from every wait: TERM the child, wait ≤ 2 s, KILL its group, conclude 'aborted' (A.2, A30)."""
+    if not ABORT.is_set() or run.aborting or run.finishing:
+        return
+    run.aborting = True
+    kill_child(run)
+    raise Concluded(abort_verdict(run))
+
+
+def abort_verdict(run: Run) -> Verdict:
+    """Judgment row 2: the platform interrupted the run; synthesized entirely from runner-side knowledge."""
+    elapsed = time.monotonic() - run.t0 if run.t0 else 0.0
+    return Verdict("aborted", f"aborted after {elapsed:.0f}s: add-on stopping", reason="addon_stopping", row=2)
+
+
+def kill_child(run: Run) -> None:
+    """Idempotent: TERM `timeout` (it relays to claude's group), poll ≤ 2 s, then KILL that group (A30)."""
+    proc = run.claude
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    give_up = time.monotonic() + float(jc.JOB_TERM_CHILD_WAIT_S)
+    while proc.poll() is None and time.monotonic() < give_up:
+        time.sleep(POLL_S / 2)
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)       # timeout made itself a group leader: pgid == pid
+        except OSError:
+            proc.kill()
+        try:
+            proc.wait(1.0)
+        except subprocess.TimeoutExpired:
+            pass
+    if run.exit_code is None and proc.returncode is not None:
+        run.exit_code = normalize_exit(proc.returncode)
+        run.elapsed = time.monotonic() - run.spawn_t
+
+
+# ── step 5 ──────────────────────────────────────────────────────────────────
+
+def acquire_global_lock(run: Run) -> None:
+    """The concurrency-1 semaphore: wait up to JOB_GLOBAL_WAIT_S, interruptible (R4). Expiry → skipped."""
+    run.global_lock = jc.flock_wait(jc.GLOBAL_LOCK, jc.JOB_GLOBAL_WAIT_S, should_abort=ABORT.is_set)
+    check_abort(run)
+    if run.global_lock is None:
+        raise Concluded(Verdict("skipped", "concurrency limit: another job is running", reason="concurrency_limit",
+                                extra={"holder": jc.read_lock_info(jc.GLOBAL_LOCK)}))
+    jc.write_lock_info(run.global_lock, {"pid": os.getpid(), "pgid": os.getpgrp(), "job": run.name,
+                                         "run_id": run.run_id, "started_at": jc.now_iso()})
+
+
+def release_global_lock(run: Run) -> None:
+    """The semaphore guards claude + the cost rollup only; the notifier and pruning must not hold up the next job."""
+    jc.unlock(run.global_lock)
+    run.global_lock = None
+
+
+# ── step 6 ──────────────────────────────────────────────────────────────────
+
+def validate_everything(run: Run) -> None:
+    """CLI preflight verdict (A16), full semantic validation, then input validation. Any failure = row 1, $0."""
+    if not run.preflight.get("ok"):
+        missing = ", ".join(run.preflight.get("missing") or []) or run.preflight.get("error") or "unknown"
+        raise Concluded(Verdict("error", f"cli preflight failed: installed claude lacks {missing}", reason="cli_preflight_failed"))
+    if run.preflight.get("json_schema_fallback"):
+        raise Concluded(Verdict("error", "installed claude lacks --json-schema; structured results are unsupported "
+                                         "by this add-on version", reason="no_structured_output_support"))
+    errors, warnings = jobdef.validate(run.job, notify_config=run.notify_cfg)
+    for w in warnings:
+        log(f"warning: {w}")
+    if not errors and run.job.kind == "action":
+        errors = ["kind: action jobs are fired by action taps, not run directly"]
+    if errors:
+        raise Concluded(invalid_verdict("invalid_definition", list(errors)))
+    read_input(run)
+    run.input_errors += jobdef.validate_input(run.job, run.input)
+    if run.input_errors:
+        raise Concluded(invalid_verdict("invalid_input", run.input_errors))
+    if run.input:
+        run.input = jobdef.apply_input_defaults(run.job, run.input)
+
+
+def read_input(run: Run) -> None:
+    """--input-file (endpoint inbox JSON; consumed in cleanup by the process that owned the run) or --input k=v."""
+    if run.input_file:
+        run.input, errors = jobdef.read_input_file(run.input_file)
+    elif run.input_pairs:
+        run.input, errors = jobdef.parse_input_pairs(run.input_pairs)
+    else:
+        return
+    run.input_errors += errors
+
+
+# ── step 7 ──────────────────────────────────────────────────────────────────
+
+def stage_run(run: Run) -> None:
+    """Start the broker, learn HA's time zone through it (= end-to-end readiness, A12), write the caged files."""
+    run.staged, run.nonce = True, secrets.token_hex(32)
+    if not os.environ.get("SUPERVISOR_TOKEN"):
+        log("warning: SUPERVISOR_TOKEN is not set (not running under the Supervisor?): publishing to Home Assistant "
+            "and the job's own `ha`/MCP reads will fail")
+    start_broker(run)
+    run.tz = fetch_time_zone(run)
+    check_abort(run)
+    run.schema = jobdef.result_schema(run.job)
+    jc.atomic_write_json(run.settings_path, jobdef.compose_settings(run.job, jobdef.load_policy()), mode=0o600)
+    jc.atomic_write_json(run.mcp_path, jobdef.mcp_config(run.job, run.broker_port, run.nonce), mode=0o600)
+
+
+def start_broker(run: Run) -> None:
+    """2i: python3 ha_broker.py --port-file …; it prints one {"event":"ready","port":N} line within 5 s."""
+    env = {k: v for k, v in os.environ.items()
+           if k in ("PATH", "CLAUDE_JOB_SUPERVISOR_URL", "PYTHONDONTWRITEBYTECODE") or k.startswith("CLAUDE_JOB_BROKER_")}
+    env.update({"CLAUDE_JOB_BROKER_NONCE": run.nonce,
+                "SUPERVISOR_TOKEN": os.environ.get("SUPERVISOR_TOKEN") or "unset-supervisor-token"})
+    run.broker = subprocess.Popen([sys.executable, str(jc.BROKER_SCRIPT), "--port-file", run.port_path],
+                                  env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, close_fds=True)
+    line = read_line_polling(run, run.broker.stdout, BROKER_READY_WAIT_S)
+    try:
+        run.broker_port = int(json.loads(line or b"{}")["port"])
+    except (ValueError, KeyError, TypeError):
+        raise Concluded(Verdict("error", f"broker failed to start (exit {run.broker.poll()}, said {line!r})", reason="runner_crash"))
+
+
+def read_line_polling(run: Run, stream, budget_s: float) -> Optional[bytes]:
+    """Read one line from a child's stdout pipe without blocking past the abort flag."""
+    give_up, fd, buf = time.monotonic() + budget_s, stream.fileno(), b""
+    while time.monotonic() < give_up:
+        check_abort(run)
+        if select.select([fd], [], [], POLL_S)[0]:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break                                  # EOF: the broker died
+            buf += chunk
+            if b"\n" in buf:
+                return buf.split(b"\n", 1)[0]
+    return buf or None
+
+
+def fetch_time_zone(run: Run) -> str:
+    """GET /core/api/config through the broker with the nonce; `.time_zone`, fallback UTC (A12)."""
+    req = urllib.request.Request(f"http://127.0.0.1:{run.broker_port}/core/api/config",
+                                 headers={"Authorization": f"Bearer {run.nonce}"})
+    try:
+        with NO_PROXY_OPENER.open(req, timeout=INFLIGHT_HTTP_TIMEOUT_S) as resp:
+            tz = json.load(resp).get("time_zone")
+        if isinstance(tz, str) and tz:
+            return tz
+        log("warning: HA config has no time_zone; using UTC")
+    except Exception as exc:
+        log(f"warning: could not fetch HA time zone through the broker ({exc}); using UTC")
+    return "UTC"
+
+
+# ── step 8 ──────────────────────────────────────────────────────────────────
+
+def publish_running(run: Run) -> None:
+    """State marker `running` (what the tick's duty 1 reads), the minimal running entity, and the pgid file."""
+    run.started_at, run.t0 = jc.now_iso(), time.monotonic()      # the job's clock starts after the semaphore
+    run.deadline = iso_plus(run.started_at, run.job.timeout)
+    state = read_state(run)
+    state.update(base_state_fields(run, state))
+    state.update({"status": jobdef.RUNNING, "published": False,
+                  "run": {"run_id": run.run_id, "pid": os.getpid(), "pgid": os.getpgrp(),
+                          "started_at": run.started_at, "deadline": run.deadline, "timeout_s": run.job.timeout,
+                          "trigger": run.trigger, "attempt": 1, "model": run.job.model}})
+    write_state(run, state)
+    write_pgid_file(run)
+    if post_state(jc.entity_payload(state), INFLIGHT_HTTP_TIMEOUT_S):   # HA down → the tick retries (duty 2)
+        state["published"] = True
+        write_state(run, state)
+    check_abort(run)
+
+
+def write_pgid_file(run: Run) -> None:
+    """2f/A30: the single PID artifact the stop path and the tick read. child_pgid names the live timeout/claude group."""
+    body = {"pgid": os.getpgrp(), "pid": os.getpid(), "run_id": run.run_id, "job": run.name,
+            "started_at": run.started_at, "deadline": run.deadline}
+    if run.claude is not None:
+        body["child_pgid"] = run.claude.pid
+    jc.atomic_write_json(run.pgid_path, body, mode=0o600)
+
+
+# ── step 9 ──────────────────────────────────────────────────────────────────
+
+def spawn_claude(run: Run) -> None:
+    """The exact §4.4 invocation. stdout/stderr go to files, not pipes, so waiting is pure polling (R3)."""
+    if run.argv is None:
+        run.argv = jobdef.claude_argv(run.job, prompt=jobdef.assemble_prompt(run.job, run.input), schema=run.schema,
+                                     settings_path=run.settings_path, mcp_path=run.mcp_path,
+                                     contract=jobdef.load_contract(), broker_port=run.broker_port,
+                                     nonce=run.nonce, tz=run.tz, extra_env=jobdef.network_env_passthrough())
+    out = os.open(run.out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    err = os.open(run.err_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        # No start_new_session: GNU timeout puts itself (and claude) in its own process group anyway (A30);
+        # the pgid file's child_pgid is how the stop path and the tick reach that group.
+        run.claude = subprocess.Popen(run.argv, cwd=jc.PROJECT_DIR, stdin=subprocess.DEVNULL,
+                                      stdout=out, stderr=err, close_fds=True)
+    finally:
+        os.close(out)
+        os.close(err)
+    run.spawn_t = time.monotonic()
+    run.attempts += 1
+    run.exit_code, run.envelope = None, None
+    write_pgid_file(run)
+
+
+# ── step 10 ─────────────────────────────────────────────────────────────────
+
+def wait_and_judge(run: Run) -> Verdict:
+    """Wait for claude, judge by the §4.6 table; an auth-shaped failure gets exactly one retry (A.8)."""
+    verdict = run_attempt(run, auth_retried=False)
+    if verdict.extra.get("auth_shaped") and run.attempts == 1:
+        auth_retry_pause(run)
+        spawn_claude(run)
+        run.retried_auth = True
+        verdict = run_attempt(run, auth_retried=True)
+    return verdict
+
+
+def run_attempt(run: Run, *, auth_retried: bool) -> Verdict:
+    while run.claude.poll() is None:
+        check_abort(run)
+        time.sleep(POLL_S)
+    run.exit_code = normalize_exit(run.claude.returncode)
+    run.elapsed = time.monotonic() - run.spawn_t
+    if run.exit_code > 128:                           # killed by a signal: the stop path signals claude's group and ours
+        ABORT.wait(ABORT_RACE_WAIT_S)                 # almost together — if our TERM is in flight this is row 2, not row 4
+        check_abort(run)
+    verdict = judge(exit_code=run.exit_code, elapsed=run.elapsed, timeout_s=run.job.timeout,
+                    stdout=jc.read_text(run.out_path, "") or "", stderr=jc.read_text(run.err_path, "") or "",
+                    max_turns=run.job.max_turns, max_cost_usd=run.job.max_cost_usd, schema=run.schema,
+                    auth_retried=auth_retried)
+    run.envelope = verdict.extra.pop("envelope", None)   # judge() hands the parsed envelope back for the log
+    return verdict
+
+
+def auth_retry_pause(run: Run) -> None:
+    """Sleep base+jitter (a concurrent interactive refresh may land), extending the deadline the tick watches."""
+    wait = float(jc.AUTH_RETRY_BASE_S) + random.uniform(0, float(jc.AUTH_RETRY_JITTER_S))
+    log(f"auth-shaped failure; retrying once in {wait:.1f}s")
+    jc.append_jsonl(run.log_path, {"ts": jc.now_iso(), "event": "auth_retry", "job": run.name,
+                                   "run_id": run.run_id, "wait_s": round(wait, 1)})
+    run.deadline = iso_plus(jc.now_iso(), wait + run.job.timeout + float(jc.JOB_KILL_GRACE_S))
+    run.claude = None                                 # the first attempt's group is dead; don't advertise its pgid (A13)
+    state = read_state(run)
+    if isinstance(state.get("run"), dict):
+        state["run"].update({"deadline": run.deadline, "attempt": run.attempts + 1})
+        write_state(run, state)
+    write_pgid_file(run)
+    give_up = time.monotonic() + wait
+    while time.monotonic() < give_up:
+        check_abort(run)
+        time.sleep(POLL_S)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The judgment table (§4.6 rows 3–13; row 1 = invalid_verdict(), row 2 = check_abort()).
+# Pure function: no I/O, importable by tests.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def judge(*, exit_code: int, elapsed: float, timeout_s: int, stdout: str, stderr: str,
+          max_turns: int, max_cost_usd: float, schema: dict, auth_retried: bool) -> Verdict:
+    E = exit_code
+    envelope = parse_envelope(stdout)
+    if envelope is None:                               # exit codes matter only when nothing parsed
+        tail = {"raw_tail": (stdout + stderr)[-TAIL_CHARS:] or None, "envelope": None}
+        if E == 124 or (E == 137 and elapsed >= timeout_s):                                   # row 3
+            return Verdict("error", f"timed out after {timeout_s}s", reason="timeout", row=3,
+                           extra={**tail, "hard_killed": E == 137})
+        if E > 128 and elapsed < timeout_s:                                                    # row 4
+            return Verdict("aborted", f"killed externally after {elapsed:.0f}s", reason="killed", row=4,
+                           extra={**tail, "hard_killed": E == 137})
+        return Verdict("error", f"no result envelope (exit {E})", reason="no_envelope", row=5, extra=tail)  # row 5
+
+    facts = envelope_facts(envelope)
+    subtype = envelope.get("subtype")
+    if subtype == "error_max_turns":                                                           # row 6
+        return Verdict("error", f"hit max turns ({max_turns}) before finishing", reason="max_turns", row=6, extra=facts)
+    if subtype == "error_max_budget_usd":                                                      # row 7
+        return Verdict("error", f"stopped at budget cap ${max_cost_usd:.2f}", reason="max_budget", row=7, extra=facts)
+    if envelope.get("is_error") or subtype != "success":                                       # row 8
+        errors = envelope.get("errors") if isinstance(envelope.get("errors"), list) else []
+        text = str(errors[0]) if errors else str(envelope.get("result") or subtype or "unknown error")
+        facts["auth_shaped"] = bool(AUTH_RE.search(" ".join(map(str, errors)) + " " + str(envelope.get("result") or "")))
+        if facts["auth_shaped"] and auth_retried:
+            return Verdict("error", LOGIN_EXPIRED_HEADLINE, reason="login_expired", row=8, extra=facts)
+        return Verdict("error", cap(f"run failed: {text[:120]}"), reason="run_failed", row=8, extra=facts)
+
+    so = get_structured_result(envelope)
+    if so is None:                                                                             # row 9
+        facts["result_tail"] = str(envelope.get("result") or "")[-TAIL_CHARS:] or None
+        return Verdict("error", "completed without submitting a result", reason="no_result", row=9, extra=facts)
+    violation = schema_violation(so, schema)
+    if violation:                                                                              # row 10
+        facts["result_tail"] = json.dumps(so)[-TAIL_CHARS:]
+        return Verdict("error", cap(f"result failed schema validation: {violation}"), reason="schema", row=10, extra=facts)
+
+    status, headline = so["status"], so["headline"]
+    facts.update({"detail": so.get("detail") or "", "metrics": so.get("metrics") or {},
+                  "actions_selected": list(so.get("actions") or []), "over_budget": facts["cost_usd"] > max_cost_usd})
+    budget_prefix = "[over budget] " if facts["over_budget"] else ""
+    denials = envelope.get("permission_denials") if isinstance(envelope.get("permission_denials"), list) else []
+    if denials:                                                                                # row 11 (prefixes stack)
+        facts["detail"] += denial_section(facts["permission_denials"])
+        return Verdict(jobdef.escalate(status, "warning"), cap(denial_prefix(denials) + budget_prefix + headline), row=11, extra=facts)
+    if facts["over_budget"]:                                                                  # row 12
+        return Verdict(jobdef.escalate(status, "warning"), cap(budget_prefix + headline), row=12, extra=facts)
+    return Verdict(status, cap(headline), row=13, extra=facts)                                # row 13
+
+
+def parse_envelope(stdout: str) -> Optional[dict]:
+    """stdout of a finished run is ONE JSON object with type=result (A5); tolerate leading noise via the last line."""
+    text = stdout.strip()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    for cand in [text] + ([lines[-1]] if lines and lines[-1] != text else []):
+        try:
+            obj = json.loads(cand)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and ("type" in obj or "subtype" in obj):
+            return obj
+    return None
+
+
+def envelope_facts(envelope: dict) -> dict:
+    """The envelope fields every post-envelope row records (2b result)."""
+    denials = envelope.get("permission_denials") if isinstance(envelope.get("permission_denials"), list) else []
+    model_usage = envelope.get("modelUsage") if isinstance(envelope.get("modelUsage"), dict) else {}
+    cost = envelope.get("total_cost_usd")
+    return {
+        "envelope": envelope,
+        "session_id": envelope.get("session_id"),
+        "envelope_subtype": envelope.get("subtype"),
+        "is_error": bool(envelope.get("is_error")),
+        "num_turns": envelope.get("num_turns"),
+        "cost_usd": float(cost) if isinstance(cost, (int, float)) else 0.0,
+        "model_resolved": next(iter(model_usage), None),
+        "permission_denials": [{"tool_name": d.get("tool_name"), "tool_input": d.get("tool_input")}
+                               for d in denials[:DENIALS_CAP] if isinstance(d, dict)],
+    }
+
+
+def get_structured_result(envelope: dict) -> Optional[dict]:
+    """The A16 seam: today the native --json-schema `structured_output`; a v1.x MCP fallback plugs in here."""
+    so = envelope.get("structured_output")
+    return so if isinstance(so, dict) else None
+
+
+def schema_violation(so: dict, schema: dict) -> Optional[str]:
+    """Runner-side re-validation of the model's result (defense in depth; row 10, never a crash)."""
+    try:
+        import jsonschema
+        errors = sorted(jsonschema.Draft202012Validator(schema).iter_errors(so), key=lambda e: [str(p) for p in e.path])
+    except Exception as exc:                          # a broken validator install must not pass results silently
+        return f"validator unavailable: {exc}"
+    if not errors:
+        return None
+    where = "/".join(str(p) for p in errors[0].path) or "(root)"
+    return f"{where}: {errors[0].message}"[:200]
+
+
+def denial_prefix(denials: list) -> str:
+    counts = collections.Counter(str(d.get("tool_name") or "?") if isinstance(d, dict) else "?" for d in denials)
+    return "[denied: " + ", ".join(f"{tool}×{n}" for tool, n in counts.items()) + "] "
+
+
+def denial_section(denials: list) -> str:
+    lines = [f"- {d['tool_name'] or '?'}: {json.dumps(d['tool_input'], separators=(',', ':'))[:200]}" for d in denials]
+    return "\n\n---\nDenied tool calls:\n" + "\n".join(lines)
+
+
+def cap(headline: str) -> str:
+    return headline if len(headline) <= HEADLINE_CAP else headline[:HEADLINE_CAP - 1] + "…"
+
+
+def normalize_exit(returncode: int) -> int:
+    """Python reports death-by-signal as -N; the table speaks shell (128+N): -9 ≡ 137, -15 ≡ 143 (A30)."""
+    return 128 - returncode if returncode < 0 else returncode
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# finish() — steps 11–14, the single exit funnel (breakdown 2g (a)–(f))
+# ─────────────────────────────────────────────────────────────────────────────
+
+def finish(run: Run, verdict: Verdict) -> int:
+    """Every path that owns the job lock ends here: persist → log → publish → notify → prune → cleanup → exit code."""
+    run.finishing = True                              # the abort flag is ignored from here on …
+    if ABORT.is_set() and not run.aborting:           # … but one that landed after the last polling point still
+        run.aborting, verdict = True, abort_verdict(run)   # means the add-on is stopping: row 2, 4 s budget
+    aborting = run.aborting                           # A17: the TERM path has no time for the notifier
+    notifier = None if aborting else shutil.which(str(jc.NOTIFY_BIN))   # PR 1 may ship without one at all
+    notify_status = "skipped_aborting" if aborting else (None if notifier else "skipped_no_notifier")
+    try:
+        state = persist_terminal_state(run, verdict, notify_status)   # (a) step 11: state file, published:false
+    except Exception as exc:                                       #     nothing durable → the run failed (A2: 1)
+        traceback.print_exc(file=sys.stderr)
+        return leave_early(run, EarlyExit(1, f"runner crashed: could not persist the result: {exc}",
+                                          status="error", reason="runner_crash"))
+    guarded("run log", append_run_record, run, verdict, state)     # (b) step 11: JSONL
+    guarded("publish", publish_terminal, run, state, aborting)     # (c) step 12: entity (+ cost rollup, cost_raw)
+    release_global_lock(run)
+    if notifier:
+        guarded("notifier", run_notifier, run, state, notifier)     # (d) step 13, then one re-POST
+    if not aborting:
+        guarded("pruning", prune_history, run)                     # (e) A.6/A.7
+    cleanup(run)                                                   # (f) step 14
+    print_outcome(run, state["result"])
+    return exit_code_for(verdict, aborting)
+
+
+def guarded(what: str, step, *args) -> None:
+    """After (a) the result is durable; a failure in a later sub-step is logged and the rest still run."""
+    try:
+        step(*args)
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        log(f"warning: {what} failed; continuing")
+
+
+# ── (a) persist ─────────────────────────────────────────────────────────────
+
+def persist_terminal_state(run: Run, v: Verdict, notify_status: Optional[str]) -> dict:
+    state = read_state(run)
+    previous = state.get("result") if isinstance(state.get("result"), dict) else None
+    stats = state.get("stats") if isinstance(state.get("stats"), dict) else {}
+    skipped, last_skip_at = fold_skipcount(run)
+    stats = {"run_count": as_int(stats.get("run_count")) + (0 if v.status == "skipped" else 1),
+             "skipped_since_last": skipped, "last_skip_at": last_skip_at,
+             "first_seen": stats.get("first_seen") or run.started_at or jc.now_iso()}
+    notify = state.get("notify") if isinstance(state.get("notify"), dict) else {}
+    notify = {"channels": jobdef.resolve_channels(v.status, run.job, run.notify_cfg), "notify_status": notify_status,
+              "last_notified": notify.get("last_notified")}
+    state.update(base_state_fields(run, state))
+    state.update({"status": v.status, "published": False, "run": None, "result": build_result(run, v),
+                  "prev_status": previous.get("status") if previous else None, "stats": stats, "notify": notify})
+    write_state(run, state)
+    return state
+
+
+def build_result(run: Run, v: Verdict) -> dict:
+    """2b `result`: everything the entity, the endpoint and the notifier need about this run."""
+    x = v.extra
+    ended_at = jc.now_iso()
+    return {
+        "run_id": run.run_id, "session_id": x.get("session_id"), "status": v.status, "headline": v.headline,
+        "detail": str(x.get("detail") or "")[:jc.DETAIL_MAX], "reason": v.reason, "judgment_row": v.row,
+        "envelope_subtype": x.get("envelope_subtype"), "is_error": x.get("is_error", False),
+        "exit_code": run.exit_code, "hard_killed": bool(x.get("hard_killed", False)),
+        "started_at": run.started_at or ended_at, "ended_at": ended_at,
+        "duration_s": round(time.monotonic() - run.t0, 1) if run.t0 else 0.0,
+        "cost_usd": round(float(x.get("cost_usd") or 0.0), 4), "over_budget": bool(x.get("over_budget", False)),
+        "model": run.job.model if run.job else None, "model_resolved": x.get("model_resolved"),
+        "trigger": run.trigger, "attempts": run.attempts, "retried_auth": run.retried_auth,
+        "claude_version": (run.preflight or {}).get("claude_version"), "num_turns": x.get("num_turns"),
+        "permission_denials": x.get("permission_denials") or [], "validation_errors": x.get("validation_errors") or [],
+        "metrics": x.get("metrics") or {}, "actions_selected": x.get("actions_selected") or [],
+        "input": run.input, "raw_tail": x.get("raw_tail"), "result_tail": x.get("result_tail"),
+        "holder": x.get("holder"),
+    }
+
+
+def fold_skipcount(run: Run):
+    """Move state/<name>.skipcount into stats.skipped_since_last and delete the side file (2b)."""
+    try:
+        count = as_int(jc.read_text(run.skipcount_path, "0").strip())
+        at = jc.iso(datetime.datetime.fromtimestamp(os.stat(run.skipcount_path).st_mtime, datetime.timezone.utc))
+        os.unlink(run.skipcount_path)
+        return count, at
+    except OSError:
+        return 0, None
+
+
+# ── (b) log ─────────────────────────────────────────────────────────────────
+
+def append_run_record(run: Run, v: Verdict, state: dict) -> None:
+    """One JSONL line per finished run (2c) — or the event-only line for the skipped variants."""
+    if v.status == "skipped":
+        event = {"concurrency_limit": "skipped_concurrency", "disabled": "skipped_disabled_first"}.get(v.reason, "skipped")
+        jc.append_jsonl(run.log_path, {"ts": jc.now_iso(), "event": event, "job": run.name, "run_id": run.run_id,
+                                       "trigger": run.trigger, "reason": v.reason, "holder": v.extra.get("holder")})
+        return
+    result = state["result"]
+    jc.append_jsonl(run.log_path, fit_line({
+        "ts": jc.now_iso(), "event": "run", "job": run.name, "run_id": run.run_id, "session_id": result["session_id"],
+        "trigger": run.trigger, "claude_version": result["claude_version"], "argv": elide_argv(run.argv),
+        "exit": run.exit_code, "elapsed_s": round(run.elapsed, 1), "timeout_s": run.job.timeout if run.job else None,
+        "attempts": run.attempts, "retried_auth": run.retried_auth, "envelope": envelope_for_log(run.envelope),
+        "judgment_row": v.row, "state": v.status, "headline": v.headline, "reason": v.reason,
+        "cost_usd": result["cost_usd"], "hard_killed": result["hard_killed"],
+        "validation_errors": result["validation_errors"], "denials": len(result["permission_denials"]),
+        "input": run.input}))
+
+
+def fit_line(record: dict) -> dict:
+    """2c line cap: over 16 KiB drop envelope.result, then the whole envelope (envelope_dropped: true)."""
+    if len(json.dumps(record, separators=(",", ":"))) > JSONL_LINE_CAP and record.get("envelope"):
+        record["envelope"].pop("result", None)
+    if len(json.dumps(record, separators=(",", ":"))) > JSONL_LINE_CAP:
+        record["envelope"], record["envelope_dropped"] = None, True
+    return record
+
+
+def elide_argv(argv: Optional[list]) -> Optional[list]:
+    """The prompt, schema and contract are long and reproducible; log their size (and the prompt's hash) instead.
+    The broker nonce is redacted too: worthless once the broker exits, but the log outlives the run."""
+    if argv is None:
+        return None
+    out, previous = [], None
+    for arg in argv:
+        if arg.startswith("CLAUDE_JOB_BROKER_NONCE="):
+            out.append("CLAUDE_JOB_BROKER_NONCE=<redacted>")
+        elif previous == "-p":
+            out.append(f"<prompt sha256={hashlib.sha256(arg.encode()).hexdigest()[:12]}… len={len(arg)}>")
+        elif previous == "--json-schema":
+            out.append(f"<schema len={len(arg)}>")
+        elif previous == "--append-system-prompt":
+            out.append(f"<contract len={len(arg)}>")
+        else:
+            out.append(arg)
+        previous = arg
+    return out
+
+
+def envelope_for_log(envelope: Optional[dict]) -> Optional[dict]:
+    if envelope is None:
+        return None
+    logged = dict(envelope)
+    if isinstance(logged.get("result"), str) and len(logged["result"]) > ENVELOPE_RESULT_LOG_CAP:
+        logged["result"] = logged["result"][:ENVELOPE_RESULT_LOG_CAP] + "…"
+    return logged
+
+
+# ── (c) publish ─────────────────────────────────────────────────────────────
+
+def publish_terminal(run: Run, state: dict, aborting: bool) -> None:
+    timeout = float(jc.JOB_TERM_PUBLISH_TIMEOUT_S) if aborting else PUBLISH_TIMEOUT_S
+    if post_state(jc.entity_payload(state), timeout):
+        state["published"] = True
+        write_state(run, state)
+    if run.envelope is not None and not aborting:     # rows ≥ 6: a real invocation happened (even at $0); B3: not in the 4 s budget
+        post_state(jc.cost_entity_payload(jc.cost_add(run.name, state["result"]["cost_usd"], run.tz)), timeout)
+
+
+def post_state(payload, timeout: float) -> bool:
+    """POST one (entity_id, state, attrs) triple built by jobcommon; a failed POST is data (published:false), never fatal."""
+    entity_id, state_str, attrs = payload
+    ok, http_status = jc.ha_post_state(entity_id, state_str, attrs, timeout=timeout)
+    if not ok:
+        log(f"warning: HA did not accept {entity_id} (HTTP {http_status}); the tick will retry")
+    return bool(ok)
+
+
+# ── (d) notify ──────────────────────────────────────────────────────────────
+
+def run_notifier(run: Run, state: dict, notifier: str) -> None:
+    """Step 13: hand the state file to claude-job-notify, keep its one JSON line, re-POST so notify_status is current."""
+    reply = call_notifier(notifier, run)
+    state["notify"]["notify_status"] = str((reply or {}).get("notify_status") or "error:notifier_failed")
+    if reply and "last_notified" in reply:
+        state["notify"]["last_notified"] = reply["last_notified"]
+    write_state(run, state)
+    post_state(jc.entity_payload(state), PUBLISH_TIMEOUT_S)   # best effort; `published` already reflects step 12 (R10)
+
+
+def call_notifier(notifier: str, run: Run) -> Optional[dict]:
+    try:
+        done = subprocess.run([notifier, run.name, "--state-file", run.state_path], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=float(jc.NOTIFIER_TIMEOUT_S))
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"warning: notifier failed: {exc}")
+        return None
+    if done.stderr:
+        sys.stderr.write(done.stderr)
+    lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
+    try:
+        reply = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        reply = None
+    if not isinstance(reply, dict) or done.returncode != 0:
+        log(f"warning: notifier exited {done.returncode} with unusable output {done.stdout[:200]!r}")
+        return None
+    return reply
+
+
+# ── (e) prune, (f) cleanup ──────────────────────────────────────────────────
+
+def prune_history(run: Run) -> None:
+    jc.prune_jsonl(run.log_path)
+    jc.prune_transcripts()
+
+
+def cleanup(run: Run) -> None:
+    """Kill the broker, drop what THIS invocation created. Locks are released by process exit."""
+    kill_child(run)
+    stop_broker(run)
+    if run.job_lock is not None and run.input_file:  # the inbox hand-off is single-use — but only the run's owner may
+        consume_inbox_file(run.input_file)            # eat it (a detaching parent or a skipper leaves it; the tick sweeps)
+    if run.staged:                                    # never touch a live sibling's per-run files (overlap/stopping/detach)
+        for path in (run.settings_path, run.mcp_path, run.port_path, run.out_path, run.err_path, run.pgid_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def consume_inbox_file(path: str) -> None:
+    try:
+        if os.path.dirname(os.path.realpath(path)) == os.path.realpath(jc.INBOX_DIR):   # a human's own file is left alone
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def stop_broker(run: Run) -> None:
+    proc, run.broker = run.broker, None
+    if proc is None:
+        return
+    for nudge in (proc.terminate, proc.kill):
+        if proc.poll() is not None:
+            break
+        try:
+            nudge()
+            proc.wait(1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if proc.stdout:
+        proc.stdout.close()
+
+
+# ── outcome reporting and small state helpers ───────────────────────────────
+
+def exit_code_for(v: Verdict, aborting: bool) -> int:
+    """CONTRACTS A2."""
+    if aborting or (v.status == "aborted" and v.row == 2):
+        return 143
+    if v.status in jobdef.CONTRACT_STATUSES:
+        return 0
+    if v.status == "skipped":
+        return 3
+    if v.reason in ("invalid_definition", "invalid_input"):
+        return 2
+    return 1
+
+
+def print_outcome(run: Run, result: dict) -> None:
+    """stdout contract (2g): one summary line, or with --json the result object."""
+    if run.json_out:
+        print(json.dumps(result))
+        return
+    bits = [result["run_id"], f"{result['duration_s']}s", f"${float(result['cost_usd']):.2f}"]
+    if result.get("judgment_row") is not None:
+        bits.append(f"row {result['judgment_row']}")
+    print(f"{run.name}: {result['status']} — {result['headline']} ({' · '.join(bits)})")
+
+
+def read_state(run: Run) -> dict:
+    return jc.read_state(run.name) or {}              # {} also for a corrupt/non-object file
+
+
+def write_state(run: Run, state: dict) -> None:
+    state["updated_at"] = jc.now_iso()
+    jc.atomic_write_json(run.state_path, state, mode=0o644)
+
+
+def base_state_fields(run: Run, previous: dict) -> dict:
+    """Fields every runner write refreshes (2b ownership table); a job that failed to load keeps the old copies."""
+    return {"schema": 1, "job": run.name, "slug": run.slug,
+            "enabled": not jc.is_flag_disabled(run.name) and (run.job.enabled if run.job else True),
+            "description": run.job.description if run.job else previous.get("description"),
+            "stale_after": run.job.stale_after if run.job else previous.get("stale_after")}
+
+
+def as_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def iso_plus(iso: str, seconds: float) -> str:
+    return jc.iso(jc.parse_iso(iso) + datetime.timedelta(seconds=seconds))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# dry-run, list, validate, enable/disable, token
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cmd_dry_run(args) -> int:
+    """Everything a run would compose, printed; no broker, no locks, no HTTP, no state writes, no tokens spent."""
+    job, errors, warnings = jobdef.load_and_validate(args.name)
+    run = Run(name=args.name, trigger="manual", forced=False, run_id="run-19700101T000000Z-0000", json_out=False,
+              input_file=args.input_file, input_pairs=args.input, job=job)
+    if job is not None:
+        read_input(run)
+        errors = list(errors) + run.input_errors + jobdef.validate_input(job, run.input)
+    section("validation", "\n".join([f"error: {e}" for e in errors] + [f"warning: {w}" for w in warnings]) or "OK")
+    section("preflight", json.dumps(quietly("cli preflight", jc.cli_preflight, {"ok": False}), indent=2))
+    if job is None:
+        return 2
+    cfg = quietly("_notify.yaml", jobdef.load_notify_config, None)
+    schema = jobdef.result_schema(job)
+    section("settings.json", json.dumps(jobdef.compose_settings(job, jobdef.load_policy()), indent=2))
+    section("mcp.json", json.dumps(jobdef.mcp_config(job, 0, "<nonce>"), indent=2).replace("127.0.0.1:0/", "127.0.0.1:<port>/"))
+    section("result schema", json.dumps(schema, indent=2))
+    section("tools", jobdef.tools_csv(job) or '""')
+    section("notify channels", "\n".join(f"{s}: {jobdef.resolve_channels(s, job, cfg) or ['state_only']}" for s in jobdef.NOTIFY_KEYS))
+    prompt = jobdef.assemble_prompt(job, jobdef.apply_input_defaults(job, run.input) if run.input else None)
+    section("prompt", indent(prompt))
+    argv = jobdef.claude_argv(job, prompt=prompt, schema=schema, settings_path=run.settings_path, mcp_path=run.mcp_path,
+                              contract=CONTRACT_PLACEHOLDER, broker_port=0, nonce="<nonce>", tz="<ha time zone>",
+                              extra_env=jobdef.network_env_passthrough())
+    argv = ["CLAUDE_JOB_BROKER_PORT=<port>" if a == "CLAUDE_JOB_BROKER_PORT=0" else a for a in argv]
+    # Prompt and contract are long Markdown; show them the way the design writes the invocation (§4.4):
+    # `-p "$PROMPT"` (the "## prompt" section above) and `$(cat …/job-contract.md)`.
+    command = shlex.join(str(a) for a in argv)
+    command = command.replace(shlex.quote(prompt), '"$PROMPT"', 1)
+    command = command.replace(shlex.quote(CONTRACT_PLACEHOLDER), '"$(cat %s/job-contract.md)"' % jc.SHARE_DIR)
+    section("command", "# PROMPT = the prompt section above; cwd " + str(jc.PROJECT_DIR) + "\n" + command + " < /dev/null")
+    return 2 if errors else 0
+
+
+CONTRACT_PLACEHOLDER = "<contract: job-contract.md>"
+
+
+def section(title: str, body: str) -> None:
+    print(f"## {title}\n{body}\n")
+
+
+def indent(text: str) -> str:
+    """Four-space indent so a job body's own `## ` headings cannot be mistaken for dry-run sections."""
+    return "\n".join("    " + line if line else "" for line in text.splitlines())
+
+
+def cmd_list(args) -> int:
+    jobs, ignored = jobdef.list_job_files(jc.JOBS_DIR)
+    rows = []
+    for name, _path in jobs:
+        job, errors, _warnings = jobdef.load_and_validate(name)
+        rows.append(jc.job_summary(name, job, jc.read_state(name), load_errors=errors))
+    ignored_rows = [{"file": f, "reason": r} for f, r in ignored]
+    if args.json:
+        print(json.dumps({"jobs": rows, "ignored": ignored_rows}))
+        return 0
+    table = [("NAME", "KIND", "ENABLED", "STATUS", "LAST_RUN", "STALE", "MODEL", "DESCRIPTION")]
+    for r in rows:
+        table.append((str(r["name"]), str(r.get("kind") or "-"), "yes" if r.get("enabled") else "no",
+                      str(r.get("status") if r.get("valid") else "invalid"), str(r.get("last_run") or "-"),
+                      "yes" if r.get("stale") else "no", str(r.get("model") or "-"), str(r.get("description") or "")[:60]))
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    for row in table:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+    if ignored_rows:
+        print("\nignored files:")
+        for ig in ignored_rows:
+            print(f"  {ig['file']}: {ig['reason']}")
+    return 0
+
+
+def cmd_validate(args) -> int:
+    if args.all == bool(args.name):
+        log("validate: give a job name or --all")
+        return 2
+    jobs, ignored = jobdef.list_job_files(jc.JOBS_DIR)
+    reports = []
+    for name in ([n for n, _ in jobs] if args.all else [args.name]):
+        if not os.path.isfile(jobdef.job_path(name)):
+            reports.append({"name": name, "valid": False, "errors": [f"unknown job: no {jobdef.job_path(name)}"], "warnings": []})
+            continue
+        _job, errors, warnings = jobdef.load_and_validate(name)
+        reports.append({"name": name, "valid": not errors, "errors": list(errors), "warnings": list(warnings)})
+    valid = all(r["valid"] for r in reports)
+    if args.json and args.all:
+        print(json.dumps({"valid": valid, "jobs": reports, "ignored": [{"file": f, "reason": r} for f, r in ignored]}))
+    elif args.json:
+        print(json.dumps(reports[0]))
+    else:
+        for r in reports:
+            if r["valid"] and not r["warnings"]:
+                print(f"{r['name']}: OK")
+                continue
+            print(f"{r['name']}: {len(r['errors'])} error(s), {len(r['warnings'])} warning(s)")
+            for kind in ("error", "warning"):
+                for msg in r[kind + "s"]:
+                    print(f"  {kind}: {msg}")
+    return 0 if valid else 2
+
+
+def cmd_set_enabled(name: str, enabled: bool) -> int:
+    if not os.path.isfile(jobdef.job_path(name)):
+        log(f"unknown job: {name}")
+        return 2
+    try:
+        frontmatter_enabled = jobdef.load(name).enabled
+    except Exception:                                 # a broken file is still worth switching off/on
+        frontmatter_enabled = True
+    outcome = jc.set_enabled(name, enabled, frontmatter_enabled=frontmatter_enabled)
+    if not enabled:
+        print(f"{name}: disabled (flag file created)")
+    elif outcome.get("enabled"):
+        print(f"{name}: enabled")
+    else:
+        print(f"{name}: flag removed, but frontmatter says enabled: false")
+    return 0
+
+
+def cmd_token(action: str) -> int:
+    token = jc.read_token()
+    well_formed = bool(token) and re.fullmatch(r"[0-9a-f]{%d}" % jc.TOKEN_HEX_CHARS, token) is not None
+    try:
+        if action == "show":
+            if not token:
+                print("no token yet (enable_job_endpoint is off or the add-on has not restarted)")
+                return 2
+            print(token)
+        elif action == "ensure":                      # boot-time, idempotent; prints the path, never the token
+            if not well_formed:
+                jc.write_token()
+            print(jc.TOKEN_FILE)
+        else:
+            jc.write_token()
+            print("token rotated; restart the add-on (or run: python3 /usr/local/lib/claude-job/render_package.py) "
+                  "so Home Assistant's package picks it up")
+    except OSError as exc:
+        log(f"cannot write {jc.TOKEN_FILE}: {exc}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
