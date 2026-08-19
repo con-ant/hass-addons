@@ -165,7 +165,6 @@ Check Home Assistant's health: run `ha core check`, read `ha resolution info`,
 `ha supervisor info` and the recent error log, ...
 ```
 
-In this release `notify:`,
 `renag_every:` and `notify_recovery:` are validated but nothing is delivered yet
 (`notify_status: skipped_no_notifier`), and `input:` can only be supplied with
 `--input`/`--input-file` on the command line.
@@ -405,3 +404,104 @@ built with, plus `preflight: {"ok": …, "missing": […]}`.
 
 All of `~/.claude/jobs/` and the transcripts are inside your Home Assistant backups, which
 is why the bounds exist. Transcripts contain everything the job read.
+
+## Notifications
+
+After the entity is published, the result is handed to a small notifier that maps the
+result state to channels and calls Home Assistant services through the Supervisor. It is
+the only component that knows about phones; the job itself has no way to notify anyone.
+
+| Channel | Mechanism | Notes |
+|---|---|---|
+| `persistent` | `persistent_notification.create` with `notification_id: claude_job_<slug>` | the same id **replaces** the sidebar notification in place; dismissed automatically when the job returns to `ok`. Message = headline, full `detail` (Markdown), run id, time and cost |
+| `state_only` | nothing beyond the entity | `[state_only]` and `[]` mean the same |
+| `mobile` | `notify.mobile_app_*` — every registered phone, or the `_notify.yaml` subset | title `Warning · <job>` (≤ 100 chars), message = headline (≤ 1000 chars); `tag: claude_job_<slug>` replaces the previous push for that job, `group: claude_jobs` threads them; tapping opens `dashboard_path` if configured |
+| `mobile_critical` | same targets, one payload for both platforms | iOS critical alert (`push.sound.critical: 1`, plays through silent mode); Android `ttl: 0`, `priority: high`, channel "Claude Jobs Critical". See the Android note below |
+| `notify_default` | `notify.notify` `{title, message}` | your default notify group; exists only once some notify platform is configured |
+| `webhook` | `POST` the result as JSON to the URL in `_notify.yaml`; always sent last | body `{job, slug, status, headline, detail, run_id, ended_at, cost_usd, metrics, entity_id, prev_status}`; connection errors and 5xx are retried after 2 s and 5 s (4xx is not), within the notifier's 40 s overall budget (`error:webhook:deadline` when it runs out); a failing webhook never changes the job's state. Slack/Telegram/ntfy without the add-on knowing any of them |
+
+**Fallback chain**, per send: `mobile` with no usable phone (none registered, or none of
+the configured `targets` exists) → `notify_default` → (service absent) → `persistent`.
+`mobile_critical` degrades down the same chain with the title prefixed `CRITICAL ·` — the
+critical flag is lost, the word is not. Every hop is recorded in the entity's
+`notify_status` attribute.
+
+**Android: one manual step per phone.** Android does not let an app bypass Do Not
+Disturb on its own. The first `mobile_critical` push creates a notification channel named
+**"Claude Jobs Critical"** on the phone; open the Home Assistant app's notification
+settings (Android Settings → Apps → Home Assistant → Notifications → Claude Jobs Critical)
+and enable **Override Do Not Disturb** once. Until you do, critical results arrive as
+ordinary high-priority notifications. The add-on log prints a reminder the first time it
+sends a critical push for a job. iOS critical alerts need no setup beyond allowing
+"Critical Alerts" for the Home Assistant app when iOS asks.
+
+### `_notify.yaml`
+
+Optional; without it every registered phone is a target and the channels above work with
+their defaults. A commented example is refreshed at every start as
+`~/.claude/jobs/_notify.example.yaml` (pristine copy: `/usr/share/claudecode/notify.example.yaml`):
+
+```bash
+cp /usr/share/claudecode/notify.example.yaml ~/.claude/jobs/_notify.yaml
+```
+
+```yaml
+# ~/.claude/jobs/_notify.yaml — every key optional
+mobile:
+  targets: [mobile_app_pixel_8, mobile_app_iphone]   # default: all notify.mobile_app_* services
+android:
+  channel: Claude Jobs                 # channel for mobile pushes
+  critical_channel: Claude Jobs Critical   # channel for mobile_critical (the one to grant DND override)
+webhook:
+  url: https://ntfy.sh/my-topic        # required before any job may name the `webhook` channel
+  headers: {Authorization: "Bearer …"} # sent verbatim
+  timeout_s: 10                        # 1..30 per attempt; all sends share one 40 s budget
+dashboard_path: /lovelace/claude       # tapping a push opens this view (iOS url / Android clickAction)
+severities:                            # install-wide per-state override, same shape as a job's notify:
+  warning: [persistent]
+# tts: / file:  — reserved names; accepted and ignored with a warning
+```
+
+Resolution order per state: the job's `notify:` → `_notify.yaml` `severities:` → the
+built-in defaults ("Result states" table). Unknown keys in `_notify.yaml` are reported by
+`claude-job validate` as warnings and otherwise ignored. **`webhook.headers` are plaintext
+secrets on the volume**: jobs cannot read them (the whole jobs directory is in the deny
+baseline), but the interactive session, anyone with file access, and your HA backups can.
+
+### When you get notified again (dedupe and re-nag)
+
+The notifier remembers the last state and a hash of the last headline per job:
+
+- Severity changed (either direction) or the headline text changed → **full** notification
+  on every mapped channel.
+- Same state, same headline as last time → **quiet**: the persistent notification is
+  refreshed in place, phones are not buzzed again. Confirmation is not news. This is why a
+  job should put the number in its headline: "3 integrations failing" becoming "4" is a
+  new headline and pushes again.
+- Unchanged `critical` → re-pushed to phones every `renag_every` consecutive repeats
+  (frontmatter, default 3, `0` = never re-nag).
+- Back to `ok` after anything worse (**recovery**) → the earlier finding's sidebar
+  notification is **dismissed** and the job's `ok` mapping is sent, with any phone channel
+  in it delivering `Resolved: <headline>` (as an ordinary push, never a critical alert).
+  With the default `ok: [state_only]` that means dismiss only; `notify_recovery: true`
+  adds one `Resolved:` push to the phones when the `ok` mapping has no phone channel of
+  its own.
+- `error`, `skipped` and `aborted` never dedupe — infrastructure failures always follow
+  their mapping — and they never dismiss an earlier finding's sidebar note (`error`/
+  `aborted` replace it when `persistent` is in their mapping; `skipped` leaves it
+  standing). Exception: a run aborted by an add-on stop or restart publishes the `aborted`
+  entity but sends nothing (`notify_status: skipped_aborting`); it was almost certainly you
+  restarting it.
+- `webhook` is a data feed: it receives every result regardless of the above, after the
+  other channels.
+
+### Reading `notify_status`
+
+The entity's `notify_status` attribute says exactly what happened, as `;`-separated
+tokens: `sent:persistent,mobile(2)` (sent, with the number of phones),
+`quiet:mobile,persistent` (deduplicated repeat: sidebar refreshed silently, pushes
+suppressed), `fallback:mobile->notify_default`, `dismissed:persistent`,
+`error:webhook:HTTP 500`, `error:webhook:deadline` (40 s budget exhausted),
+`error:mobile:target mobile_app_x not found`, `state_only`, `skipped_aborting` (add-on was
+stopping), `skipped_no_notifier`, `error:notifier_failed` (the notifier crashed or did not
+answer within 45 s; the result itself is unaffected).

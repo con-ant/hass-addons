@@ -1,0 +1,57 @@
+# _notify.yaml — notification settings for Claude jobs (all keys optional).
+#
+# Copy this file to /homeassistant/.claudecode/jobs/_notify.yaml and uncomment what you need.
+# With no _notify.yaml at all the notifier uses zero-config defaults: every state maps to the
+# built-in channel list (ok/skipped: state_only · info/aborted: persistent · warning/error:
+# mobile + persistent · critical: mobile_critical + persistent), "mobile" means every
+# notify.mobile_app_* service Home Assistant knows, and no webhook is configured.
+# Everything below is commented out, so copying this file unchanged changes nothing.
+#
+# Channels a job's `notify:` map (or `severities:` below) may name:
+#   persistent       sidebar notification (persistent_notification, id claude_job_<name>), replaced in place
+#   mobile           push to the companion apps (notify.mobile_app_*)
+#   mobile_critical  same phones; iOS critical alert + Android high-priority "critical" channel
+#   notify_default   notify.notify {title, message} — your own default notify group
+#   webhook          POST the result JSON to webhook.url below
+#   state_only       just the sensor.claude_job_<name> entity, nothing else
+# Fallback when no phone is registered: mobile -> notify_default -> persistent
+# (mobile_critical keeps the word "CRITICAL" in the title). tts/file are reserved for a later version.
+
+# mobile:
+#   # Only push to these companion-app services (default: all discovered notify.mobile_app_*).
+#   # A name listed here that Home Assistant does not know is reported in notify_status, not fatal.
+#   targets: [mobile_app_pixel_8, mobile_app_iphone]
+
+# android:
+#   # Android notification channels (created on the phone on first use).
+#   channel: Claude Jobs
+#   critical_channel: Claude Jobs Critical
+#   # NOTE: Android does not let an app bypass Do Not Disturb on its own. After the first critical
+#   # notification arrives, open the phone's notification settings for the Home Assistant app,
+#   # find the "Claude Jobs Critical" channel and enable "Override Do Not Disturb" — once per phone.
+#   # (iOS critical alerts need no extra step.)
+
+# webhook:
+#   # Enables the `webhook` channel. The notifier POSTs
+#   #   {"job","slug","status","headline","detail","run_id","ended_at","cost_usd","metrics","entity_id","prev_status"}
+#   # as JSON, retrying twice (after 2 s and 5 s) on connection errors / 5xx. A failing webhook never
+#   # changes the job's status; it shows up as error:webhook:… in the entity's notify_status attribute.
+#   url: https://ntfy.sh/my-claude-jobs
+#   # CAUTION: headers are stored in PLAIN TEXT on the /homeassistant volume (this file). Jobs cannot
+#   # read it (the job sandbox denies .claudecode/**), but backups and anyone with file access can.
+#   headers:
+#     Authorization: "Bearer <token>"
+#   timeout_s: 10        # 1..30 per attempt; the whole notifier run has a 40 s budget (HA calls first, webhook last),
+#                        # so a slow endpoint gets fewer/shorter attempts and shows up as error:webhook:deadline
+
+# # Tapping a mobile notification opens this dashboard (sent as `url` for iOS and `clickAction` for Android).
+# dashboard_path: /lovelace/claude
+
+# severities:
+#   # Global per-state channel lists; a job's own `notify:` map still wins over these.
+#   # States: ok, info, warning, critical, error, skipped, aborted.
+#   warning: [persistent]
+#   error: [mobile, persistent, webhook]
+
+# tts: {}     # reserved, ignored in this version
+# file: {}    # reserved, ignored in this version
