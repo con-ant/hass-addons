@@ -19,7 +19,7 @@ import time
 import unittest
 
 from testlib import (FAKE_CLAUDE, HEALTH_CHECK_FM, MINIMAL_FM, RUNNER, SHARE_DIR, ScratchRoot,
-                     run_cli, wait_for)
+                     pgroup_dead, run_cli, wait_for)
 from fakes.fake_supervisor import FakeSupervisor
 import jobdef  # LIB_DIR is on sys.path via testlib
 
@@ -326,8 +326,7 @@ class TestAbort(RunnerCase):
         self.assertEqual(self.s.fake_notify_calls(), [])
         self.assertFalse(pgid_file.exists())
         self.assertEqual(list((self.s.run_dir / "run").iterdir()), [])
-        with self.assertRaises(ProcessLookupError):
-            os.killpg(child_pgid, 0)
+        self.assertTrue(pgroup_dead(child_pgid))         # gone, or only unreaped zombies left
         self.assertEqual([ln["event"] for ln in self.s.job_log(JOB)], ["run"])
 
     def test_stop_path_signalling_child_and_runner_together_is_row2(self):

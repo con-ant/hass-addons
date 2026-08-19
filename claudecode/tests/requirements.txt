@@ -1,0 +1,5 @@
+# Third-party packages needed to run the test-suite (jobdef imports jsonschema,
+# testlib imports yaml). The add-on image ships them; fresh dev/CI environments
+# (e.g. Claude Code on the web) install them via `make deps` or `make test`.
+jsonschema
+PyYAML

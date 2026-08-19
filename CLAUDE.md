@@ -13,8 +13,16 @@ This file contains instructions for Claude Code when working on this repository.
 - Description of change
 ```
 
+## Running Tests
+
+Run `make test` from the repo root — it installs the test dependencies
+(`claudecode/tests/requirements.txt`) and runs unittest discovery from the right
+directory. A single module: `make test P=test_runner.py`. Dotted module names
+(`python3 -m unittest tests.test_jobdef`) do not work.
+
 ## Project Structure
 
+- `Makefile` - `make test` / `make deps` for the test-suite
 - `repository.yaml` - Add-on repository metadata
 - `claudecode/` - Claude Code add-on
   - `config.yaml` - Add-on configuration (bump version here)
