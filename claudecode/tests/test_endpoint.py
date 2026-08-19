@@ -546,7 +546,7 @@ class TestSummary(EndpointCase):
         self.assertEqual(sorted(names), ["disabled-one", "failing", "fine", "stale-one"])   # action job excluded
         by = {x["name"]: x for x in j["jobs"]}
         self.assertEqual((by["fine"]["slug"], by["fine"]["status"], by["fine"]["kind"]), ("fine", "ok", "job"))
-        self.assertEqual((by["fine"]["description"], by["fine"]["model"], by["fine"]["valid"]), ("Fine job", "fable", True))
+        self.assertEqual((by["fine"]["description"], by["fine"]["model"], by["fine"]["valid"]), ("Fine job", "opus", True))
         self.assertEqual((by["fine"]["run_count"], by["fine"]["cost_usd_last"], by["fine"]["stale_after"]), (3, 0.63, 93600))
         self.assertEqual(by["fine"]["headline"], "fine headline")
         self.assertEqual((by["stale-one"]["status"], by["stale-one"]["stale"], by["stale-one"]["enabled"]),

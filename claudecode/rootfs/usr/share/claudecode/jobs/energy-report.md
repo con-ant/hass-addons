@@ -1,6 +1,6 @@
 ---
 description: Daily energy report with a comparison to the past week.
-model: sonnet          # deliberate: a mechanical report does not need the default (fable); see docs/JOBS.md "Cost"
+model: sonnet          # deliberate: a mechanical report does not need the default (opus); see docs/JOBS.md "Cost"
 timeout: 600
 max_cost_usd: 1.00
 max_turns: 50

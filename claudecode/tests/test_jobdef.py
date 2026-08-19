@@ -129,7 +129,7 @@ class TestShippedFiles(JobdefCase):
         self.assertEqual({k: v for k, v in hc.raw.items()}, yaml.safe_load(yaml.safe_dump(HEALTH_CHECK_FM)))
         self.assertIsNone(hc.input)
         self.assertEqual(hc.actions, ())
-        self.assertEqual(hc.model, "fable")
+        self.assertEqual(hc.model, "opus")
         er = jobdef.load("energy-report", jobs_dir=SHARE_DIR / "jobs")
         self.assertEqual(er.model, "sonnet")
         self.assertEqual(set(er.input), {"date"})
@@ -224,7 +224,7 @@ class TestFileFormat(JobdefCase):
         self.assertEqual(job.slug, "by_path")
         self.assertEqual(job.path, str(p))
         self.assertEqual(job.kind, "job")
-        self.assertEqual(job.model, "fable")
+        self.assertEqual(job.model, "opus")
         self.assertEqual((job.timeout, job.max_cost_usd, job.max_turns), (600, 1.0, 50))
         self.assertEqual((job.enabled, job.min_interval, job.stale_after), (True, 60, None))
         self.assertEqual((job.paths, job.notify, job.renag_every, job.notify_recovery), ((), {}, 3, False))
@@ -383,14 +383,14 @@ class TestModel(JobdefCase):
         self.assertEqual(errors, [])
 
     def test_default_model_from_options(self):
-        self.assertEqual(jobdef.default_model(), "fable")
+        self.assertEqual(jobdef.default_model(), "opus")
         self.s.options_file.write_text(json.dumps({"job_default_model": "haiku"}))
         self.assertEqual(jobdef.default_model(), "haiku")
         self.assertEqual(self.load("m", MINIMAL_FM).model, "haiku")
         self.s.options_file.write_text(json.dumps({"job_default_model": "gpt-5"}))
-        self.assertEqual(jobdef.default_model(), "fable")
+        self.assertEqual(jobdef.default_model(), "opus")
         self.s.options_file.write_text("not json")
-        self.assertEqual(jobdef.default_model(), "fable")
+        self.assertEqual(jobdef.default_model(), "opus")
 
 
 class TestPaths(JobdefCase):
@@ -766,7 +766,7 @@ class TestPromptAndArgv(JobdefCase):
             str(self.s.claude_wrapper), "-p", "PROMPT",
             "--output-format", "json",
             "--json-schema", json.dumps(schema, separators=(",", ":")),
-            "--model", "fable",
+            "--model", "opus",
             "--max-turns", "50",
             "--max-budget-usd", "1.50",
             "--setting-sources", "",

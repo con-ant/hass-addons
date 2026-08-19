@@ -168,7 +168,7 @@ class ScratchRoot:
         os.chmod(self.run_dir, 0o700)
 
         self.options_file = r / "data" / "options.json"
-        self.options_file.write_text(json.dumps({"job_default_model": "fable", "enable_job_endpoint": True}))
+        self.options_file.write_text(json.dumps({"job_default_model": "opus", "enable_job_endpoint": True}))
         self.built_version_file = self.etc / "claude-code-version"
         self.built_version_file.write_text(BUILT_CLI_VERSION + "\n")
         self.addon_version_file = self.etc / "claudecode-addon-version"

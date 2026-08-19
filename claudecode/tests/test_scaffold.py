@@ -45,7 +45,7 @@ class TestScratchRoot(unittest.TestCase):
             self.assertEqual(s.env["SUPERVISOR_TOKEN"], "test-supervisor-token")
             self.assertTrue(s.env["PATH"].startswith(str(s.bin) + os.pathsep))
             self.assertFalse(os.path.exists(s.env["CLAUDE_JOB_NOTIFY_BIN"]))
-            self.assertEqual(json.loads(s.options_file.read_text())["job_default_model"], "fable")
+            self.assertEqual(json.loads(s.options_file.read_text())["job_default_model"], "opus")
             self.assertEqual(s.built_version_file.read_text().strip(), "2.1.233")
             self.assertTrue(str(s.transcripts).endswith("-data-claude-jobs-project"))
 

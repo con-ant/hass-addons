@@ -123,7 +123,7 @@ class TestJudgmentRows(RunnerCase):
         self.assertEqual(st["notify"], {"channels": [], "notify_status": "skipped_no_notifier", "last_notified": None})
         for k, v in {"status": "ok", "headline": "all good", "detail": "d", "envelope_subtype": "success",
                      "is_error": False, "exit_code": 0, "hard_killed": False, "cost_usd": 0.12,
-                     "over_budget": False, "model": "fable", "model_resolved": "claude-fable-5",
+                     "over_budget": False, "model": "opus", "model_resolved": "claude-opus-5",
                      "trigger": "manual", "attempts": 1, "retried_auth": False, "claude_version": "2.1.233",
                      "num_turns": 4, "metrics": {"n": 1}, "input": None}.items():
             self.assertEqual(res[k], v, k)
@@ -165,7 +165,7 @@ class TestJudgmentRows(RunnerCase):
         run_files = str(self.s.run_dir / "run")
         self.assertEqual((p["model"], p["output_format"], p["permission_mode"], p["setting_sources"], p["tools"],
                           p["max_turns"], p["max_budget_usd"], p["strict_mcp_config"]),
-                         ("fable", "json", "dontAsk", "", "Bash,Read,Grep,Glob", "50", "1.50", True))
+                         ("opus", "json", "dontAsk", "", "Bash,Read,Grep,Glob", "50", "1.50", True))
         self.assertEqual(p["settings"], f"{run_files}/{JOB}.settings.json")
         self.assertEqual(p["mcp_config"], f"{run_files}/{JOB}.mcp.json")
         self.assertEqual(json.loads(p["json_schema"])["properties"]["status"]["enum"], ["ok", "info", "warning", "critical"])
