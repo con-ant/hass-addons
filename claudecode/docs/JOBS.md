@@ -57,8 +57,8 @@ description: Daily health check; reports anything a human should look at.
   # REQUIRED · 1..200 chars, one line. Shown by `claude-job list` and used as the
   # entity's friendly_name (keep it under 60; longer only draws a warning).
 
-model: fable
-  # optional · default: the add-on option job_default_model (ships "fable").
+model: opus
+  # optional · default: the add-on option job_default_model (ships "opus").
   # Must be one of: fable, opus, sonnet, haiku (aliases only).
 
 timeout: 600
@@ -67,8 +67,8 @@ timeout: 600
 
 max_cost_usd: 1.50
   # optional · default 1.00 · 0.01..5.00. A HARD mid-run stop: the run ends as
-  # `error` "stopped at budget cap". On fable even a trivial run costs ~$0.15,
-  # so values below that fail immediately.
+  # `error` "stopped at budget cap". On opus even a trivial run costs ~$0.08
+  # (~$0.15 on fable), so values below that fail immediately.
 
 max_turns: 50
   # optional · default 50 · 2..200 (submitting the result itself uses a turn).
@@ -227,7 +227,7 @@ schedule:
 
 | File | Model | What it does |
 |---|---|---|
-| `health-check.md` | default (`fable`) | `ha core check`, resolution/supervisor info, recent error log, failing or unavailable integrations and entities, automations with errors; status by severity, counts in the headline; `stale_after: 93600`, `max_cost_usd: 1.50`, `paths: [/homeassistant/**]` |
+| `health-check.md` | default (`opus`) | `ha core check`, resolution/supervisor info, recent error log, failing or unavailable integrations and entities, automations with errors; status by severity, counts in the headline; `stale_after: 93600`, `max_cost_usd: 1.50`, `paths: [/homeassistant/**]` |
 | `energy-report.md` | `sonnet` | finds energy/power sensors and utility meters, computes yesterday's (or `input.date`'s) consumption, production and top consumers from history, compares with the previous 7-day average; `info` normally, `warning` if consumption is > 50 % above average or a meter went unavailable |
 
 Both are **examples**, generic on purpose: they discover what they can on any install and
@@ -359,19 +359,19 @@ correct than resuming against stale data. The entity reads `aborted` until the n
 
 ## Cost
 
-`fable` is the default by decision — the most capable model — so cadence and per-job
-`model:` are the levers. Estimates, to be treated as lower bounds until your own
-`logs/<name>.jsonl` says otherwise (every run records `cost_usd`):
+`opus` is the default by decision — top-tier capability at half of `fable`'s per-token
+price — so cadence and per-job `model:` are the levers. Estimates, to be treated as lower
+bounds until your own `logs/<name>.jsonl` says otherwise (every run records `cost_usd`):
 
 | Job | Cadence | Model | Est. per run | Est. per month |
 |---|---|---|---|---|
-| health-check | daily | fable | $0.40 – $1.20+ | $12 – $36+ |
-| energy-report | daily | fable | $0.30 – $0.90+ | $9 – $27+ |
+| health-check | daily | opus | $0.20 – $0.60+ | $6 – $18+ |
+| energy-report | daily | opus | $0.15 – $0.45+ | $4.50 – $13.50+ |
 | energy-report | daily | sonnet (as shipped) | a fraction of the above | |
 
 Guards: `max_cost_usd` stops a run mid-flight; `max_turns` bounds loops; `min_interval`
 stops a misfiring automation from multiplying runs; only one job runs at a time. A
-mechanical report rarely needs fable's judgment — set `model: sonnet` or `model: haiku` in
+mechanical report rarely needs opus's judgment — set `model: sonnet` or `model: haiku` in
 its frontmatter, or change `job_default_model` for everything that does not pin a model.
 The month's running total is kept in `state/_cost.json` (month boundaries in Home
 Assistant's time zone) and published as `sensor.claude_jobs_cost_raw`.

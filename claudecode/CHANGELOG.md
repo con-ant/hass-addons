@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.11] - 2026-08-19
+
+### Changed
+- Claude Jobs default model is now `opus` (was `fable`): the `job_default_model`
+  option ships as `opus`, and the runtime fallbacks (start script, jobcommon)
+  follow. Jobs that pin `model:` in their own frontmatter are unaffected, and
+  `fable` remains selectable via the option or per-job frontmatter. Docs and
+  cost estimates updated accordingly (opus is half of fable's per-token price).
+
 ## [1.2.65-con.10] - 2026-08-18
 
 ### Added

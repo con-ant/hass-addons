@@ -292,13 +292,13 @@ read_options() {
   RC_PREFIX=$(opt '.remote_control_session_prefix // "HomeAssistant"')
   AUTO_LAUNCH=$(opt '.auto_launch_claude // "continue"')
   EXTRA_PKGS=$(opt '.extra_npm_packages // [] | join(" ")')
-  JOB_DEFAULT_MODEL=$(opt '.job_default_model // "fable"')
+  JOB_DEFAULT_MODEL=$(opt '.job_default_model // "opus"')
   ENABLE_JOBS=$(opt '.enable_job_endpoint // false')
   # Sane fallbacks if options.json itself was unreadable.
   : "${FONT_SIZE:=14}" "${THEME:=dark}" "${SESSION_PERSIST:=true}" "${ENABLE_MCP:=true}"
   : "${ENABLE_PLAYWRIGHT:=false}" "${AUTO_UPDATE:=false}" "${DEFAULT_MODE:=auto}"
   : "${ENABLE_RC:=false}" "${RC_PREFIX:=HomeAssistant}" "${AUTO_LAUNCH:=continue}"
-  : "${JOB_DEFAULT_MODEL:=fable}" "${ENABLE_JOBS:=false}"
+  : "${JOB_DEFAULT_MODEL:=opus}" "${ENABLE_JOBS:=false}"
 }
 
 scrub_legacy_token() {
