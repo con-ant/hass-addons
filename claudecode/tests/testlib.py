@@ -106,6 +106,28 @@ def wait_for(predicate, timeout=10, interval=0.05) -> bool:
         time.sleep(interval)
 
 
+def pgroup_dead(pgid: int) -> bool:
+    """True when nothing in the process group can run again: the group is gone, or every
+    surviving member is an unreaped zombie. Environments without a reaping init (e.g.
+    remote CI containers) leave a SIGKILLed child as a zombie under PID 1, which keeps
+    os.killpg(pgid, 0) succeeding even though the group is effectively dead."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    for p in os.listdir("/proc"):
+        if not p.isdigit():
+            continue
+        try:
+            stat = (Path("/proc") / p / "stat").read_text()
+        except OSError:
+            continue                                     # raced with process exit
+        state, _ppid, pgrp = stat.rsplit(")", 1)[1].split()[:3]
+        if int(pgrp) == pgid and state != "Z":
+            return False
+    return True
+
+
 def read_jsonl(path) -> list:
     """Parse a JSONL file, skipping blank/unparseable lines. Missing file -> []."""
     out = []

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Repo-root `Makefile` (`make test`, `make deps`) and `claudecode/tests/requirements.txt`
+  so the test-suite runs with one command in fresh environments. No add-on changes.
+
+### Fixed
+- The runner/e2e abort tests no longer require the killed claude process group to be
+  fully reaped: environments without a reaping init (remote CI containers) leave it
+  as zombies, which the new `testlib.pgroup_dead` helper accepts as dead.
+
 ## [1.2.65-con.11] - 2026-08-19
 
 ### Changed

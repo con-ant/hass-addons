@@ -19,7 +19,7 @@ import unittest
 import urllib.error
 import urllib.request
 
-from testlib import ENDPOINT, FAKE_CLAUDE, HEALTH_CHECK_FM, RUNNER, ScratchRoot, wait_for
+from testlib import ENDPOINT, FAKE_CLAUDE, HEALTH_CHECK_FM, RUNNER, ScratchRoot, pgroup_dead, wait_for
 from fakes.fake_supervisor import FakeSupervisor
 
 TOKEN = "cd" * 32
@@ -197,8 +197,7 @@ class StopPathCase(unittest.TestCase):
         t0 = time.monotonic()
         os.killpg(info["pgid"], signal.SIGTERM)          # what signal_job_runs does with .pgid
         self.assert_aborted(proc, t0)
-        with self.assertRaises(ProcessLookupError):      # the runner took claude's group down with it
-            os.killpg(info["child_pgid"], 0)
+        self.assertTrue(pgroup_dead(info["child_pgid"]))  # the runner took claude's group down with it
 
     # -- 4 ---------------------------------------------------------------------------------------
     def test_term_child_group_then_runner_group(self):
