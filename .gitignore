@@ -15,7 +15,8 @@ node_modules/
 # Local development
 .env
 *.local
-.claude/
+.claude/*
+!.claude/skills/
 
 # Python
 __pycache__/

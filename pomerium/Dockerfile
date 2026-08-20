@@ -1,6 +1,8 @@
 # BUILD_FROM must be declared before the first FROM to be usable in a later
 # FROM line (stage-scoped ARGs are not visible to FROM instructions).
-ARG BUILD_FROM
+# Supervisor always passes it from build.yaml; the default only makes a bare
+# `docker build pomerium/` work for local testing.
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 
 # Pomerium's official image is distroless (no package manager, no jq), so it
 # can't consume /data/options.json directly. Instead, copy the multi-arch
