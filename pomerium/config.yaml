@@ -1,0 +1,66 @@
+name: Pomerium
+description: Identity-aware reverse proxy - secure external access to Home Assistant and add-ons with SSO, no VPN needed
+version: "0.1.0"
+slug: pomerium
+url: https://github.com/con-ant/hass-addons
+arch:
+  - amd64
+  - aarch64
+startup: services
+boot: auto
+init: false
+ingress: false
+panel_icon: mdi:shield-lock
+panel_title: Pomerium
+map:
+  - ssl:ro
+  - addon_config:rw
+options:
+  config_mode: options
+  autocert: true
+  autocert_staging: false
+  certfile: ""
+  keyfile: ""
+  http_redirect: true
+  authenticate_service_url: ""
+  idp_provider: ""
+  idp_provider_url: ""
+  idp_client_id: ""
+  idp_client_secret: ""
+  log_level: info
+  routes:
+    - from: "https://home.example.com"
+      to: "http://homeassistant:8123"
+      allow_websockets: true
+      allowed_users: []
+      allowed_domains: []
+schema:
+  config_mode: list(options|file)
+  autocert: bool
+  autocert_staging: bool
+  certfile: str?
+  keyfile: str?
+  http_redirect: bool
+  authenticate_service_url: str?
+  idp_provider: str?
+  idp_provider_url: str?
+  idp_client_id: str?
+  idp_client_secret: password?
+  log_level: list(debug|info|warn|error)
+  routes:
+    - from: url
+      to: url
+      allow_websockets: bool?
+      preserve_host_header: bool?
+      pass_identity_headers: bool?
+      allow_any_authenticated_user: bool?
+      allowed_users:
+        - str?
+      allowed_domains:
+        - str?
+ports:
+  443/tcp: 443
+  80/tcp: 80
+ports_description:
+  443/tcp: HTTPS proxy (required; forward from your router)
+  80/tcp: HTTP to HTTPS redirect and ACME HTTP-01 (recommended with autocert; disable if unused)

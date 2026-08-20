@@ -1,0 +1,13 @@
+# Debian (glibc) base, not Alpine: the pomerium binary is a static Go
+# executable, but at startup it extracts and execs an embedded Envoy that is
+# dynamically linked against glibc (upstream ships on distroless debian12 for
+# the same reason). On the Alpine/musl base Envoy fails with
+# "fork/exec .../envoy: no such file or directory" and the proxy never listens.
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base-debian:bookworm
+  aarch64: ghcr.io/home-assistant/aarch64-base-debian:bookworm
+labels:
+  org.opencontainers.image.title: "Pomerium for Home Assistant"
+  org.opencontainers.image.description: "Identity-aware reverse proxy with SSO for Home Assistant and add-ons"
+  org.opencontainers.image.source: "https://github.com/con-ant/hass-addons"
+  org.opencontainers.image.licenses: "MIT"

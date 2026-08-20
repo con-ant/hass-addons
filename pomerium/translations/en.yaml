@@ -1,0 +1,73 @@
+configuration:
+  config_mode:
+    name: Configuration Mode
+    description: >-
+      "options" generates the Pomerium config from the options below.
+      "file" uses a complete pomerium.yaml you place in this add-on's
+      config directory (/addon_configs/<repo>_pomerium/) and ignores the
+      other options.
+  autocert:
+    name: Automatic HTTPS (Let's Encrypt)
+    description: >-
+      Obtain and renew certificates automatically for every route domain.
+      Requires ports 443 and 80 to be reachable from the internet.
+  autocert_staging:
+    name: Use Let's Encrypt Staging
+    description: >-
+      Issue test certificates from the staging CA while setting things up,
+      to avoid rate limits. Browsers will show a warning; disable once
+      everything works.
+  certfile:
+    name: Certificate File
+    description: >-
+      Certificate chain file under /ssl (e.g. fullchain.pem). Used only
+      when automatic HTTPS is disabled.
+  keyfile:
+    name: Private Key File
+    description: >-
+      Private key file under /ssl (e.g. privkey.pem). Used only when
+      automatic HTTPS is disabled.
+  http_redirect:
+    name: HTTP to HTTPS Redirect
+    description: >-
+      Listen on port 80, redirect to HTTPS, and serve ACME HTTP-01
+      challenges for automatic HTTPS.
+  authenticate_service_url:
+    name: Authenticate Service URL
+    description: >-
+      Leave empty to use Pomerium's hosted authenticate service (sign in
+      with Google/GitHub/Microsoft/Apple, no registration needed). Set to
+      a domain of yours to self-host authentication with the IdP options
+      below.
+  idp_provider:
+    name: Identity Provider
+    description: >-
+      Only for self-hosted authentication, e.g. google, github, azure,
+      okta, auth0, or oidc.
+  idp_provider_url:
+    name: Identity Provider URL
+    description: >-
+      Issuer URL. Leave empty for google, github, azure, apple, gitlab or
+      onelogin; required for okta, auth0, cognito, ping and generic "oidc"
+      (e.g. https://YOUR-ORG.okta.com).
+  idp_client_id:
+    name: IdP Client ID
+    description: OAuth/OIDC client ID from your identity provider.
+  idp_client_secret:
+    name: IdP Client Secret
+    description: OAuth/OIDC client secret from your identity provider.
+  log_level:
+    name: Log Level
+    description: Pomerium log verbosity.
+  routes:
+    name: Routes
+    description: >-
+      Proxy routes. Each needs "from" (public https URL) and "to" (internal
+      backend, e.g. http://homeassistant:8123), plus access rules -
+      allowed_users (emails), allowed_domains (email domains), or
+      allow_any_authenticated_user. Routes without access rules deny all
+      traffic. See the Documentation tab for all fields.
+
+network:
+  443/tcp: HTTPS proxy (forward this from your router)
+  80/tcp: HTTP redirect and ACME challenges (recommended with automatic HTTPS)
