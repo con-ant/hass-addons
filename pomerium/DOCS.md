@@ -69,8 +69,10 @@ http:
 ### 4. Start and sign in
 
 Start the add-on, watch the log for the route summary, then open your
-`from` URL and sign in. The first Let's Encrypt issuance can take up to a
-minute; until then you may see a self-signed certificate warning.
+`from` URL and sign in. The add-on refuses to start while any route still
+uses the shipped `example.com` placeholder. The first Let's Encrypt issuance
+can take up to a minute; until then you may see a self-signed certificate
+warning.
 
 ## Routes and access rules
 
@@ -126,8 +128,14 @@ authenticate_service_url: "https://authenticate.example.com"  # must also be a D
 idp_provider: google        # google | github | azure | okta | auth0 | oidc | ...
 idp_client_id: "..."
 idp_client_secret: "..."
-idp_provider_url: ""        # required for generic `oidc`, otherwise leave empty
+idp_provider_url: ""        # issuer URL - see below
 ```
+
+`idp_provider_url` can stay empty only for providers with a built-in issuer
+(google, github, azure, apple, gitlab, onelogin). It is **required** for
+okta, auth0, cognito, ping, generic `oidc`, and any other provider whose
+issuer is specific to your tenant (e.g. `https://YOUR-ORG.okta.com`,
+`https://YOUR-TENANT.auth0.com/`).
 
 The authenticate URL's domain needs DNS and (with autocert) is issued a
 certificate automatically. Provider-specific setup (redirect URLs, scopes)
@@ -143,14 +151,19 @@ timeouts, mTLS, …), set `config_mode: file` and write a complete
 add-ons). The file is used verbatim; add-on options other than
 `config_mode` are ignored.
 
-If your file does not set `cookie_secret`, the add-on injects the one it
-manages, so sessions keep working without you handling key material.
+If your file does not set `cookie_secret` (or `cookie_secret_file`), the
+add-on injects the one it manages via the environment, so you don't have to
+handle key material. If it uses `autocert: true` without an `autocert_dir`,
+certificates are cached in the add-on's persistent data automatically.
 
 ## Secrets and state
 
-- `cookie_secret` (session encryption) is generated once and persisted in
-  the add-on's private data — you never need to set it, and sessions
-  survive restarts and updates.
+- `cookie_secret` (session cookie encryption) is generated once and
+  persisted in the add-on's private data — you never need to set it, and
+  cookies issued before a restart or update remain valid. Session *records*
+  live in Pomerium's in-memory store, though, so after a restart you are
+  sent through sign-in again (usually instant with the hosted authenticate
+  service; a full login with your own identity provider).
 - The generated Pomerium config lives at `/data/pomerium.yaml` inside the
   container (mode 0600, contains secrets). It is regenerated from the
   options on every start; option changes take effect on restart.

@@ -12,11 +12,17 @@ echo "========================================"
 echo "  Pomerium Add-on Starting"
 echo "========================================"
 
+# Everything written below (cookie secret, generated config) embeds secrets.
+umask 077
+
+# Persistent autocert cache for both modes (AUTOCERT_DIR defaults here, see
+# Dockerfile).
+mkdir -p /data/autocert
+
 # --- Cookie secret: generate once, persist across restarts and updates ---
 if [ ! -s "$COOKIE_SECRET_FILE" ]; then
     log INFO "Generating new cookie_secret (persisted in /data)"
     head -c 32 /dev/urandom | base64 | tr -d '\n' > "$COOKIE_SECRET_FILE"
-    chmod 600 "$COOKIE_SECRET_FILE"
 fi
 COOKIE_SECRET=$(cat "$COOKIE_SECRET_FILE")
 
@@ -31,11 +37,20 @@ if [ "$CONFIG_MODE" = "file" ]; then
         exit 1
     fi
     log INFO "Using user-supplied config: $USER_CONFIG"
-    if ! grep -Eq '^[[:space:]]*cookie_secret[[:space:]]*:' "$USER_CONFIG"; then
+    # Environment variables take precedence over the config file in Pomerium,
+    # so only inject COOKIE_SECRET when the file does not set a non-empty
+    # cookie_secret / cookie_secret_file itself. Accepts block style
+    # (`cookie_secret: x`), quoted keys and JSON/flow style
+    # (`"cookie_secret": "x"`, `{cookie_secret: x}`); an empty value
+    # (`cookie_secret: ""` or a bare `cookie_secret:`) counts as unset so the
+    # managed secret is used instead of Pomerium's random per-start fallback.
+    if grep -Eq "^[[:space:]{]*[\"']?cookie_secret(_file)?[\"']?[[:space:]]*:[[:space:]]*(\"[^\"]|'[^']|[^\"'#[:space:]])" "$USER_CONFIG"; then
+        log INFO "cookie_secret is set in $USER_CONFIG - not injecting the add-on managed one"
+    else
         log INFO "No cookie_secret in file - injecting the add-on managed one via environment"
         export COOKIE_SECRET
     fi
-    exec pomerium -config "$USER_CONFIG"
+    exec pomerium --config "$USER_CONFIG"
 fi
 
 # --- Options mode: generate pomerium.yaml from add-on options ---
@@ -56,8 +71,8 @@ if [ "$AUTOCERT" != "true" ]; then
     done
 fi
 
-mkdir -p /data/autocert
-
+# Pomerium parses the config file as YAML and JSON is valid YAML, so the jq
+# output is written directly as the config (no YAML conversion step needed).
 jq --arg cookie "$COOKIE_SECRET" '
   def nonempty: (. // "") != "";
 
@@ -90,14 +105,13 @@ jq --arg cookie "$COOKIE_SECRET" '
        {certificate_file: ("/ssl/" + .certfile), certificate_key_file: ("/ssl/" + .keyfile)}
      end)
   + (if (.http_redirect == null or .http_redirect) then {http_redirect_addr: ":80"} else {} end)
-  + (if (.authenticate_service_url | nonempty) then {authenticate_service_url: .authenticate_service_url} else {} end)
-  + (if (.idp_provider       | nonempty) then {idp_provider:       .idp_provider}       else {} end)
-  + (if (.idp_provider_url   | nonempty) then {idp_provider_url:   .idp_provider_url}   else {} end)
-  + (if (.idp_client_id      | nonempty) then {idp_client_id:      .idp_client_id}      else {} end)
-  + (if (.idp_client_secret  | nonempty) then {idp_client_secret:  .idp_client_secret}  else {} end)
-' "$OPTIONS" > /tmp/pomerium-config.json
+  # Optional strings: emit only the non-empty ones so Pomerium defaults apply
+  # (no authenticate/idp settings at all = hosted authenticate service).
+  + ({authenticate_service_url, idp_provider, idp_provider_url, idp_client_id, idp_client_secret}
+     | with_entries(select(.value | nonempty)))
+' "$OPTIONS" > "$GENERATED"
 
-ROUTE_COUNT=$(jq '.routes | length' /tmp/pomerium-config.json)
+ROUTE_COUNT=$(jq '.routes | length' "$GENERATED")
 if [ "$ROUTE_COUNT" -eq 0 ]; then
     log WARN "No routes configured - Pomerium will start but proxy nothing."
 fi
@@ -106,21 +120,16 @@ log INFO "Routes:"
 jq -r '.routes[] |
     "  " + .from + "  ->  " + .to +
     (if .policy then "" else "  [WARN: no access policy - all requests DENIED. Set allowed_users, allowed_domains, or allow_any_authenticated_user]" end)' \
-    /tmp/pomerium-config.json
+    "$GENERATED"
 
-if jq -e '.routes[] | select(.from | test("example\\.com"))' /tmp/pomerium-config.json > /dev/null; then
-    log WARN "A route still uses the placeholder domain example.com - edit the add-on options."
+# Refuse to start on the shipped placeholder: with autocert enabled Pomerium
+# would otherwise place real Let's Encrypt orders for example.com, fail, and
+# retry forever.
+if jq -e '[.routes[].from | select(test("[./]example\\.com([:/]|$)"))] | length > 0' "$GENERATED" > /dev/null; then
+    log ERROR "A route still uses the placeholder domain example.com."
+    log ERROR "Set every route's 'from' to a domain you own (Configuration tab) and start the add-on again."
+    exit 1
 fi
-
-# JSON is valid YAML, so a plain copy works if yq is unavailable or is not
-# the Go flavor; yq just makes the generated file pleasant to read.
-if ! { command -v yq > /dev/null 2>&1 \
-        && yq -P '.' /tmp/pomerium-config.json > "$GENERATED" 2> /dev/null \
-        && [ -s "$GENERATED" ]; }; then
-    cp /tmp/pomerium-config.json "$GENERATED"
-fi
-chmod 600 "$GENERATED"
-rm -f /tmp/pomerium-config.json
 
 if [ "$AUTOCERT" = "true" ]; then
     log INFO "TLS: autocert (Let's Encrypt) - ports 443 and 80 must be reachable from the internet"
@@ -130,4 +139,4 @@ fi
 log INFO "Generated config: $GENERATED (secrets inside - not logged)"
 log INFO "Starting Pomerium..."
 
-exec pomerium -config "$GENERATED"
+exec pomerium --config "$GENERATED"

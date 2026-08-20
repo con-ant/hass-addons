@@ -36,7 +36,7 @@ Follows the existing add-ons in this repo (`auto-monocle`, `playwright-browser`)
 ```
 pomerium/
   config.yaml          # add-on manifest: options schema, ports, maps
-  build.yaml           # per-arch HA Alpine base images + OCI labels
+  build.yaml           # per-arch HA Debian base images + OCI labels
   Dockerfile           # multi-stage: pomerium binary from official image
   run.sh               # config generation + exec pomerium
   README.md            # add-on store page
@@ -58,13 +58,23 @@ Multi-stage Dockerfile:
 1. `FROM pomerium/pomerium:v0.33.1 AS pomerium` — the official image, pinned.
    It is multi-arch (amd64, arm64v8), so each architecture's local Supervisor
    build pulls the right binary.
-2. `FROM ${BUILD_FROM}` — the standard HA Alpine base (from `build.yaml`),
-   into which `/bin/pomerium` is copied.
+2. `FROM ${BUILD_FROM}` — the HA **Debian** base (from `build.yaml`),
+   into which `/bin/pomerium` is copied. `ARG BUILD_FROM` is declared before
+   the first `FROM` so the second `FROM` can see it.
 
 Why not run the official image directly (as `playwright-browser` does with
-the MS image)? Pomerium's image is distroless: no shell, no `jq`, no way to
-read `/data/options.json` and generate config at startup. The HA base gives
-us bash/jq/s6 for a few MB, and the Go binary is self-contained.
+the MS image)? Pomerium's image is distroless: no package manager, no `jq`,
+no way to read `/data/options.json` and generate config at startup. The HA
+base gives us bash/jq/s6.
+
+Why Debian and not the (smaller) Alpine base? The `pomerium` executable is a
+static Go binary, but at startup it extracts an embedded **Envoy** binary and
+execs it, and that Envoy is dynamically linked against glibc (upstream ships
+on distroless *debian12* for the same reason). On Alpine/musl Envoy fails
+with `fork/exec .../envoy: no such file or directory` and the proxy never
+listens. The Dockerfile also re-declares upstream's `ENV
+AUTOCERT_DIR=/data/autocert` so file-mode configs inherit a persistent
+certificate cache.
 
 Only `amd64` and `aarch64` are declared (same as the other add-ons here, and
 matching what the upstream image ships).
@@ -82,7 +92,10 @@ that might sit behind it; `boot: auto` so it survives host reboots.
 
 A Docker `HEALTHCHECK` curls Pomerium's `/ping` endpoint on the internal
 HTTPS listener (`-k` because the cert may be self-signed until autocert
-completes).
+completes). It only probes in `options` mode, where the listener is always
+`:443`; in `file` mode the user chooses the address/scheme, so the check is a
+no-op rather than flagging a working proxy as unhealthy (which Supervisor's
+watchdog would restart).
 
 ## Network design
 
@@ -148,10 +161,11 @@ Pomerium wants one YAML file. The add-on supports two modes via
 ### `options` mode (default)
 
 `run.sh` generates `/data/pomerium.yaml` from `/data/options.json` on every
-start (jq builds the structure; yq pretty-prints it to YAML — JSON being
-valid YAML, a plain copy is the fallback). Options changes take effect on
-add-on restart, like every other add-on. The generated file is `0600` since
-it embeds secrets.
+start (jq builds the structure and its JSON output is written as-is —
+JSON is valid YAML, so no conversion step or `yq` dependency is needed).
+Options changes take effect on add-on restart, like every other add-on. The
+script runs under `umask 077`, so the generated file is `0600` from the
+moment it is created since it embeds secrets.
 
 Option → config mapping:
 
@@ -193,11 +207,19 @@ config is worse than owning the whole file.
 
 ### Secrets
 
-- `cookie_secret` (session encryption key): generated once from
-  `/dev/urandom`, persisted at `/data/cookie_secret`, reused forever — so
-  user sessions survive restarts and updates and the user never handles it.
-  In `file` mode, if the user's file lacks `cookie_secret`, the managed one
-  is injected via the `COOKIE_SECRET` environment variable.
+- `cookie_secret` (session cookie encryption key): generated once from
+  `/dev/urandom`, persisted at `/data/cookie_secret`, reused forever, so the
+  user never handles it and existing cookies stay decryptable across
+  restarts and updates. Note this does *not* make sessions themselves
+  survive a restart: all-in-one mode keeps session records in the in-memory
+  databroker, so after a restart users are sent through the authenticate
+  flow again (near-transparent with the hosted service while its own cookie
+  is valid; a full IdP round-trip when self-hosting). A persistent
+  databroker backend would be needed to change that.
+  In `file` mode, if the user's file does not set a non-empty
+  `cookie_secret`/`cookie_secret_file`, the managed one is injected via the
+  `COOKIE_SECRET` environment variable (env vars take precedence over the
+  file in Pomerium, so it is only exported when the file has none).
 - `idp_client_secret` uses the `password` schema type so the UI masks it.
 - Secrets are never printed to the add-on log.
 

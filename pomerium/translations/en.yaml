@@ -47,7 +47,9 @@ configuration:
   idp_provider_url:
     name: Identity Provider URL
     description: >-
-      Issuer URL, required only for the generic "oidc" provider.
+      Issuer URL. Leave empty for google, github, azure, apple, gitlab or
+      onelogin; required for okta, auth0, cognito, ping and generic "oidc"
+      (e.g. https://YOUR-ORG.okta.com).
   idp_client_id:
     name: IdP Client ID
     description: OAuth/OIDC client ID from your identity provider.

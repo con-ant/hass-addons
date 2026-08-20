@@ -18,6 +18,8 @@ All notable changes to this add-on will be documented in this file.
   optional self-hosted authenticate with `idp_*` options.
 - `config_mode: file` escape hatch: a complete `pomerium.yaml` in the
   add-on config directory is used verbatim.
-- Auto-generated, persisted `cookie_secret` so sessions survive restarts
-  and updates; injected via environment in file mode when absent.
+- Auto-generated, persisted `cookie_secret` so session cookies stay valid
+  across restarts and updates; injected via environment in file mode when
+  absent.
+- Refuses to start while a route still uses the `example.com` placeholder.
 - Design notes in `docs/DESIGN.md`.
