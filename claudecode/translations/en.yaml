@@ -66,5 +66,12 @@ configuration:
     name: Enable the job trigger endpoint
     description: >-
       Let Home Assistant trigger Claude Jobs: starts an HTTP endpoint on port 7682 (add-on network only, bearer token in /data/claude-jobs/token; see `claude-job token show`) and writes the claudecode_jobs.yaml package into your config directory at every start. Off = jobs can still be run from the terminal.
+  debug_logging:
+    name: Debug startup logging
+    description: >-
+      Trace every command of the add-on's startup script into the add-on log
+      (bash -x) with timestamps. Turn this on when the add-on fails to boot and
+      the log does not say why, then turn it off again - the log gets very
+      verbose.
 network:
   7681/tcp: Web Terminal (ttyd)
