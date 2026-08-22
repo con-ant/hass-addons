@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.13] - 2026-08-22
+
+### Fixed
+- **`debug_logging` no longer leaks the Supervisor token into the add-on log.**
+  The `bash -x` trace printed `HA_TOKEN` as it was exported; secret handling is
+  now excluded from the trace. If you shared a con.12 debug log, restart the
+  add-on — the Supervisor issues a fresh token on every start, which invalidates
+  the logged one.
+- The AVX warning no longer fires on ARM hosts (aarch64/armv7). AVX is an
+  x86-only feature that ARM builds of Claude Code don't use, so the warning
+  (with its Proxmox advice) was a false alarm on every ARM board.
+- `debug_logging` no longer dumps the multi-page `claude --help` text into the
+  trace several times during the job CLI preflight.
+
+### Changed
+- With `auto_update_claude: true`, boot now says that `npm update` prints
+  nothing while it works and that the silence can last minutes on slow
+  hardware — this silent gap is what made earlier boots look hung.
+
 ## [1.2.65-con.12] - 2026-08-22
 
 ### Added
