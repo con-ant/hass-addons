@@ -70,5 +70,12 @@ configuration:
     name: Activar el endpoint de trabajos
     description: >-
       Permite que Home Assistant dispare los Claude Jobs: inicia un endpoint HTTP en el puerto 7682 (solo red interna de add-ons, token en /data/claude-jobs/token; ver `claude-job token show`) y escribe el paquete claudecode_jobs.yaml en tu directorio de configuración en cada arranque. Desactivado = los trabajos solo se ejecutan desde la terminal.
+  debug_logging:
+    name: Registro de depuración del arranque
+    description: >-
+      Registra cada comando del script de arranque del add-on en el log del
+      add-on (bash -x) con marcas de tiempo. Actívalo cuando el add-on no
+      arranca y el log no dice por qué, y desactívalo después: el log se vuelve
+      muy detallado.
 network:
   7681/tcp: Terminal Web (ttyd)

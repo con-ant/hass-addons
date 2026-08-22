@@ -15,6 +15,41 @@ SETTINGS_FILE=/root/.claude/settings.json
 OPTS=/data/options.json
 
 # ---------------------------------------------------------------------------
+# Logging. Everything echoed here is the container's stdout, i.e. the add-on
+# Log tab in Home Assistant - often the only view a user has into a failed
+# boot. So: log a banner before anything can fail, timestamp every line, and
+# mark each startup step so a hang or crash names itself in the log.
+# ---------------------------------------------------------------------------
+info() { echo "[$(date +%H:%M:%S)] [INFO] $*"; }
+warn() { echo "[$(date +%H:%M:%S)] [WARN] $*"; }
+err()  { echo "[$(date +%H:%M:%S)] [ERROR] $*"; }
+opt()  { jq -r "$1" "$OPTS" 2>/dev/null; }
+
+# First output of the boot. If even this line is missing from the add-on log,
+# the container died before this script ran (image/arch problem, AppArmor,
+# OOM) - look in `ha supervisor logs` / `dmesg`, not here.
+info "Claude Code add-on $(cat /etc/claudecode-addon-version 2>/dev/null || echo '?') starting on $(uname -m) (Claude Code $(cat /etc/claude-code-version 2>/dev/null || echo '?') verified at build time)"
+
+# debug_logging: trace every command in this script into the add-on log.
+# Read directly from options.json - read_options runs later than the first
+# things that can go wrong. ${SECONDS}s since boot + line number, no forks.
+if [ "$(opt '.debug_logging // false')" = "true" ]; then
+  info "debug_logging is on: tracing startup commands below (turn it off once the problem is found - this is verbose)"
+  PS4='+ [${SECONDS}s claudecode-start:${LINENO}] '
+  set -x
+fi
+
+# Each top-level startup step goes through run_step: the log then shows where
+# boot is (a step that prints nothing else still leaves its marker), and
+# on_abort can say which step was running when the script died.
+CURRENT_STEP="early init"
+run_step() {  # run_step "<label>" <command...>
+  CURRENT_STEP=$1; shift
+  info "step: $CURRENT_STEP"
+  "$@"
+}
+
+# ---------------------------------------------------------------------------
 # The guarantee: always end in ttyd.
 # ---------------------------------------------------------------------------
 # Seconds a running Claude gets to exit after SIGTERM before the tmux server
@@ -42,6 +77,7 @@ cd_work() { cd /homeassistant 2>/dev/null || cd /; }
 # ignores in background jobs; ttyd's ptys would otherwise inherit that.
 start_ttyd() {
   cd_work
+  info "Starting web terminal (ttyd) on port 7681"
   # shellcheck disable=SC2086  # SHELL_CMD is intentionally word-split
   ( trap - INT QUIT; exec ttyd --port 7681 --writable --ping-interval 30 --max-clients 5 \
     --index /usr/share/ttyd/index.html \
@@ -54,11 +90,16 @@ start_ttyd() {
   TTYD_PID=$!
   wait "$TTYD_PID"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    info "ttyd exited cleanly; stopping the add-on"
+  else
+    err "ttyd exited with status $rc; stopping the add-on (if this repeats, the boot loop starts here)"
+  fi
   shutdown_jobs   # ttyd died on its own: don't orphan the endpoint or in-flight runs
   exit $rc
 }
 on_abort() {
-  echo "[ERROR] Startup aborted (exit $1); starting a bare terminal so you can debug from inside the add-on"
+  err "Startup aborted with exit $1 during step '$CURRENT_STEP'; starting a bare terminal so you can debug from inside the add-on"
   trap - EXIT
   start_ttyd
 }
@@ -188,11 +229,6 @@ on_stop() {
 trap on_stop TERM INT HUP
 trap 'on_abort $?' EXIT
 
-info() { echo "[INFO] $*"; }
-warn() { echo "[WARN] $*"; }
-err()  { echo "[ERROR] $*"; }
-opt()  { jq -r "$1" "$OPTS" 2>/dev/null; }
-
 # ---------------------------------------------------------------------------
 # settings.json: one guarded, atomic writer.
 # ---------------------------------------------------------------------------
@@ -320,7 +356,15 @@ check_avx() {
   warn "stop and start the VM. Verify with: grep -o -m1 avx2 /proc/cpuinfo"
 }
 
-claude_responds() { timeout 30 claude --version < /dev/null > /dev/null 2>&1; }
+# Probe the claude CLI once, keeping the evidence: the output and exit code
+# land in CLAUDE_PROBE_OUT/RC so check_claude can say WHY it failed (a SIGILL
+# from a missing CPU feature and a 30s hang look identical when both are sent
+# to /dev/null, and that difference is the whole diagnosis on AVX-less hosts).
+claude_responds() {
+  CLAUDE_PROBE_OUT=$(timeout 30 claude --version < /dev/null 2>&1)
+  CLAUDE_PROBE_RC=$?
+  [ "$CLAUDE_PROBE_RC" -eq 0 ]
+}
 
 maybe_update_claude() {
   BUILT_VERSION=$(cat /etc/claude-code-version 2>/dev/null || echo unknown)
@@ -360,10 +404,18 @@ install_extra_npm_packages() {
 check_claude() {
   if [ "$CLAUDE_OK" = "true" ] || claude_responds; then
     CLAUDE_OK=true
+    info "claude CLI responds: ${CLAUDE_PROBE_OUT:-version unknown}"
   else
     CLAUDE_OK=false
-    err "claude CLI did not respond within 30s - skipping MCP setup and auto-launch"
-    err "The terminal will still start so you can debug from inside the add-on"
+    case "$CLAUDE_PROBE_RC" in
+      124) err "claude CLI hung and was killed after 30s (exit 124) - on hosts without AVX the Claude binary can deadlock instead of crashing (see the CPU warning above, if any)" ;;
+      132) err "claude CLI crashed with SIGILL (exit 132): the binary uses CPU instructions this host does not expose - this is the AVX problem (see the CPU warning above)" ;;
+      139) err "claude CLI crashed with SIGSEGV (exit 139)" ;;
+      127) err "claude CLI not found on PATH (exit 127)" ;;
+      *)   err "claude CLI failed (exit $CLAUDE_PROBE_RC)" ;;
+    esac
+    [ -n "$CLAUDE_PROBE_OUT" ] && err "claude --version said: $(printf '%s' "$CLAUDE_PROBE_OUT" | tail -3 | tr '\n' ' ')"
+    err "Skipping MCP setup and auto-launch; the terminal will still start so you can debug from inside the add-on"
   fi
 }
 
@@ -557,7 +609,7 @@ start_job_endpoint() {
         backoff=300
         publish_endpoint_error respawn_degraded "$fast"
       fi
-      echo "[WARN] claude-job-endpoint exited ($rc); respawning in ${backoff}s"
+      warn "claude-job-endpoint exited ($rc); respawning in ${backoff}s"
       printf '{"status":"respawning","rc":%s,"backoff_s":%s,"fast_crashes":%s}\n' "$rc" "$backoff" "$fast" > "$RUN_DIR/endpoint.status"
       sleep "$backoff" &
       wait $!
@@ -608,21 +660,21 @@ build_shell_cmd() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-setup_persist_dir
-read_options
-settings_init
-scrub_legacy_token
-check_avx
-maybe_update_claude
-install_extra_npm_packages
-check_claude
-cli_preflight_log
-configure_mcp
-apply_settings
-allow_job_commands
-setup_job_dirs
-ensure_job_token
-render_job_package
+run_step "set up persistent config dir" setup_persist_dir
+run_step "read add-on options" read_options
+run_step "init settings.json" settings_init
+run_step "scrub legacy token" scrub_legacy_token
+run_step "CPU feature check" check_avx
+run_step "Claude Code update check" maybe_update_claude
+run_step "install extra npm packages" install_extra_npm_packages
+run_step "probe claude CLI" check_claude
+run_step "job CLI preflight" cli_preflight_log
+run_step "configure MCP servers" configure_mcp
+run_step "apply settings.json options" apply_settings
+run_step "pre-authorize job commands" allow_job_commands
+run_step "set up job directories" setup_job_dirs
+run_step "ensure job endpoint token" ensure_job_token
+run_step "render HA job package" render_job_package
 # ttyd only spawns SHELL_CMD when a browser connects, so on a headless box
 # nothing runs after a restart until somebody opens the web terminal - and
 # Remote Control, whose whole point is running unattended, stays down. When
@@ -649,9 +701,11 @@ prestart_session() {
   fi
 }
 
-build_shell_cmd
-prestart_session
-start_job_endpoint
+run_step "build terminal command" build_shell_cmd
+run_step "pre-start Claude session" prestart_session
+run_step "start job endpoint" start_job_endpoint
 
 trap - EXIT
+CURRENT_STEP="web terminal (ttyd)"
+info "Startup finished in ${SECONDS}s"
 start_ttyd

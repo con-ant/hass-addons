@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.12] - 2026-08-22
+
+### Added
+- **Boot diagnostics in the add-on log.** Startup now prints a first-line banner
+  (add-on version, architecture, built Claude Code version — if even that line
+  is missing, the container died before the script ran and the answer is in the
+  Supervisor log), timestamps every log line, and emits a `step:` marker before
+  each startup step so a hang or crash names itself in the log. The startup
+  abort message now says which step was running, and ttyd's exit status is
+  logged so boot loops show where they start.
+- New `debug_logging` option (default `false`): traces every startup command
+  into the add-on log (`bash -x` with elapsed seconds and line numbers) for
+  debugging boots that fail without a useful message.
+
+### Changed
+- The `claude --version` boot probe no longer discards its output: on failure
+  the log now shows the exit code with a diagnosis (132/SIGILL → missing CPU
+  instructions, i.e. the AVX problem; 124 → 30 s hang; 127 → not on PATH) and
+  the last lines the CLI printed, instead of a generic "did not respond".
+
 ## [1.2.65-con.11] - 2026-08-19
 
 ### Changed
