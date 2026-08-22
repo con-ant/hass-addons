@@ -36,8 +36,14 @@ info "Claude Code add-on $(cat /etc/claudecode-addon-version 2>/dev/null || echo
 if [ "$(opt '.debug_logging // false')" = "true" ]; then
   info "debug_logging is on: tracing startup commands below (turn it off once the problem is found - this is verbose)"
   PS4='+ [${SECONDS}s claudecode-start:${LINENO}] '
+  TRACE_ON=true
   set -x
 fi
+
+# Secrets must never land in the trace: bracket any code that puts one in a
+# shell variable with trace_off/trace_on (both no-ops unless debug_logging).
+trace_off() { { set +x; } 2>/dev/null; }
+trace_on()  { if [ "${TRACE_ON:-}" = true ]; then set -x; fi; }
 
 # Each top-level startup step goes through run_step: the log then shows where
 # boot is (a step that prints nothing else still leaves its marker), and
@@ -272,8 +278,10 @@ settings_set() {
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
+trace_off  # the Supervisor token must not appear in the debug trace
 export HA_TOKEN="$SUPERVISOR_TOKEN"
 export HA_URL="http://supervisor/core"
+trace_on
 
 setup_persist_dir() {
   if ! mkdir -p "$PERSIST_DIR/config" "$PERSIST_DIR/gh" /root/.config; then
@@ -349,6 +357,9 @@ scrub_legacy_token() {
 }
 
 check_avx() {
+  # AVX is an x86 feature: ARM builds of Claude Code don't need it, and ARM
+  # /proc/cpuinfo never lists it, so the warning would fire on every ARM board.
+  case "$(uname -m)" in x86_64|amd64|i?86) ;; *) return 0 ;; esac
   grep -qw avx /proc/cpuinfo 2>/dev/null && return 0
   warn "This CPU does not expose AVX. Claude Code 2.1.113+ is a Bun-compiled"
   warn "binary that requires it, so this add-on is running an older release."
@@ -373,6 +384,7 @@ maybe_update_claude() {
     return 0
   fi
   warn "auto_update_claude=true; the build verified $BUILT_VERSION, an update may install a release that cannot run (and writes to the container layer)"
+  info "Running npm update (npm prints nothing while it works - on slow hardware this silence can last several minutes; set auto_update_claude: false for faster boots)"
   timeout 300 npm update -g @anthropic-ai/claude-code || warn "Update failed; keeping the installed version"
   if claude_responds; then
     CLAUDE_OK=true  # check_claude will not probe again
@@ -518,6 +530,8 @@ setup_job_dirs() {
 # in principle take away. The runner and endpoint refuse to run when one is
 # missing (cli_preflight, §4.9); this only makes the reason visible at boot.
 cli_preflight_log() {
+  local -  # keep the multi-page --help text out of the debug trace; reverts on return
+  { set +x; } 2>/dev/null
   [ "$CLAUDE_OK" = "true" ] || return 0
   local help missing="" f
   help=$(timeout 30 claude --help < /dev/null 2>/dev/null) || { warn "claude --help failed; skipping job CLI preflight"; return 0; }
