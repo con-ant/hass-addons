@@ -194,8 +194,15 @@ ENV PATH="/root/.local/bin:/homeassistant/.claudecode/npm-global/bin:${PATH}"
 # Set working directory
 WORKDIR /homeassistant
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+# Health check. ttyd binds 7681 only at the END of startup, and a legitimate
+# boot can spend many minutes before that (auto_update_claude npm update:
+# 300s timeout, plus a 300s rollback if the update cannot run, plus probes
+# and MCP setup - and every restart recreates the container, redoing all of
+# it). start-period must cover that worst case: failures during it don't
+# count, one success marks healthy immediately, so a fast boot loses nothing.
+# With a short start-period the Supervisor Watchdog kills a slow boot at
+# ~2min and loops forever, npm never finishing before the restart.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=900s --retries=3 \
     CMD curl -sf http://localhost:7681/ || exit 1
 
 # Startup logic lives in rootfs/usr/local/bin/claudecode-start: it reads the

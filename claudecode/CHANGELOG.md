@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.14] - 2026-08-22
+
+### Fixed
+- **Boot loop with the Supervisor Watchdog enabled.** The Docker healthcheck
+  probes ttyd on port 7681, but gave the container only ~100s
+  (`start-period=10s`, 3×30s retries) before reporting unhealthy — while a
+  legitimate boot with `auto_update_claude: true` spends 2½+ minutes in
+  `npm update` before ttyd starts. The Watchdog then restarted the add-on at
+  ~2m20s; each restart recreates the container, so the update re-ran from
+  scratch and boot never completed. `start-period` is now 900s (covering the
+  worst case: 300s update timeout + 300s rollback + probes and MCP setup); a
+  fast boot still turns healthy the moment ttyd answers.
+
 ## [1.2.65-con.13] - 2026-08-22
 
 ### Fixed
