@@ -280,47 +280,63 @@ class TestFiles(JcCase):
         self.assertEqual(jc.purge_tool_results(self.s.root / "nope"), 0)
 
     def test_ensure_and_reconcile_job_credentials(self):
+        # every fixture carries an explicit expiresAt: the mtime tie-breaker is not portable
+        # across kernels (pre-6.13 back-to-back writes can share an mtime), and expiresAt is
+        # the branch that matters in production anyway
+        def creds(token, expires):
+            return '{"claudeAiOauth": {"accessToken": "%s", "expiresAt": %d}}' % (token, expires)
         real = Path(jc.CREDENTIALS_FILE)
         real.parent.mkdir(parents=True, exist_ok=True)
-        real.write_text('{"claudeAiOauth": {"accessToken": "old"}}')
+        real.write_text(creds("old", 1000))
         link = Path(jc.JOB_CONFIG_DIR) / ".credentials.json"
         jc.ensure_job_config()
         self.assertTrue(link.is_symlink())
         self.assertEqual(os.readlink(link), str(real))
-        self.assertEqual(link.read_text(), '{"claudeAiOauth": {"accessToken": "old"}}')
+        self.assertEqual(link.read_text(), creds("old", 1000))
         self.assertEqual(stat.S_IMODE(os.stat(jc.JOB_CONFIG_DIR).st_mode), 0o700)
         jc.ensure_job_config()                                            # idempotent, link untouched
         self.assertTrue(link.is_symlink())
         # a mid-run refresh replaced the symlink with a regular file (tmp+rename): reconcile
         # moves the fresh content back to the real store and restores the symlink
         link.unlink()
-        link.write_text('{"claudeAiOauth": {"accessToken": "fresh"}}')
+        link.write_text(creds("fresh", 1500))
         self.assertTrue(jc.reconcile_job_credentials())
         self.assertTrue(link.is_symlink())
-        self.assertEqual(real.read_text(), '{"claudeAiOauth": {"accessToken": "fresh"}}')
+        self.assertEqual(real.read_text(), creds("fresh", 1500))
         self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o600)
         self.assertFalse(jc.reconcile_job_credentials())                  # nothing to do now
         # ensure_job_config() reconciles a leftover file before re-linking, too
         link.unlink()
-        link.write_text('{"claudeAiOauth": {"accessToken": "fresher"}}')
+        link.write_text(creds("fresher", 1800))
         jc.ensure_job_config()
         self.assertTrue(link.is_symlink())
-        self.assertEqual(real.read_text(), '{"claudeAiOauth": {"accessToken": "fresher"}}')
+        self.assertEqual(real.read_text(), creds("fresher", 1800))
         # newest wins, not job-leftover wins: a stale leftover (earlier expiresAt than the
         # shared store — e.g. the terminal re-logged-in after a hard-killed run) is DISCARDED
-        real.write_text('{"claudeAiOauth": {"accessToken": "new", "expiresAt": 2000}}')
+        real.write_text(creds("new", 2000))
         link.unlink()
-        link.write_text('{"claudeAiOauth": {"accessToken": "stale", "expiresAt": 1000}}')
+        link.write_text(creds("stale", 1000))
         self.assertFalse(jc.reconcile_job_credentials())
         self.assertTrue(link.is_symlink())
         self.assertIn('"new"', real.read_text())
         # and a leftover with a LATER expiresAt still wins even if the store was written after it
         link.unlink()
-        link.write_text('{"claudeAiOauth": {"accessToken": "renewed", "expiresAt": 3000}}')
-        real.write_text('{"claudeAiOauth": {"accessToken": "new", "expiresAt": 2000}}')
+        link.write_text(creds("renewed", 3000))
+        real.write_text(creds("new", 2000))
         self.assertTrue(jc.reconcile_job_credentials())
         self.assertIn('"renewed"', real.read_text())
         self.assertTrue(link.is_symlink())
+        # restore_link=False (the mid-run sync): content lands in the store, the regular file
+        # stays put — the running CLI never sees an unlink->symlink ENOENT window
+        link.unlink()
+        link.write_text(creds("midrun", 4000))
+        self.assertTrue(jc.reconcile_job_credentials(restore_link=False))
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(real.read_text(), creds("midrun", 4000))
+        self.assertFalse(jc.reconcile_job_credentials(restore_link=False))  # synced; nothing newer
+        self.assertFalse(jc.reconcile_job_credentials())                  # end-of-run: relink only
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(real.read_text(), creds("midrun", 4000))
 
 
 class TestLocks(JcCase):

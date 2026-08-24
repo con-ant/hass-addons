@@ -461,15 +461,21 @@ def _credentials_recency(path: str):
     return (expires, mtime)
 
 
-def reconcile_job_credentials() -> bool:
+def reconcile_job_credentials(restore_link: bool = True) -> bool:
     """The CLI refreshes OAuth credentials via tmp+rename, which replaces the job config dir's
     .credentials.json SYMLINK with a regular file. If that file is genuinely NEWER than the
     shared store (later `claudeAiOauth.expiresAt`, mtime as tie-breaker), move its content back
     to CREDENTIALS_FILE (0600, atomic; /data and /homeassistant are different mounts, so this is
     read+write, not rename); a stale leftover — e.g. the interactive session refreshed or
     re-logged-in after a hard-killed run left the file behind — is discarded instead of
-    clobbering the store. Either way the symlink is restored: one credential lineage, newest
-    wins. Returns True when a refreshed file was written back."""
+    clobbering the store. The symlink is then restored: one credential lineage, newest wins.
+    `restore_link=False` is the MID-RUN variant: sync the content only and leave the regular
+    file in place, so the running CLI never hits the unlink->symlink ENOENT window; the end-of-
+    run reconcile restores the link. Known, accepted residual: the recency check and the store
+    write are not under any lock shared with the interactive CLI (the per-config-dir refresh
+    locks no longer overlap), so an interactive refresh landing inside that millisecond window
+    can be overwritten by a token one rotation older; the auth retry absorbs the fallout.
+    Returns True when a refreshed file was written back."""
     link = JOB_CONFIG_DIR + "/.credentials.json"
     if os.path.islink(link) or not os.path.isfile(link):
         return False
@@ -481,10 +487,11 @@ def reconcile_job_credentials() -> bool:
                 text = f.read()
             atomic_write_text(CREDENTIALS_FILE, text, 0o600)
             log("claude-job", "credentials refreshed inside a job; written back to the shared store")
-        else:
+        elif restore_link:
             log("claude-job", "discarding a stale job-side credentials leftover (shared store is newer)")
-        os.unlink(link)
-        os.symlink(CREDENTIALS_FILE, link)
+        if restore_link:
+            os.unlink(link)
+            os.symlink(CREDENTIALS_FILE, link)
         return job_copy_wins
     except OSError as e:
         log("claude-job", f"could not write refreshed credentials back: {e}")

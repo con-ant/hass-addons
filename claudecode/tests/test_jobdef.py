@@ -50,9 +50,11 @@ GOLDEN_SETTINGS = {
             # and CLI state stay denied.
             "Read(//data/options.json)",
             "Read(//data/claude-jobs/token)",
+            "Read(//data/claude-jobs/*)",
             "Read(//data/claude-jobs/project/**)",
-            "Read(//data/claude-jobs/claude-config/.credentials.json)",
+            "Read(//data/claude-jobs/claude-config/.credentials.json*)",
             "Read(//data/claude-jobs/claude-config/.claude.json*)",
+            "Read(//data/claude-jobs/claude-config/*)",
             "Read(//data/claude-jobs/claude-config/*.json)",
             "Read(//data/claude-jobs/claude-config/**/*.jsonl)",
             "Read(//data/claude-jobs/claude-config/backups/**)",
@@ -175,17 +177,29 @@ class TestShippedFiles(JobdefCase):
         # policy object is not mutated
         self.assertNotIn("allow", policy["permissions"])
         # The deny half must never swallow the spool rule's path (deny beats allow): a
-        # representative spooled tool-result path matches no deny glob — even under fnmatch,
-        # whose `*` is BROADER than the CLI's (it crosses `/`) — while credentials,
-        # transcripts and the endpoint token all stay covered.
-        import fnmatch
+        # representative spooled tool-result path matches no deny glob, while credentials
+        # (and their tmp siblings), transcripts, backups, auto-memory and the endpoint token
+        # all stay covered. Glob semantics mirror the CLI's: `**` crosses `/`, `*` does not.
+        import re as _re
+        def glob_rx(glob):
+            out, i = "", 0
+            while i < len(glob):
+                if glob.startswith("**", i):
+                    out, i = out + ".*", i + 2
+                elif glob[i] == "*":
+                    out, i = out + "[^/]*", i + 1
+                else:
+                    out, i = out + _re.escape(glob[i]), i + 1
+            return _re.compile("^" + out + "$")
         def matched_by(path):
             return [r for r in golden["permissions"]["deny"]
-                    if r.startswith("Read(/") and fnmatch.fnmatch(path, r[len("Read(/"):-1])]
+                    if r.startswith("Read(/") and glob_rx(r[len("Read(/"):-1]).match(path)]
         spool_path = "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/0e3a/tool-results/r1.txt"
         self.assertEqual(matched_by(spool_path), [])
         for p in ("/data/claude-jobs/claude-config/.credentials.json",
+                  "/data/claude-jobs/claude-config/.credentials.json.tmp.5.140.1",
                   "/data/claude-jobs/claude-config/.claude.json",
+                  "/data/claude-jobs/token.tmp.5.140.1",
                   "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/abc.jsonl",
                   "/data/claude-jobs/claude-config/backups/.claude.json.backup.170000",
                   "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/memory/auto.md",

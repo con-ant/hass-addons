@@ -27,8 +27,10 @@ stay read-only, deny-by-default, no new mutating routes.
   `CLAUDE_CONFIG_DIR=/data/claude-jobs/claude-config`; its `.credentials.json`
   is a **symlink** to the interactive session's file (token refresh writes
   through — if a refresh tmp+renames a real file over the symlink, the runner
-  moves it back into the shared store and restores the link, keeping one
-  credential lineage), the composed settings gain one fixed
+  syncs it back into the shared store within seconds mid-run, reconciles
+  newest-wins at the end of the run, re-links before an auth retry, and boot
+  plus the endpoint's daily tick recover a refresh stranded by a hard kill —
+  one credential lineage throughout), the composed settings gain one fixed
   `Read(…/projects/**/tool-results/**)` allow rule, `Read,Grep,Glob` are always
   in the job's tool universe, and the `//data/**` deny glob is replaced by an
   enumerated set (token, options.json, project cwd, credentials, `.claude.json*`,
@@ -64,8 +66,9 @@ stay read-only, deny-by-default, no new mutating routes.
   (`claude-job validate health-check` will nag about `get_error_log` until you do).
 - The old transcript location
   `/homeassistant/.claudecode/projects/-data-claude-jobs-project/` (inside HA
-  backups, no longer pruned after the config-dir move) is removed once at the
-  next add-on start.
+  backups, no longer pruned after the config-dir move) is moved into the new
+  location once at the next add-on start, where the 30-day/50 MiB pruning
+  bounds it again; nothing is deleted unless the move itself fails.
 - Known limit, now stated: jobs bridge only the claude.ai OAuth login
   (`.credentials.json`). An install authenticated with a Console API key
   (stored in `.claude.json`) is not supported for jobs; staging logs a warning.
