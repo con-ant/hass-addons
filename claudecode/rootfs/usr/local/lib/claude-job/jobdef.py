@@ -946,7 +946,14 @@ def spool_read_rule() -> str:
     `<config dir>/projects/<cwd-slug>/<session>/tool-results/*.txt` and hands the model a short
     preview plus the path — without this rule the job is blind to its own `ha core logs` or
     `get_history` output. It grants nothing else: transcripts (`*.jsonl`), credentials and every
-    other file under /data are enumerated in the job-policy.json deny baseline (deny beats allow)."""
+    other file under /data are enumerated in the job-policy.json deny baseline (deny beats allow).
+
+    Two probed CLI facts (2.1.241) the policy file depends on:
+    * deny rules are evaluated against every ANCESTOR DIRECTORY of the requested file too, and
+      a denied ancestor beats any allow — so no deny glob may be able to match a bare directory
+      on the tool-results path (name files or leaf subtrees, never `<ancestor>/*`);
+    * one Read rule covers Grep/Glob as well; explicit Grep()/Glob() rules are never matched by
+      the file permission checks and only draw startup warnings (also probed con.15)."""
     return f"Read(/{jc.JOB_CONFIG_DIR}/projects/**/tool-results/**)"
 
 

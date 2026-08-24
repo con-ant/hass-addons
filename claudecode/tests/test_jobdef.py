@@ -45,26 +45,32 @@ GOLDEN_SETTINGS = {
             "Read(//backup/**)",
             "Read(//ssl/**)",
             "Read(//root/**)",
-            # /data is enumerated, never `//data/**`: the spool rule's tool-results path must
-            # fall outside every deny glob (deny beats allow), while credentials, transcripts
-            # and CLI state stay denied.
+            # /data is enumerated, never `//data/**`: the spool rule's tool-results path AND
+            # every ancestor directory of it must fall outside every deny glob (the CLI denies
+            # a file whose parent directory matches a deny rule — probed 2.1.241, and the
+            # first real con.16 run hit exactly that). Deny rules name files or leaf subtrees,
+            # never `<ancestor>/*`.
             "Read(//data/options.json)",
-            "Read(//data/claude-jobs/token)",
-            "Read(//data/claude-jobs/*)",
+            "Read(//data/claude-jobs/token*)",
             "Read(//data/claude-jobs/project/**)",
             "Read(//data/claude-jobs/claude-config/.credentials.json*)",
             "Read(//data/claude-jobs/claude-config/.claude.json*)",
-            "Read(//data/claude-jobs/claude-config/*)",
             "Read(//data/claude-jobs/claude-config/*.json)",
+            "Read(//data/claude-jobs/claude-config/history.jsonl)",
             "Read(//data/claude-jobs/claude-config/**/*.jsonl)",
             "Read(//data/claude-jobs/claude-config/backups/**)",
+            "Read(//data/claude-jobs/claude-config/file-history/**)",
             "Read(//data/claude-jobs/claude-config/memory/**)",
-            "Read(//data/claude-jobs/claude-config/projects/**/memory/**)",
+            "Read(//data/claude-jobs/claude-config/paste-cache/**)",
             "Read(//data/claude-jobs/claude-config/plugins/**)",
+            "Read(//data/claude-jobs/claude-config/projects/**/memory/**)",
+            "Read(//data/claude-jobs/claude-config/session-env/**)",
+            "Read(//data/claude-jobs/claude-config/sessions/**)",
             "Read(//data/claude-jobs/claude-config/settings/**)",
             "Read(//data/claude-jobs/claude-config/shell-snapshots/**)",
             "Read(//data/claude-jobs/claude-config/statsig/**)",
             "Read(//data/claude-jobs/claude-config/todos/**)",
+            "Read(//data/claude-jobs/claude-config/uploads/**)",
             "Read(//proc/**)",
             "Read(//run/claudecode/**)",
             "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch",
@@ -176,15 +182,20 @@ class TestShippedFiles(JobdefCase):
         self.assertEqual(json.dumps(composed), json.dumps(golden))  # order too
         # policy object is not mutated
         self.assertNotIn("allow", policy["permissions"])
-        # The deny half must never swallow the spool rule's path (deny beats allow): a
-        # representative spooled tool-result path matches no deny glob, while credentials
-        # (and their tmp siblings), transcripts, backups, auto-memory and the endpoint token
-        # all stay covered. Glob semantics mirror the CLI's: `**` crosses `/`, `*` does not.
+        # The deny half must never swallow the spool rule's path (deny beats allow) — and,
+        # probed 2.1.241 (bitten by the first real con.16 run): the CLI also denies a file
+        # when ANY ANCESTOR DIRECTORY of it matches a deny rule, so the spool file, and every
+        # directory above it, must match no deny glob. Credentials (and their tmp siblings),
+        # transcripts, backups, auto-memory and the endpoint token all stay covered.
+        # Glob semantics mirror the CLI's: `**` crosses `/` (and matches zero segments),
+        # `*` does not cross `/`.
         import re as _re
         def glob_rx(glob):
             out, i = "", 0
             while i < len(glob):
-                if glob.startswith("**", i):
+                if glob.startswith("**/", i):
+                    out, i = out + "(?:.*/)?", i + 3       # mid-pattern ** matches zero segments (probed)
+                elif glob.startswith("**", i):
                     out, i = out + ".*", i + 2
                 elif glob[i] == "*":
                     out, i = out + "[^/]*", i + 1
@@ -195,14 +206,19 @@ class TestShippedFiles(JobdefCase):
             return [r for r in golden["permissions"]["deny"]
                     if r.startswith("Read(/") and glob_rx(r[len("Read(/"):-1]).match(path)]
         spool_path = "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/0e3a/tool-results/r1.txt"
-        self.assertEqual(matched_by(spool_path), [])
+        probe = spool_path
+        while probe not in ("/", ""):                        # the file AND every ancestor directory
+            self.assertEqual(matched_by(probe), [], probe)
+            probe = probe.rsplit("/", 1)[0]
         for p in ("/data/claude-jobs/claude-config/.credentials.json",
                   "/data/claude-jobs/claude-config/.credentials.json.tmp.5.140.1",
                   "/data/claude-jobs/claude-config/.claude.json",
                   "/data/claude-jobs/token.tmp.5.140.1",
+                  "/data/claude-jobs/claude-config/history.jsonl",
                   "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/abc.jsonl",
                   "/data/claude-jobs/claude-config/backups/.claude.json.backup.170000",
                   "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/memory/auto.md",
+                  "/data/claude-jobs/claude-config/sessions/s1.json",
                   "/data/claude-jobs/token", "/data/options.json"):
             self.assertTrue(matched_by(p), p)
 
