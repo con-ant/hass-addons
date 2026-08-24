@@ -45,6 +45,14 @@ That submission is the product of this run; prose outside it is not read by anyo
 - `metrics`: optional flat object of numbers only (counts, kWh, percentages) with
   lowercase_snake_case names. No strings, no nesting.
 
+## Running commands
+
+Run `ha` commands exactly as your job prompt lists them — no extra flags, no `2>&1`, no
+`;`, no `&&`, no pipes, no `sed`/`grep`/`echo` around them. The sandbox is an exact-match
+allow-list: any variation is rejected and the denial costs you a turn. If a command's
+output is large you receive a short preview plus a file path; Read that file to see the
+rest — that is the intended way, not re-running the command with filters.
+
 ## Budget and denials
 
 You run under a turn limit, a cost cap, and a wall-clock timeout. A partial result
@@ -53,4 +61,6 @@ gathering and report what you have, saying what you skipped.
 
 If a tool call is denied or fails, do not retry it in other forms and do not stop. Finish
 with what you could gather and say in `detail` which call was denied and what that left
-unchecked.
+unchecked. A check that never executed (denied, or the endpoint errored before running it)
+is "unverified", never "failed": report it as unverified and do not raise `status` for it —
+"failed" belongs only to a check that ran and found a problem.

@@ -56,6 +56,8 @@ chose in the headline.
   day plus the seven days before it (about 200 hours when reporting on yesterday; more for an
   older `date`), then slice the days out of what comes back. If the window cannot reach far
   enough back, compute what you can and say so in `detail`. Query at most 5 entities.
+  A large history result is handed to you as a short preview plus a file path — Read that
+  file to work with the full data.
 - Report-day totals: consumption kWh, production/solar kWh (if any), net.
 - Seven-day daily average for the same quantities, and the report day as a percentage of it.
 - Top consumers: the three device meters with the highest kWh on the report day.

@@ -27,7 +27,10 @@ computed from recorder history. Both ship as examples.
 └── state/<name>.json                     # last result of each job (what the entity shows, untruncated)
     state/_cost.json                      # current-month cost accumulator (month in HA's time zone)
     state/disabled/<slug>                 # kill-switch flag files
-/homeassistant/.claudecode/projects/-data-claude-jobs-project/   # run transcripts; kept 30 days / 50 MiB
+/data/claude-jobs/claude-config/          # job-only CLAUDE_CONFIG_DIR (credentials symlinked to the
+                                          # interactive session's; NOT in the HA config backup)
+├── projects/-data-claude-jobs-project/   # run transcripts; kept 30 days / 50 MiB
+│   └── <session>/tool-results/           # spooled large tool outputs; readable by the job, purged after each run
 /data/claude-jobs/token                   # endpoint bearer token (0600); NOT in the HA config backup
 /usr/share/claudecode/                    # image-shipped, read-only: job-policy.json (deny baseline),
                                           # job-contract.md (system prompt), job-ha-allowlist,
@@ -113,9 +116,8 @@ tools:
   # --api-token, --config (the job's `ha` is already wired to its broker).
   - Bash(ha core check)
   - Bash(ha core logs:*)
-  - Bash(ha supervisor info)
-  - Bash(ha resolution info)
-  - mcp__homeassistant__get_error_log
+  - Bash(ha supervisor info:*)
+  - Bash(ha resolution info:*)
   - mcp__homeassistant__list_automations
 
 notify:
@@ -179,11 +181,18 @@ arguments and may be written with `:*`; without it the rule must name the comman
 (`Bash(ha addons)` is valid, `Bash(ha addons:*)` is not):
 
 ```
-ha core check          ha supervisor info       ha os info        ha addons          ha backups
-ha core info           ha supervisor stats      ha host info      ha addons info *   ha backups info *
-ha core stats          ha supervisor logs *     ha host logs *    ha apps
-ha core logs *         ha resolution info                         ha apps info *
+ha core check          ha supervisor info *     ha os info *      ha addons          ha backups
+ha core info *         ha supervisor stats *    ha host info *    ha addons info *   ha backups info *
+ha core stats *        ha supervisor logs *     ha host logs *    ha apps
+ha core logs *         ha resolution info *                       ha apps info *
 ```
+
+The info/stats/resolution verbs accept extra arguments so a job rule may end in `:*` and the
+model may add `--raw-json` (read-only; JSON output is much easier for the model to use).
+`ha core check` stays exact. Note the runtime sandbox is still an **exact/prefix match on the
+job's own rules**: a job granted `Bash(ha supervisor info)` (exact) may not add flags, and no
+job may ever append `2>&1`, `;`, or pipes — the shipped prompts and the job contract say so
+explicitly, because every denied variation costs the run a turn.
 
 Every mutating verb (`restart`, `update`, `options`, `reboot`, `restore`, …) is simply
 absent. Inside a run:
@@ -198,9 +207,15 @@ absent. Inside a run:
   add-ons keep their passwords) filtered out; `ha backups info <slug>` works.
 - hass-mcp tools that use Home Assistant's websocket API — the dashboard tools and
   `get_statistics_range` — do not work inside jobs (the job's HA access is HTTP-only); use
-  `get_history`/`get_statistics` instead. Expect one harmless
-  `[ha-broker] 403 GET /core/api/hassio/core/logs` line in the add-on log per
-  `get_error_log` call (hass-mcp probes that path before falling back to the allowed one).
+  `get_history`/`get_statistics` instead.
+- `mcp__homeassistant__get_error_log` is **dead on current HA Core** (2026.x removed
+  `GET /api/error_log`, and hass-mcp's fallback path is not reachable either): it returns a
+  404 error object on every call. `ha core logs --lines N` is the log source — the validator
+  warns when a job still grants `get_error_log`. Jobs seeded before 1.2.65-con.16 keep their
+  old copy (seeding never overwrites): re-copy the shipped file to pick up the fix —
+  `cp /usr/share/claudecode/jobs/health-check.md ~/.claude/jobs/` — and until you do, expect
+  one harmless `[ha-broker] 403 GET /core/api/hassio/core/logs` line in the add-on log per
+  `get_error_log` call (hass-mcp probes that path before its fallback).
 
 **Bounds.** Every run has three: `max_turns` catches loops, `max_cost_usd` hard-stops
 spend, `timeout` catches hangs — and only the timeout produces no result at all. Size them
@@ -304,17 +319,39 @@ changes nothing visible — it is logged as `skipped_overlap` and the next resul
 ## What "read-only" means here
 
 Read-only is enforced by construction, not by asking nicely. The run's tool universe is
-shrunk to what the frontmatter implies (`Bash` and/or `Read,Grep,Glob`; write, edit, web
-and sub-agent tools do not exist for the run); the only settings that apply are one file
+shrunk to what the frontmatter implies (`Bash` only with a `Bash(ha …)` rule; write, edit,
+web and sub-agent tools do not exist for the run — `Read,Grep,Glob` are always present, see
+the spooling note below); the only settings that apply are one file
 the runner composes from an image-shipped deny baseline plus the job's own `tools:`/`paths:`
 (your interactive "always allow" grants, `settings.json`, every `CLAUDE.md` and your MCP
 registrations are all excluded); and the deny baseline — which beats any allow rule —
 covers the add-on's own credentials and job state (`/homeassistant/.claudecode/**`),
 `secrets.yaml`, `.storage/`, `.cloud/`, the recorder database, backups, `.git/`
-directories, `/ssl`, `/data`, `/root`, `/proc` and the generated `claudecode_jobs.yaml`.
+directories, `/ssl`, `/root`, `/proc`, the generated `claudecode_jobs.yaml`, and — item
+by item — everything under `/data`: the endpoint token, `options.json`, and the job config
+dir's credentials, transcripts and CLI state. `/data` is enumerated rather than covered by
+one glob so that exactly one subtree stays readable (next paragraph).
 The job runs in an empty working directory with a scrubbed environment (only `HOME`,
-`PATH`, locale, `TZ`, the two broker variables, and — if the add-on itself has them —
-proxy/CA settings such as `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`).
+`PATH`, locale, `TZ`, `CLAUDE_CONFIG_DIR`, the two broker variables, and — if the add-on
+itself has them — proxy/CA settings such as `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`,
+`NODE_EXTRA_CA_CERTS`).
+
+**Large tool output (spooling).** Claude Code persists any tool result beyond a few KB to a
+file under `<config dir>/projects/<cwd-slug>/<session>/tool-results/` and hands the model a
+~2 KB preview plus the path; the CLI has no supported knob to raise that threshold or turn
+it off (evaluated for this release — none exists). So jobs run with `CLAUDE_CONFIG_DIR`
+pointed at a job-only config dir, `/data/claude-jobs/claude-config`, and every composed
+settings file carries one fixed allow rule for
+`…/claude-config/projects/**/tool-results/**` — that is how a job can read the full
+`ha core logs --lines 400` or an 800 KB `get_history` result instead of a 120-line preview.
+Nothing else widens: the config dir's `.credentials.json` (a **symlink** to the interactive
+session's file, so a token refresh writes through to the one real store — never a copy),
+its `*.jsonl` transcripts and all other CLI state are individually deny-listed, and the
+runner purges the tool-results directory at the end of every run (and sweeps leftovers of
+hard-killed runs before the next one, with a daily endpoint-tick backstop). One limit: only
+the claude.ai OAuth login is bridged into jobs — an install authenticated with a Console
+API key (stored in `.claude.json`, not `.credentials.json`) is **not supported for jobs**
+and every run will fail auth; the add-on log says so at staging.
 
 The Supervisor token never enters the job's process tree. Each run gets a short-lived
 localhost broker that holds the token and forwards only a fixed table of read-only
@@ -400,12 +437,16 @@ built with, plus `preflight: {"ok": …, "missing": […]}`.
 |---|---|---|
 | Last result (full `detail`, reason, cost, denials, validation errors) | `~/.claude/jobs/state/<name>.json` | overwritten by each run |
 | Run history (one JSON line per run or skip: argv, exit code, envelope, judgment, cost) | `~/.claude/jobs/logs/<name>.jsonl` | pruned to the last 200 lines once over 1 MiB (daily backstop at 2 MiB) |
-| Full CLI transcript of each run | `/homeassistant/.claudecode/projects/-data-claude-jobs-project/` | files older than 30 days deleted, then oldest-first down to 50 MiB |
+| Full CLI transcript of each run | `/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/` | files older than 30 days deleted, then oldest-first down to 50 MiB |
+| Spooled large tool outputs | `…/-data-claude-jobs-project/<session>/tool-results/` | purged at the end of every run |
 | Monthly cost | `state/_cost.json`, archived to `logs/cost-<YYYY-MM>.json` at month rollover | kept |
 | Endpoint / respawn diagnostics | the add-on log | Supervisor's rotation |
 
-All of `~/.claude/jobs/` and the transcripts are inside your Home Assistant backups, which
-is why the bounds exist. Transcripts contain everything the job read.
+All of `~/.claude/jobs/` is inside your Home Assistant backups, which is why the bounds
+exist. Transcripts contain everything the job read; since they moved to the job-only
+config dir under `/data` (so the job can read back its own spooled tool output — see
+"What read-only means here") they are **no longer part of the HA config backup** and do
+not survive an add-on uninstall.
 
 ## Notifications
 
@@ -942,7 +983,7 @@ Where to look, in order: the entity's state and attributes (`reason`, `notify_st
 `detail`); `~/.claude/jobs/state/<name>.json` (untruncated result, `validation_errors`,
 `permission_denials`); `~/.claude/jobs/logs/<name>.jsonl` (one line per run: exit code,
 judgment row, envelope, cost); the run transcript under
-`/homeassistant/.claudecode/projects/-data-claude-jobs-project/`; the add-on log
+`/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/`; the add-on log
 (`[claude-job]`, `[claude-job-endpoint]`, `[claude-job-notify]`, `[ha-broker]` lines); and
 `curl -s http://localhost:7682/health` from the add-on terminal.
 

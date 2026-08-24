@@ -173,7 +173,7 @@ _Home Assistant triggers a job over HTTP. The runner composes policy from the im
 └── job-ha-allowlist                       # semantic ha-subcommand allow-list (§4.5)
 ```
 
-Changes from v2: `_settings.json` and `_project/` are gone from the volume — policy ships in the image (Principle 6) and the cwd moved to `/data` so no mapped-volume ancestor can inject memory. Transcripts land, via the shared config dir, in `/homeassistant/.claudecode/projects/-data-claude-jobs-project/` — persistent, inspectable from the terminal, and cwd-scoped away from what `--continue` resumes (v2's claim that they land in `_project/.claude/projects/` was wrong).
+Changes from v2: `_settings.json` and `_project/` are gone from the volume — policy ships in the image (Principle 6) and the cwd moved to `/data` so no mapped-volume ancestor can inject memory. Transcripts land, via the job-only config dir (`CLAUDE_CONFIG_DIR=/data/claude-jobs/claude-config`, rev con.16 — §4.4), in `/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/` — persistent across restarts (not across uninstall, and outside the HA backup set), inspectable from the terminal, and cwd-scoped away from what `--continue` resumes (v2's claim that they land in `_project/.claude/projects/` was wrong; v3 had them under the shared config dir, which made the CLI's spooled tool results unreadable to the job).
 
 `~/.claude/jobs/` and `/homeassistant/.claudecode/jobs/` are the same directory (`/root/.claude` symlinks to the persist dir); the doc uses the absolute form.
 
@@ -253,9 +253,8 @@ tools:
   # semantic allow-list (§4.5); non-`ha` Bash rules are rejected in v1.
   - Bash(ha core check)
   - Bash(ha core logs:*)
-  - Bash(ha supervisor info)
-  - Bash(ha resolution info)
-  - mcp__homeassistant__get_error_log
+  - Bash(ha supervisor info:*)
+  - Bash(ha resolution info:*)
   - mcp__homeassistant__list_automations
 
 notify:
@@ -334,10 +333,10 @@ One executable, `/usr/local/bin/claude-job`, a **verb-subcommand CLI** invoked i
     "allow": [
       "Bash(ha core check)",
       "Bash(ha core logs:*)",
-      "Bash(ha supervisor info)",
-      "Bash(ha resolution info)",
+      "Bash(ha supervisor info:*)",
+      "Bash(ha resolution info:*)",
       "Read(//homeassistant/**)",
-      "mcp__homeassistant__get_error_log",
+      "Read(//data/claude-jobs/claude-config/projects/**/tool-results/**)",
       "mcp__homeassistant__list_automations"
     ],
     "deny": [
@@ -358,7 +357,23 @@ One executable, `/usr/local/bin/claude-job`, a **verb-subcommand CLI** invoked i
       "Read(//backup/**)",
       "Read(//ssl/**)",
       "Read(//root/**)",
-      "Read(//data/**)",
+      "Read(//data/options.json)",
+      "Read(//data/claude-jobs/token)",
+      "Read(//data/claude-jobs/*)",
+      "Read(//data/claude-jobs/project/**)",
+      "Read(//data/claude-jobs/claude-config/.credentials.json*)",
+      "Read(//data/claude-jobs/claude-config/.claude.json*)",
+      "Read(//data/claude-jobs/claude-config/*)",
+      "Read(//data/claude-jobs/claude-config/*.json)",
+      "Read(//data/claude-jobs/claude-config/**/*.jsonl)",
+      "Read(//data/claude-jobs/claude-config/backups/**)",
+      "Read(//data/claude-jobs/claude-config/memory/**)",
+      "Read(//data/claude-jobs/claude-config/projects/**/memory/**)",
+      "Read(//data/claude-jobs/claude-config/plugins/**)",
+      "Read(//data/claude-jobs/claude-config/settings/**)",
+      "Read(//data/claude-jobs/claude-config/shell-snapshots/**)",
+      "Read(//data/claude-jobs/claude-config/statsig/**)",
+      "Read(//data/claude-jobs/claude-config/todos/**)",
       "Read(//proc/**)",
       "Read(//run/claudecode/**)",
       "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"
@@ -367,15 +382,16 @@ One executable, `/usr/local/bin/claude-job`, a **verb-subcommand CLI** invoked i
 }
 ```
 
-The `allow` half comes from frontmatter (validated); the `deny` half comes verbatim from the image. Deny beats allow — probed to hold even against an explicit `Bash(cat <denied-path>)` allow, and Grep/Glob resolve through the same Read rules, so both halves need only `Read(...)` entries (Grep()/Glob() rules are never matched by the permission checks). The set covers: the add-on's own OAuth credentials, settings and token stores (`.claudecode/**` — which also covers job state, logs and transcripts), HA secrets and auth (`secrets.yaml`, `.storage/**`, `.cloud/**`), bulk PII (`home-assistant_v2.db*`), full-system archives (`backups/**`, `//backup/**`), the generated package with the baked endpoint token (`claudecode_jobs.yaml` — without this line the shipped example's `paths: [/homeassistant/**]` could read the token, contradicting §8's output-channel claim), git metadata under every job-readable root (`.git/**` — remote URLs in `.git/config` commonly embed credentials on git-backed installs; the explicit `//homeassistant/.git/**` spelling is the belt for the mid-pattern `**` form until the §13 zero-segment probe lands), add-on config directories (`//addon_configs/**`, `//config/**` — moot under the current `map:`, which mounts `addon_config` (this add-on's own dir), not `all_addon_configs`, so sibling add-on configs are *not* mounted; shipped against map drift, since AppArmor already permits `/addon_configs/**`), private keys (`//ssl/**`), the config-dir symlink spelling (`//root/**` — which also covers `~/.git-credentials` and `~/.gitconfig`), the endpoint token and options (`//data/**`), other processes' environments (`//proc/**`), and the per-run nonce files (`//run/claudecode/**`).
+The `allow` half comes from frontmatter (validated); the `deny` half comes verbatim from the image. Deny beats allow — probed to hold even against an explicit `Bash(cat <denied-path>)` allow, and Grep/Glob resolve through the same Read rules, so both halves need only `Read(...)` entries (Grep()/Glob() rules are never matched by the permission checks). The set covers: the add-on's own OAuth credentials, settings and token stores (`.claudecode/**` — which also covers job state, logs and transcripts), HA secrets and auth (`secrets.yaml`, `.storage/**`, `.cloud/**`), bulk PII (`home-assistant_v2.db*`), full-system archives (`backups/**`, `//backup/**`), the generated package with the baked endpoint token (`claudecode_jobs.yaml` — without this line the shipped example's `paths: [/homeassistant/**]` could read the token, contradicting §8's output-channel claim), git metadata under every job-readable root (`.git/**` — remote URLs in `.git/config` commonly embed credentials on git-backed installs; the explicit `//homeassistant/.git/**` spelling is the belt for the mid-pattern `**` form until the §13 zero-segment probe lands), add-on config directories (`//addon_configs/**`, `//config/**` — moot under the current `map:`, which mounts `addon_config` (this add-on's own dir), not `all_addon_configs`, so sibling add-on configs are *not* mounted; shipped against map drift, since AppArmor already permits `/addon_configs/**`), private keys (`//ssl/**`), the config-dir symlink spelling (`//root/**` — which also covers `~/.git-credentials` and `~/.gitconfig`), other processes' environments (`//proc/**`), and the per-run nonce files (`//run/claudecode/**`). `/data` is **enumerated instead of covered by one `//data/**` glob** (rev con.16): deny beats allow, so one wildcard would also swallow the fixed spool allow rule (`…/claude-config/projects/**/tool-results/**`) that lets a job read back its own large tool output (the CLI persists any tool result beyond a few KB to that path and hands the model a ~2 KB preview plus the path; there is no supported CLI knob to raise the threshold or disable it — evaluated, none exists). The enumerated entries pin down everything else under `/data`: the endpoint token and `options.json`, every other top-level file of `/data/claude-jobs/` and of the config dir (`Read(//data/claude-jobs/*)`, `Read(//data/claude-jobs/claude-config/*)` — single star, one level: covers `atomic_write_text`'s orphaned `*.tmp.*` siblings and any future top-level file, without reaching the nested tool-results subtree), the empty project cwd, and the job config dir's `.credentials.json*`, `.claude.json*`, top-level `*.json`, `**/*.jsonl` transcripts, config backups (`backups/**` — newer CLIs keep `.claude.json.backup.*` there), per-project auto-memory (`projects/**/memory/**`), and CLI state dirs (`memory/`, `plugins/`, `settings/`, `shell-snapshots/`, `statsig/`, `todos/`). Anything under `/data` not enumerated is still unreachable — `dontAsk` denies whatever no allow rule covers, and the only /data allow rule is the tool-results one.
 
-**Environment: `env -i` allowlist, not an unset denylist.** A denylist rots (this design's probe environment alone carries 40+ `CLAUDE_*` variables that did not exist a year ago); a closed allowlist cannot. The child environment is exactly: `HOME` (routes to the shared config dir → shared credentials), `PATH` (with the wrapper dir first — §4.5), `TERM=dumb`, `LANG`/`LC_ALL`, `TZ` (HA's, so job timestamps match the house), and the two broker variables (worthless after the run). `SUPERVISOR_TOKEN`, `HA_TOKEN`, and every interactive-session marker are gone because they were never granted.
+**Environment: `env -i` allowlist, not an unset denylist.** A denylist rots (this design's probe environment alone carries 40+ `CLAUDE_*` variables that did not exist a year ago); a closed allowlist cannot. The child environment is exactly: `HOME`, `PATH` (with the wrapper dir first — §4.5), `TERM=dumb`, `LANG`/`LC_ALL`, `TZ` (HA's, so job timestamps match the house), `CLAUDE_CONFIG_DIR` (the job-only config dir — rev con.16, below), and the two broker variables (worthless after the run). `SUPERVISOR_TOKEN`, `HA_TOKEN`, and every interactive-session marker are gone because they were never granted.
 
 **The exact invocation** (step 9; cwd `/data/claude-jobs/project/`):
 
 ```bash
 env -i HOME=/root PATH=/usr/local/lib/claude-job/bin:/usr/local/bin:/usr/bin:/bin \
     TERM=dumb LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ="$HA_TZ" \
+    CLAUDE_CONFIG_DIR=/data/claude-jobs/claude-config \
     CLAUDE_JOB_BROKER_PORT="127.0.0.1:$BROKER_PORT" \
     CLAUDE_JOB_BROKER_NONCE="$NONCE" \
   timeout --signal=TERM -k 15 "$TIMEOUT_S" \
@@ -396,7 +412,7 @@ env -i HOME=/root PATH=/usr/local/lib/claude-job/bin:/usr/local/bin:/usr/bin:/bi
 
 `timeout -k 15` is the single grace value used everywhere in this document: TERM at `timeout_s`, KILL 15 s later. The stop path does not depend on it — it TERMs the pgid directly and budgets its own 5 s (§4.7 / Appendix A.1).
 
-**Credential sharing: the shared config dir, deliberately.** An isolated `CLAUDE_CONFIG_DIR` with a symlinked `.credentials.json` was rejected — the CLI writes credentials via tmp+rename, which would replace the symlink and fork the credential store, doubling the refresh-expiry bug class this add-on already fought; a copied credentials file forks token lineages outright. With settings, memory and MCP isolation delivered by flags, the only things the shared dir contributes are exactly the things wanted: one `.credentials.json`, one OAuth identity, transcripts inspectable from the terminal. The concurrent-refresh race that sharing leaves open is handled by the auth retry (Appendix A.8).
+**Credential sharing: a job-only config dir with a symlinked `.credentials.json` (rev con.16 — reverses the v3 decision).** v3 shared the config dir precisely because the CLI writes credentials via tmp+rename, which replaces a symlink and forks the credential store. The first real runs surfaced the stronger constraint: the CLI spools any large tool result to `<config dir>/projects/…/tool-results/`, and with the shared dir that path resolves under `/homeassistant/.claudecode/**` — inside a deny glob no allow rule can beat — so jobs were blind to their own `ha core logs`/`get_history` output. Since deny beats allow, no carve-out exists; the config dir itself had to move. The symlink-fork risk is handled instead of avoided: the runner keeps `/data/claude-jobs/claude-config/.credentials.json` a symlink to the shared store (reads and in-place writes go through; **never a copy**), and if a mid-run refresh tmp+renames a regular file over the symlink, `finish()`/the next staging reconciles it — content moved back into the shared store atomically, symlink restored — so there is always exactly one credential lineage and newest wins. Transcripts move with the config dir (out of the HA backup set; documented); the concurrent-refresh race is still handled by the auth retry (Appendix A.8).
 
 ### 4.5 The token broker and the `ha` CLI
 
@@ -986,7 +1002,7 @@ The jobs dir rides in every HA backup — bounds are correctness, not housekeepi
 
 ### A.7 Transcript retention — the tick's duty 4, second half
 
-Every run writes a full CLI transcript into `/homeassistant/.claudecode/projects/-data-claude-jobs-project/` (§4.1) — inside the HA backup set, containing everything the job read. Same rationale as `logs/`: bounds are correctness, not housekeeping. The runner prunes this directory — **and only this directory; sibling `projects/` dirs belong to the interactive session** — in `finish()`: delete transcript files older than the 30-day transcript-keep constant (§4.11), then oldest-first until the directory is ≤ 50 MiB. The tick's duty 4 runs the identical rule daily as backstop (covers hard-killed runs where `finish()` never ran; deletion by mtime makes the overlap harmless). Recent transcripts stay inspectable from the terminal (§4.4); nothing ever resumes a job transcript, so pruning breaks no resume path. [verify: whether the CLI's own `cleanupPeriodDays` cleanup (default 30 days) already sweeps this directory for `-p` runs under `--setting-sources ""` — if it does, the explicit prune is belt-and-braces and both keep the same 30-day figure.]
+Every run writes a full CLI transcript into `/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/` (§4.1, rev con.16 — outside the HA backup set since the config-dir move), containing everything the job read. The per-session `tool-results/` spool subtrees under the same directory are purged outright at the end of every run (and leftovers of hard-killed runs are swept at the next staging) — they hold raw tool output the job was granted to read back mid-run, and nothing may linger. Same rationale as `logs/`: bounds are correctness, not housekeeping. The runner prunes this directory — **and only this directory; sibling `projects/` dirs belong to the interactive session** — in `finish()`: delete transcript files older than the 30-day transcript-keep constant (§4.11), then oldest-first until the directory is ≤ 50 MiB. The tick's duty 4 runs the identical rule daily as backstop (covers hard-killed runs where `finish()` never ran; deletion by mtime makes the overlap harmless). Recent transcripts stay inspectable from the terminal (§4.4); nothing ever resumes a job transcript, so pruning breaks no resume path. [verify: whether the CLI's own `cleanupPeriodDays` cleanup (default 30 days) already sweeps this directory for `-p` runs under `--setting-sources ""` — if it does, the explicit prune is belt-and-braces and both keep the same 30-day figure.]
 
 ### A.8 Auth retry
 

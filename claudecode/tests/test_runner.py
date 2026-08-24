@@ -26,8 +26,8 @@ import jobdef  # LIB_DIR is on sys.path via testlib
 JOB = "health-check"
 ENTITY = "sensor.claude_job_health_check"
 STATES = "/core/api/states/"
-CHILD_ENV_KEYS = {"HOME", "PATH", "TERM", "LANG", "LC_ALL", "TZ", "CLAUDE_JOB_BROKER_PORT",
-                  "CLAUDE_JOB_BROKER_NONCE"}
+CHILD_ENV_KEYS = {"HOME", "PATH", "TERM", "LANG", "LC_ALL", "TZ", "CLAUDE_CONFIG_DIR",
+                  "CLAUDE_JOB_BROKER_PORT", "CLAUDE_JOB_BROKER_NONCE"}
 
 
 def load_runner_module():
@@ -158,6 +158,7 @@ class TestJudgmentRows(RunnerCase):
         env_keys -= set(jobdef.NETWORK_ENV_PASSTHROUGH)
         self.assertEqual(env_keys, CHILD_ENV_KEYS)
         self.assertEqual(c["env"]["TZ"], "Europe/Vienna")
+        self.assertEqual(c["env"]["CLAUDE_CONFIG_DIR"], str(self.s.job_config))
         self.assertRegex(c["env"]["CLAUDE_JOB_BROKER_PORT"], r"^\d+$")
         self.assertEqual(len(c["env"]["CLAUDE_JOB_BROKER_NONCE"]), 64)
         self.assertNotIn("SUPERVISOR_TOKEN", c["env"])
@@ -187,6 +188,23 @@ class TestJudgmentRows(RunnerCase):
         self.assertEqual(list((self.s.run_dir / "run").iterdir()), [])
         self.assertEqual(list((self.s.run_dir / "jobs").iterdir()), [])
         self.assertNotIn("[claude-job]", err)              # a clean run has nothing to say (the broker may)
+
+    def test_job_config_dir_and_tool_results_lifecycle(self):
+        """Staging builds the job-only CLAUDE_CONFIG_DIR (credentials symlink, 0700) and sweeps
+        spooled tool-results left by a hard-killed run; finish() purges the run's own."""
+        leftover = self.s.transcripts / "dead-session" / "tool-results"
+        leftover.mkdir(parents=True)
+        (leftover / "old.txt").write_text("stale spool")
+        creds = self.s.persist / ".credentials.json"
+        creds.parent.mkdir(parents=True, exist_ok=True)
+        creds.write_text('{"claudeAiOauth": {"accessToken": "tok"}}')
+        rc, _, _ = self.run_job()
+        self.assertEqual(rc, 0)
+        link = self.s.job_config / ".credentials.json"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(str(link)), str(creds))
+        self.assertEqual(stat.S_IMODE(os.stat(self.s.job_config).st_mode), 0o700)
+        self.assertFalse(leftover.exists())
 
     def test_row13_contract_status_verbatim_and_json_stdout(self):
         self.scenario("success:critical", FAKE_CLAUDE_HEADLINE="pump dead")
@@ -531,6 +549,10 @@ class TestGates(RunnerCase):
     def test_concurrency_limit_publishes_skipped(self):
         self.hold_lock(self.s.state / "_global.lock", {"job": "energy-report", "run_id": "run-20260101T000000Z-bbbb"})
         self.s.setenv(CLAUDE_JOB_GLOBAL_WAIT_S="1")
+        # the lock holder's live spool: a skipped run must not touch it (it never held the slot)
+        sibling_spool = self.s.transcripts / "live-session" / "tool-results"
+        sibling_spool.mkdir(parents=True)
+        (sibling_spool / "r1.txt").write_text("the running job is still reading this")
         t0 = time.monotonic()
         rc, _, err = self.run_job()
         self.assertLess(time.monotonic() - t0, 10)
@@ -540,6 +562,7 @@ class TestGates(RunnerCase):
         self.assertEqual(self.s.fake_claude_calls(), [])
         self.assertEqual(self.s.job_log(JOB)[-1]["event"], "skipped_concurrency")
         self.assertEqual(list((self.s.run_dir / "jobs").iterdir()), [])
+        self.assertTrue((sibling_spool / "r1.txt").exists(), "skipped run purged the live sibling's spool")
 
     def test_ha_down_persists_unpublished_and_exits_zero(self):
         self.sup.route("POST", STATES, (500, {"message": "down"}), prefix=True)
@@ -596,7 +619,7 @@ class TestValidation(RunnerCase):
         self.assertTrue(prompt.startswith("<job-input>\n"), prompt[:80])
         self.assertIn('{"date":"2026-08-17","days":7}', prompt)
         self.assertEqual(self.result("energy-report")["input"], {"date": "2026-08-17", "days": 7})
-        self.assertEqual(self.s.fake_claude_calls()[0]["parsed"]["tools"], "Bash")
+        self.assertEqual(self.s.fake_claude_calls()[0]["parsed"]["tools"], "Bash,Read,Grep,Glob")
         rc, _, _ = self.run_job("--input", "date=yesterday", name="energy-report")
         self.assertEqual((rc, self.result("energy-report")["reason"]), (2, "invalid_input"))
 

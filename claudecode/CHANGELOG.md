@@ -2,6 +2,77 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.16] - 2026-08-24
+
+Four Claude-job harness defects found by the first real runs of the shipped jobs
+(HA Core 2026.8 / Supervisor 2026.07.5). The security model is unchanged: jobs
+stay read-only, deny-by-default, no new mutating routes.
+
+### Fixed
+- **`ha core check` no longer fails with HTTP 411 through the job broker.** The
+  real `ha` CLI (go-resty) POSTs `/core/check` with `Transfer-Encoding: chunked`
+  and no `Content-Length`; the broker refused every chunked request, so the one
+  allowed POST besides `/core/api/template` could never work. The broker now
+  decodes a chunked body for `POST /core/check` only — bounded by the route's
+  body cap (0: the check body is empty; data chunks → 413, malformed framing →
+  400, chunked + Content-Length together → 411) — and forwards upstream with an
+  explicit `Content-Length`. Every other route still answers 411 to chunked, and
+  GET/log routes are unaffected (chunked *responses* were always handled).
+- **Jobs can now read their own large tool output.** Claude Code spools any tool
+  result beyond a few KB to `<config dir>/projects/…/<session>/tool-results/`
+  and hands the model a ~2 KB preview plus the path; with the shared config dir
+  that path resolved under `/homeassistant/.claudecode/**` — denied to jobs, and
+  deny beats allow, so no carve-out was possible (and the CLI has no supported
+  knob to raise the spool threshold — evaluated, none exists). Jobs now run with
+  `CLAUDE_CONFIG_DIR=/data/claude-jobs/claude-config`; its `.credentials.json`
+  is a **symlink** to the interactive session's file (token refresh writes
+  through — if a refresh tmp+renames a real file over the symlink, the runner
+  syncs it back into the shared store within seconds mid-run, reconciles
+  newest-wins at the end of the run, re-links before an auth retry, and boot
+  plus the endpoint's daily tick recover a refresh stranded by a hard kill —
+  one credential lineage throughout), the composed settings gain one fixed
+  `Read(…/projects/**/tool-results/**)` allow rule, `Read,Grep,Glob` are always
+  in the job's tool universe, and the `//data/**` deny glob is replaced by an
+  enumerated set (token, options.json, project cwd, credentials, `.claude.json*`,
+  `*.json`, `**/*.jsonl` transcripts, and every CLI state dir) so nothing but the
+  tool-results subtree became readable. The runner purges tool-results at the end
+  of each run and sweeps leftovers of hard-killed runs at staging. Transcripts
+  move with the config dir to `/data/claude-jobs/claude-config/projects/…` (no
+  longer inside HA backups; documented in docs/JOBS.md).
+- **`mcp__homeassistant__get_error_log` removed from the shipped `health-check`
+  job** — HA Core no longer serves `GET /api/error_log`, so the tool returned a
+  404 error object on every call. `ha core logs --lines 400` is the log source
+  (the `error_log_errors` metric now counts error lines in that output), and
+  `claude-job validate` warns when any job still grants `get_error_log`.
+
+### Changed
+- **Fewer burned turns on exact-match Bash denials.** The shipped prompts and
+  `job-contract.md` now state plainly that `ha` commands must be run exactly as
+  granted — no `2>&1`, no `;`, no pipes, no extra flags — and that large output
+  arrives as a preview + file path to Read, not something to re-run with
+  filters. The `ha` allow-list accepts arguments on the read-only info/stats/
+  resolution verbs (`ha core info *`, `ha supervisor info *`, `ha resolution
+  info *`, …) so jobs may use `--raw-json`; `health-check` grants the `:*`
+  forms. The wrapper still strips `-f/--follow`/`-b/--boot` on `logs`
+  (covered by existing tests). The contract also requires a check that never
+  executed to be reported as **"unverified"**, never "failed" — the first run's
+  "config check failed" headline described a check that had never run.
+- **Existing installs: re-copy the shipped health-check to pick up items 3
+  and 4** — job seeding never overwrites, so a pre-con.16 copy keeps granting
+  the dead `get_error_log` (one burned turn + a harmless
+  `[ha-broker] 403 GET /core/api/hassio/core/logs` log line per call) and the
+  exact `Bash(ha … info)` forms without `--raw-json`:
+  `cp /usr/share/claudecode/jobs/health-check.md ~/.claude/jobs/`
+  (`claude-job validate health-check` will nag about `get_error_log` until you do).
+- The old transcript location
+  `/homeassistant/.claudecode/projects/-data-claude-jobs-project/` (inside HA
+  backups, no longer pruned after the config-dir move) is moved into the new
+  location once at the next add-on start, where the 30-day/50 MiB pruning
+  bounds it again; nothing is deleted unless the move itself fails.
+- Known limit, now stated: jobs bridge only the claude.ai OAuth login
+  (`.credentials.json`). An install authenticated with a Console API key
+  (stored in `.claude.json`) is not supported for jobs; staging logs a warning.
+
 ## [1.2.65-con.15] - 2026-08-24
 
 ### Fixed

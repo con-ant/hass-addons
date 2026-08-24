@@ -938,6 +938,21 @@ class Tick(threading.Thread):
         res = jc.prune_transcripts()
         if res.get("deleted"):
             log(f"pruned {res['deleted']} transcript file(s); {res['remaining_bytes']} bytes remain")
+        # Backstops for a hard-killed run, taken only with the global lock in hand (a live run
+        # may be mid-read of its spool / mid-refresh of its credentials):
+        # - sweep leftover tool-results (a job that never runs again would leave them forever;
+        #   the transcript pruner never descends into <session>/tool-results/);
+        # - reconcile a stranded credentials refresh (it may hold the only valid rotated
+        #   refresh token, and waiting for "some job stages again" could be never).
+        fd = jc.flock_nb(jc.GLOBAL_LOCK)
+        if fd is not None:
+            try:
+                purged = jc.purge_tool_results()
+                if purged:
+                    log(f"purged {purged} leftover tool-result file(s)")
+                jc.reconcile_job_credentials()
+            finally:
+                jc.unlock(fd)
 
     def duty5_tmp_cleanup(self):
         cutoff = time.time() - jc.TMP_MAX_AGE_S

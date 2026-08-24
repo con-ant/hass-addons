@@ -68,9 +68,8 @@ HEALTH_CHECK_FM = {
     "tools": [
         "Bash(ha core check)",
         "Bash(ha core logs:*)",
-        "Bash(ha supervisor info)",
-        "Bash(ha resolution info)",
-        "mcp__homeassistant__get_error_log",
+        "Bash(ha supervisor info:*)",
+        "Bash(ha resolution info:*)",
         "mcp__homeassistant__list_automations",
     ],
     "notify": {
@@ -177,8 +176,9 @@ class ScratchRoot:
         self.disabled = self.state / "disabled"
         self.data = r / "data" / "claude-jobs"
         self.project = self.data / "project"
+        self.job_config = self.data / "claude-config"
         self.run_dir = r / "run" / "claudecode"
-        self.transcripts = self.persist / "projects" / str(self.project).replace("/", "-")
+        self.transcripts = self.job_config / "projects" / str(self.project).replace("/", "-")
         self.bin = r / "bin"
         self.home = r / "home"
         self.fakelogs = r / "fakelogs"
@@ -191,6 +191,11 @@ class ScratchRoot:
 
         self.options_file = r / "data" / "options.json"
         self.options_file.write_text(json.dumps({"job_default_model": "opus", "enable_job_endpoint": True}))
+        # the interactive session's credential store (jc.CREDENTIALS_FILE): present on any
+        # logged-in install; its absence draws a staging warning the clean-run tests reject
+        self.credentials_file = self.persist / ".credentials.json"
+        self.credentials_file.write_text('{"claudeAiOauth": {"accessToken": "test-oauth-token"}}')
+        os.chmod(self.credentials_file, 0o600)
         self.built_version_file = self.etc / "claude-code-version"
         self.built_version_file.write_text(BUILT_CLI_VERSION + "\n")
         self.addon_version_file = self.etc / "claudecode-addon-version"

@@ -71,6 +71,7 @@ def _env_num(name: str, default, cast=int):
 ROOT = HA_CONFIG_DIR = PERSIST_DIR = JOBS_DIR = STATE_DIR = LOGS_DIR = INBOX_DIR = ""
 DISABLED_DIR = ACTIONS_DIR = DATA_DIR = PROJECT_DIR = TOKEN_FILE = OPTIONS_FILE = ""
 RUN_DIR = PGID_DIR = PERRUN_DIR = SHARE_DIR = LIB_DIR = TRANSCRIPTS_DIR = ""
+JOB_CONFIG_DIR = CREDENTIALS_FILE = ""
 SUPERVISOR_URL = CLAUDE_BIN = TIMEOUT_BIN = RUNNER_BIN = NOTIFY_BIN = BROKER_SCRIPT = ""
 BUILT_CLI_VERSION_FILE = ADDON_VERSION_FILE = ""
 STOPPING_FILE = COST_FILE = COST_LOCK = GLOBAL_LOCK = PREFLIGHT_CACHE = ""
@@ -101,10 +102,16 @@ def _configure() -> None:
     g["PERRUN_DIR"] = g["RUN_DIR"] + "/run"
     g["STOPPING_FILE"] = g["RUN_DIR"] + "/stopping"
     g["PREFLIGHT_CACHE"] = g["RUN_DIR"] + "/cli_preflight.json"
+    # §4.4 (rev con.16): jobs run with CLAUDE_CONFIG_DIR pointing at a job-only config dir, so
+    # transcripts AND the CLI's spooled large tool results land outside every deny glob
+    # (the shared config dir resolves under /homeassistant/.claudecode, which jobs may never read).
+    # Its .credentials.json is a symlink to the interactive session's file (ensure_job_config()).
+    g["JOB_CONFIG_DIR"] = _env("JOB_CONFIG_DIR", g["DATA_DIR"] + "/claude-config")
+    g["CREDENTIALS_FILE"] = _env("CREDENTIALS_FILE", g["PERSIST_DIR"] + "/.credentials.json")
     # A.7 / cli-probe: the CLI names the transcript dir after the cwd with every
     # non-alphanumeric character replaced by "-" (/data/claude-jobs/project -> -data-claude-jobs-project).
     g["TRANSCRIPTS_DIR"] = _env(
-        "TRANSCRIPTS_DIR", g["PERSIST_DIR"] + "/projects/" + re.sub(r"[^A-Za-z0-9]", "-", g["PROJECT_DIR"]))
+        "TRANSCRIPTS_DIR", g["JOB_CONFIG_DIR"] + "/projects/" + re.sub(r"[^A-Za-z0-9]", "-", g["PROJECT_DIR"]))
     g["SUPERVISOR_URL"] = _env("SUPERVISOR_URL", "http://supervisor").rstrip("/")
     g["CLAUDE_BIN"] = _env("CLAUDE_BIN", "claude")
     g["TIMEOUT_BIN"] = _env("TIMEOUT_BIN", "timeout")
@@ -435,6 +442,123 @@ def prune_transcripts(directory: str | None = None, keep_days: float | None = No
         except OSError:
             pass
     return {"deleted": deleted, "remaining_bytes": total}
+
+
+# ---- job-only Claude config dir (§4.4 rev con.16) --------------------------------------------
+def _credentials_recency(path: str):
+    """Sort key for `newest wins`: (claudeAiOauth.expiresAt or -inf, mtime or -inf).
+    Unreadable/unparseable -> (-inf, -inf), so it loses to anything readable."""
+    expires = float("-inf")
+    obj = read_json(path, None)
+    if isinstance(obj, dict):
+        oauth = obj.get("claudeAiOauth")
+        if isinstance(oauth, dict) and isinstance(oauth.get("expiresAt"), (int, float)):
+            expires = float(oauth["expiresAt"])
+    try:
+        mtime = os.lstat(path).st_mtime if not os.path.islink(path) else os.stat(path).st_mtime
+    except OSError:
+        mtime = float("-inf")
+    return (expires, mtime)
+
+
+def reconcile_job_credentials(restore_link: bool = True) -> bool:
+    """The CLI refreshes OAuth credentials via tmp+rename, which replaces the job config dir's
+    .credentials.json SYMLINK with a regular file. If that file is genuinely NEWER than the
+    shared store (later `claudeAiOauth.expiresAt`, mtime as tie-breaker), move its content back
+    to CREDENTIALS_FILE (0600, atomic; /data and /homeassistant are different mounts, so this is
+    read+write, not rename); a stale leftover — e.g. the interactive session refreshed or
+    re-logged-in after a hard-killed run left the file behind — is discarded instead of
+    clobbering the store. The symlink is then restored: one credential lineage, newest wins.
+    `restore_link=False` is the MID-RUN variant: sync the content only and leave the regular
+    file in place, so the running CLI never hits the unlink->symlink ENOENT window; the end-of-
+    run reconcile restores the link. Known, accepted residual: the recency check and the store
+    write are not under any lock shared with the interactive CLI (the per-config-dir refresh
+    locks no longer overlap), so an interactive refresh landing inside that millisecond window
+    can be overwritten by a token one rotation older; the auth retry absorbs the fallout.
+    Returns True when a refreshed file was written back."""
+    link = JOB_CONFIG_DIR + "/.credentials.json"
+    if os.path.islink(link) or not os.path.isfile(link):
+        return False
+    try:
+        job_copy_wins = not os.path.isfile(CREDENTIALS_FILE) \
+            or _credentials_recency(link) > _credentials_recency(CREDENTIALS_FILE)
+        if job_copy_wins:
+            with open(link, encoding="utf-8") as f:
+                text = f.read()
+            atomic_write_text(CREDENTIALS_FILE, text, 0o600)
+            log("claude-job", "credentials refreshed inside a job; written back to the shared store")
+        elif restore_link:
+            log("claude-job", "discarding a stale job-side credentials leftover (shared store is newer)")
+        if restore_link:
+            os.unlink(link)
+            os.symlink(CREDENTIALS_FILE, link)
+        return job_copy_wins
+    except OSError as e:
+        log("claude-job", f"could not write refreshed credentials back: {e}")
+        return False
+
+
+def ensure_job_config() -> None:
+    """Create JOB_CONFIG_DIR (0700) and keep its .credentials.json a symlink to the interactive
+    session's credentials file, so a token refresh writes through to the one real store (a file
+    left behind by a mid-run refresh is reconciled back first). Never copies the credentials."""
+    os.makedirs(JOB_CONFIG_DIR, exist_ok=True)
+    try:
+        os.chmod(JOB_CONFIG_DIR, 0o700)
+    except OSError:
+        pass
+    reconcile_job_credentials()
+    if not os.path.exists(CREDENTIALS_FILE):
+        # A dangling symlink is created anyway (the target appears on the next login), but say
+        # why every run would otherwise fail auth: not logged in — or an install authenticated
+        # with a Console API key in .claude.json, which jobs do not support (docs/JOBS.md).
+        log("claude-job", f"warning: {CREDENTIALS_FILE} does not exist; jobs will fail auth until "
+                          "the interactive session logs in with claude.ai OAuth (API-key installs "
+                          "are not supported for jobs)")
+    link = JOB_CONFIG_DIR + "/.credentials.json"
+    try:
+        if os.path.islink(link):
+            if os.readlink(link) == CREDENTIALS_FILE:
+                return
+            os.unlink(link)
+        os.symlink(CREDENTIALS_FILE, link)
+    except OSError as e:
+        log("claude-job", f"could not link job credentials: {e}")
+
+
+def purge_tool_results(directory: str | None = None) -> int:
+    """Delete every session's `tool-results/` subtree under ONE transcripts directory (default
+    TRANSCRIPTS_DIR). The CLI spools any large tool output there so the job can read it back
+    during the run; nothing may linger afterwards (it holds whatever the job read, unbounded by
+    the transcript pruning which only sees regular files). Never follows symlinks; session dirs
+    left empty are removed too. Returns the number of files deleted."""
+    directory = TRANSCRIPTS_DIR if directory is None else str(directory)
+    deleted = 0
+    try:
+        sessions = list(os.scandir(directory))
+    except OSError:
+        return 0
+    for e in sessions:
+        try:
+            if not e.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        tr = os.path.join(e.path, "tool-results")
+        if os.path.islink(tr) or not os.path.isdir(tr):
+            continue
+        count = sum(len(files) for _root, _dirs, files in os.walk(tr))
+        try:
+            shutil.rmtree(tr)               # the CLI nests subdirs in here (e.g. pdf page extraction)
+        except OSError as exc:
+            log("claude-job", f"could not purge {tr}: {exc}")
+            continue
+        deleted += count
+        try:
+            os.rmdir(e.path)                # a session dir holding only tool-results vanishes with it
+        except OSError:
+            pass
+    return deleted
 
 
 # ---- locks (R4) -----------------------------------------------------------------------------

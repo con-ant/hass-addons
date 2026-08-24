@@ -524,6 +524,32 @@ setup_job_dirs() {
   if ! { mkdir -p "$JOB_DATA_DIR/project" && chmod 700 "$JOB_DATA_DIR"; }; then
     warn "Could not create $JOB_DATA_DIR"
   fi
+  # con.16 moved job transcripts (and their tool-result spools) to
+  # $JOB_DATA_DIR/claude-config/projects/…; the old location sat inside the HA
+  # backup set and neither pruner bounds it any more. Migrate it once — move,
+  # don't delete: transcripts are what JOBS.md tells users to consult, and the
+  # pruner bounds them again at the new location.
+  local old_transcripts="$PERSIST_DIR/projects/-data-claude-jobs-project"
+  local new_transcripts="$JOB_DATA_DIR/claude-config/projects/-data-claude-jobs-project"
+  if [ -d "$old_transcripts" ]; then
+    mkdir -p "$(dirname "$new_transcripts")" 2>/dev/null
+    if [ ! -e "$new_transcripts" ] && mv "$old_transcripts" "$new_transcripts" 2>/dev/null; then
+      info "Moved pre-con.16 job transcripts to $new_transcripts"
+    elif mkdir -p "$new_transcripts" && cp -a "$old_transcripts/." "$new_transcripts/" 2>/dev/null \
+        && rm -rf "$old_transcripts"; then
+      info "Merged pre-con.16 job transcripts into $new_transcripts"
+    elif rm -rf "$old_transcripts"; then
+      info "Removed pre-con.16 job transcripts at $old_transcripts (could not move them)"
+    else
+      warn "Could not migrate $old_transcripts"
+    fi
+  fi
+  # A hard kill (watchdog SIGKILL, container restart) can strand a refreshed
+  # .credentials.json in the job config dir; reconcile it into the shared store
+  # at boot (no runs are live yet). The endpoint's daily tick is the backstop.
+  python3 -c "import sys; sys.path.insert(0, '/usr/local/lib/claude-job'); \
+import jobcommon as jc; jc.reconcile_job_credentials()" 2>/dev/null \
+    || warn "Boot-time credentials reconcile failed (continuing)"
   # /run is wiped with the container; a leftover `stopping` flag or pgid file
   # can only be from a previous life of this container (restart without
   # recreate), so clear them.

@@ -72,6 +72,7 @@ ABORT_RACE_WAIT_S = 0.5          # child died by signal: give a stop-path TERM a
 ENVELOPE_RESULT_LOG_CAP = 2048   # 2c
 JSONL_LINE_CAP = 16 * 1024       # 2c
 DENIALS_CAP = 20
+CRED_SYNC_INTERVAL_S = 15        # mid-run credential sync throttle (run_attempt)
 NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # 127.0.0.1 never goes via a proxy
 
 # The abort flag: signal handlers set it, polling loops read it (R3).
@@ -144,6 +145,7 @@ class Run:
     exit_code: Optional[int] = None
     elapsed: float = 0.0
     envelope: Optional[dict] = None
+    next_cred_sync: float = 0.0       # monotonic throttle for the mid-run credential sync
     aborting: bool = False
     finishing: bool = False
 
@@ -545,6 +547,8 @@ def stage_run(run: Run) -> None:
     if not os.environ.get("SUPERVISOR_TOKEN"):
         log("warning: SUPERVISOR_TOKEN is not set (not running under the Supervisor?): publishing to Home Assistant "
             "and the job's own `ha`/MCP reads will fail")
+    quietly("job config dir", jc.ensure_job_config, None)       # CLAUDE_CONFIG_DIR + credentials symlink
+    quietly("tool-results sweep", jc.purge_tool_results, 0)     # leftovers from a hard-killed run
     start_broker(run)
     run.tz = fetch_time_zone(run)
     check_abort(run)
@@ -660,6 +664,10 @@ def wait_and_judge(run: Run) -> Verdict:
     verdict = run_attempt(run, auth_retried=False)
     if verdict.extra.get("auth_shaped") and run.attempts == 1:
         auth_retry_pause(run)
+        # Attempt 1's CLI may have tmp+renamed a refresh over the credentials symlink; without
+        # re-linking, attempt 2 would read that fork and never see the interactive /login this
+        # pause exists to wait for. ensure_job_config() reconciles (newest wins) and re-links.
+        quietly("job config dir", jc.ensure_job_config, None)
         spawn_claude(run)
         run.retried_auth = True
         verdict = run_attempt(run, auth_retried=True)
@@ -667,8 +675,16 @@ def wait_and_judge(run: Run) -> Verdict:
 
 
 def run_attempt(run: Run, *, auth_retried: bool) -> Verdict:
+    link = f"{jc.JOB_CONFIG_DIR}/.credentials.json"
     while run.claude.poll() is None:
         check_abort(run)
+        # A mid-run refresh forks the credential lineage until the end of the run; sync the
+        # rotated token into the shared store as soon as the symlink flips to a regular file
+        # (content only — the link is restored after the run, so the CLI never sees an ENOENT
+        # window mid-flight). Throttled: a stat per poll, a sync at most every 15 s.
+        if time.monotonic() >= run.next_cred_sync and not os.path.islink(link):
+            run.next_cred_sync = time.monotonic() + CRED_SYNC_INTERVAL_S
+            quietly("mid-run credentials sync", lambda: jc.reconcile_job_credentials(restore_link=False), False)
         time.sleep(POLL_S)
     run.exit_code = normalize_exit(run.claude.returncode)
     run.elapsed = time.monotonic() - run.spawn_t
@@ -847,6 +863,15 @@ def finish(run: Run, verdict: Verdict) -> int:
                                           status="error", reason="runner_crash"))
     guarded("run log", append_run_record, run, verdict, state)     # (b) step 11: JSONL
     guarded("publish", publish_terminal, run, state, aborting)     # (c) step 12: entity (+ cost rollup, cost_raw)
+    if run.staged:      # only a run that actually held the slot and spawned claude may touch the shared
+        # spool/credentials state — a concurrency/disabled/invalid conclude must not delete the spool of
+        # the sibling that is running right now. Done BEFORE the slot frees so the next run can't be
+        # mid-read and the unlink+symlink can't interleave with a queued sibling's ensure_job_config().
+        # The reconcile runs on the abort path too (a stat when nothing to do; a stranded refresh must not
+        # wait for a future staging); only the purge is skipped there for the 4 s budget.
+        guarded("credentials reconcile", jc.reconcile_job_credentials)
+        if not aborting:
+            guarded("tool-results purge", jc.purge_tool_results)
     release_global_lock(run)
     if notifier:
         guarded("notifier", run_notifier, run, state, notifier)     # (d) step 13, then one re-POST
@@ -1042,6 +1067,9 @@ def cleanup(run: Run) -> None:
     """Kill the broker, drop what THIS invocation created. Locks are released by process exit."""
     kill_child(run)
     stop_broker(run)
+    if run.staged:      # fallback for paths that never reach finish()'s reconcile (e.g. persist_terminal_state
+        # raised -> leave_early); normally a single islink stat, since finish() already reconciled under the lock
+        quietly("credentials reconcile", jc.reconcile_job_credentials, False)
     if run.job_lock is not None and run.input_file:  # the inbox hand-off is single-use — but only the run's owner may
         consume_inbox_file(run.input_file)            # eat it (a detaching parent or a skipper leaves it; the tick sweeps)
     mine = [run.pgid_path] if run.job_lock is not None else []          # written by take_job_lock()
@@ -1153,7 +1181,7 @@ def cmd_dry_run(args) -> int:
     section("settings.json", json.dumps(jobdef.compose_settings(job, jobdef.load_policy()), indent=2))
     section("mcp.json", json.dumps(jobdef.mcp_config(job, 0, "<nonce>"), indent=2).replace("127.0.0.1:0/", "127.0.0.1:<port>/"))
     section("result schema", json.dumps(schema, indent=2))
-    section("tools", jobdef.tools_csv(job) or '""')
+    section("tools", jobdef.tools_csv(job))
     section("notify channels", "\n".join(f"{s}: {jobdef.resolve_channels(s, job, cfg) or ['state_only']}" for s in jobdef.NOTIFY_KEYS))
     prompt = jobdef.assemble_prompt(job, jobdef.apply_input_defaults(job, run.input) if run.input else None)
     section("prompt", indent(prompt))

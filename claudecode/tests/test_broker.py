@@ -497,7 +497,7 @@ class TestProxy(unittest.TestCase):
         st, _ = raw_request(self.b.port, (f"GET /core/api/config HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {NONCE}\r\n"
                                           f"Content-Length: 2\r\nConnection: close\r\n\r\nhi").encode())
         self.assertEqual(st, 413)
-        # POST without Content-Length -> 411; chunked -> 411; garbage length -> 400
+        # POST without Content-Length -> 411; chunked on any route but /core/check -> 411; garbage length -> 400
         st, _ = raw_request(self.b.port, (f"POST /core/check HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {NONCE}\r\n"
                                           f"Connection: close\r\n\r\n").encode())
         self.assertEqual(st, 411)
@@ -507,6 +507,35 @@ class TestProxy(unittest.TestCase):
         st, _ = raw_request(self.b.port, (f"POST /core/check HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {NONCE}\r\n"
                                           f"Content-Length: nope\r\nConnection: close\r\n\r\n").encode())
         self.assertEqual(st, 400)
+        self.assertEqual(self.sup.requests, [])
+
+    def test_chunked_core_check_is_proxied(self):
+        """The real `ha` CLI (go-resty) POSTs /core/check chunked with an empty body and no
+        Content-Length; the broker decodes it and forwards with an explicit Content-Length."""
+        st, body = raw_request(self.b.port, (
+            f"POST /core/check HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {NONCE}\r\n"
+            f"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n").encode())
+        self.assertEqual(st, 200, body)
+        r = self.sup.requests[-1]
+        self.assertEqual((r["method"], r["path"], r["body"]), ("POST", "/core/check", b""))
+        self.assertNotIn("transfer-encoding", r["headers"])
+        self.assertEqual(r["headers"].get("content-length"), "0")
+        self.sup.clear()
+        # a chunk that exceeds the route's body cap (0 for /core/check) -> 413, nothing forwarded
+        st, _ = raw_request(self.b.port, (
+            f"POST /core/check HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {NONCE}\r\n"
+            f"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n0\r\n\r\n").encode())
+        self.assertEqual(st, 413)
+        # malformed chunk framing -> 400
+        st, _ = raw_request(self.b.port, (
+            f"POST /core/check HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {NONCE}\r\n"
+            f"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\nzz\r\n\r\n").encode())
+        self.assertEqual(st, 400)
+        # chunked + Content-Length together (smuggling shape) -> 411
+        st, _ = raw_request(self.b.port, (
+            f"POST /core/check HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {NONCE}\r\n"
+            f"Transfer-Encoding: chunked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n0\r\n\r\n").encode())
+        self.assertEqual(st, 411)
         self.assertEqual(self.sup.requests, [])
 
     # ---- A32: template request pre-check (heuristic mode via the env seam set in setUpClass) ----
