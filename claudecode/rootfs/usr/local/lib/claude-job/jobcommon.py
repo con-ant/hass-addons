@@ -445,23 +445,47 @@ def prune_transcripts(directory: str | None = None, keep_days: float | None = No
 
 
 # ---- job-only Claude config dir (§4.4 rev con.16) --------------------------------------------
+def _credentials_recency(path: str):
+    """Sort key for `newest wins`: (claudeAiOauth.expiresAt or -inf, mtime or -inf).
+    Unreadable/unparseable -> (-inf, -inf), so it loses to anything readable."""
+    expires = float("-inf")
+    obj = read_json(path, None)
+    if isinstance(obj, dict):
+        oauth = obj.get("claudeAiOauth")
+        if isinstance(oauth, dict) and isinstance(oauth.get("expiresAt"), (int, float)):
+            expires = float(oauth["expiresAt"])
+    try:
+        mtime = os.lstat(path).st_mtime if not os.path.islink(path) else os.stat(path).st_mtime
+    except OSError:
+        mtime = float("-inf")
+    return (expires, mtime)
+
+
 def reconcile_job_credentials() -> bool:
     """The CLI refreshes OAuth credentials via tmp+rename, which replaces the job config dir's
-    .credentials.json SYMLINK with a regular file. Move such a file's content back to
-    CREDENTIALS_FILE (0600, atomic; /data and /homeassistant are different mounts, so this is
-    read+write, not rename) and restore the symlink — one credential lineage, newest wins.
-    Returns True when a refreshed file was written back."""
+    .credentials.json SYMLINK with a regular file. If that file is genuinely NEWER than the
+    shared store (later `claudeAiOauth.expiresAt`, mtime as tie-breaker), move its content back
+    to CREDENTIALS_FILE (0600, atomic; /data and /homeassistant are different mounts, so this is
+    read+write, not rename); a stale leftover — e.g. the interactive session refreshed or
+    re-logged-in after a hard-killed run left the file behind — is discarded instead of
+    clobbering the store. Either way the symlink is restored: one credential lineage, newest
+    wins. Returns True when a refreshed file was written back."""
     link = JOB_CONFIG_DIR + "/.credentials.json"
     if os.path.islink(link) or not os.path.isfile(link):
         return False
     try:
-        with open(link, encoding="utf-8") as f:
-            text = f.read()
-        atomic_write_text(CREDENTIALS_FILE, text, 0o600)
+        job_copy_wins = not os.path.isfile(CREDENTIALS_FILE) \
+            or _credentials_recency(link) > _credentials_recency(CREDENTIALS_FILE)
+        if job_copy_wins:
+            with open(link, encoding="utf-8") as f:
+                text = f.read()
+            atomic_write_text(CREDENTIALS_FILE, text, 0o600)
+            log("claude-job", "credentials refreshed inside a job; written back to the shared store")
+        else:
+            log("claude-job", "discarding a stale job-side credentials leftover (shared store is newer)")
         os.unlink(link)
         os.symlink(CREDENTIALS_FILE, link)
-        log("claude-job", "credentials refreshed inside a job; written back to the shared store")
-        return True
+        return job_copy_wins
     except OSError as e:
         log("claude-job", f"could not write refreshed credentials back: {e}")
         return False
@@ -477,6 +501,13 @@ def ensure_job_config() -> None:
     except OSError:
         pass
     reconcile_job_credentials()
+    if not os.path.exists(CREDENTIALS_FILE):
+        # A dangling symlink is created anyway (the target appears on the next login), but say
+        # why every run would otherwise fail auth: not logged in — or an install authenticated
+        # with a Console API key in .claude.json, which jobs do not support (docs/JOBS.md).
+        log("claude-job", f"warning: {CREDENTIALS_FILE} does not exist; jobs will fail auth until "
+                          "the interactive session logs in with claude.ai OAuth (API-key installs "
+                          "are not supported for jobs)")
     link = JOB_CONFIG_DIR + "/.credentials.json"
     try:
         if os.path.islink(link):
@@ -509,17 +540,13 @@ def purge_tool_results(directory: str | None = None) -> int:
         tr = os.path.join(e.path, "tool-results")
         if os.path.islink(tr) or not os.path.isdir(tr):
             continue
+        count = sum(len(files) for _root, _dirs, files in os.walk(tr))
         try:
-            for f in os.scandir(tr):
-                try:
-                    if f.is_file(follow_symlinks=False):
-                        os.unlink(f.path)
-                        deleted += 1
-                except OSError:
-                    pass
-            os.rmdir(tr)
-        except OSError:
+            shutil.rmtree(tr)               # the CLI nests subdirs in here (e.g. pdf page extraction)
+        except OSError as exc:
+            log("claude-job", f"could not purge {tr}: {exc}")
             continue
+        deleted += count
         try:
             os.rmdir(e.path)                # a session dir holding only tool-results vanishes with it
         except OSError:

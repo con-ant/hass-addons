@@ -55,6 +55,20 @@ stay read-only, deny-by-default, no new mutating routes.
   (covered by existing tests). The contract also requires a check that never
   executed to be reported as **"unverified"**, never "failed" — the first run's
   "config check failed" headline described a check that had never run.
+- **Existing installs: re-copy the shipped health-check to pick up items 3
+  and 4** — job seeding never overwrites, so a pre-con.16 copy keeps granting
+  the dead `get_error_log` (one burned turn + a harmless
+  `[ha-broker] 403 GET /core/api/hassio/core/logs` log line per call) and the
+  exact `Bash(ha … info)` forms without `--raw-json`:
+  `cp /usr/share/claudecode/jobs/health-check.md ~/.claude/jobs/`
+  (`claude-job validate health-check` will nag about `get_error_log` until you do).
+- The old transcript location
+  `/homeassistant/.claudecode/projects/-data-claude-jobs-project/` (inside HA
+  backups, no longer pruned after the config-dir move) is removed once at the
+  next add-on start.
+- Known limit, now stated: jobs bridge only the claude.ai OAuth login
+  (`.credentials.json`). An install authenticated with a Console API key
+  (stored in `.claude.json`) is not supported for jobs; staging logs a warning.
 
 ## [1.2.65-con.15] - 2026-08-24
 

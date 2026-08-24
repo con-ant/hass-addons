@@ -55,7 +55,9 @@ GOLDEN_SETTINGS = {
             "Read(//data/claude-jobs/claude-config/.claude.json*)",
             "Read(//data/claude-jobs/claude-config/*.json)",
             "Read(//data/claude-jobs/claude-config/**/*.jsonl)",
+            "Read(//data/claude-jobs/claude-config/backups/**)",
             "Read(//data/claude-jobs/claude-config/memory/**)",
+            "Read(//data/claude-jobs/claude-config/projects/**/memory/**)",
             "Read(//data/claude-jobs/claude-config/plugins/**)",
             "Read(//data/claude-jobs/claude-config/settings/**)",
             "Read(//data/claude-jobs/claude-config/shell-snapshots/**)",
@@ -185,6 +187,8 @@ class TestShippedFiles(JobdefCase):
         for p in ("/data/claude-jobs/claude-config/.credentials.json",
                   "/data/claude-jobs/claude-config/.claude.json",
                   "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/abc.jsonl",
+                  "/data/claude-jobs/claude-config/backups/.claude.json.backup.170000",
+                  "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/memory/auto.md",
                   "/data/claude-jobs/token", "/data/options.json"):
             self.assertTrue(matched_by(p), p)
 

@@ -211,7 +211,11 @@ absent. Inside a run:
 - `mcp__homeassistant__get_error_log` is **dead on current HA Core** (2026.x removed
   `GET /api/error_log`, and hass-mcp's fallback path is not reachable either): it returns a
   404 error object on every call. `ha core logs --lines N` is the log source — the validator
-  warns when a job still grants `get_error_log`.
+  warns when a job still grants `get_error_log`. Jobs seeded before 1.2.65-con.16 keep their
+  old copy (seeding never overwrites): re-copy the shipped file to pick up the fix —
+  `cp /usr/share/claudecode/jobs/health-check.md ~/.claude/jobs/` — and until you do, expect
+  one harmless `[ha-broker] 403 GET /core/api/hassio/core/logs` line in the add-on log per
+  `get_error_log` call (hass-mcp probes that path before its fallback).
 
 **Bounds.** Every run has three: `max_turns` catches loops, `max_cost_usd` hard-stops
 spend, `timeout` catches hangs — and only the timeout produces no result at all. Size them
@@ -344,7 +348,10 @@ Nothing else widens: the config dir's `.credentials.json` (a **symlink** to the 
 session's file, so a token refresh writes through to the one real store — never a copy),
 its `*.jsonl` transcripts and all other CLI state are individually deny-listed, and the
 runner purges the tool-results directory at the end of every run (and sweeps leftovers of
-hard-killed runs before the next one).
+hard-killed runs before the next one, with a daily endpoint-tick backstop). One limit: only
+the claude.ai OAuth login is bridged into jobs — an install authenticated with a Console
+API key (stored in `.claude.json`, not `.credentials.json`) is **not supported for jobs**
+and every run will fail auth; the add-on log says so at staging.
 
 The Supervisor token never enters the job's process tree. Each run gets a short-lived
 localhost broker that holds the token and forwards only a fixed table of read-only

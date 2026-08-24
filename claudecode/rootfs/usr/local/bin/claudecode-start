@@ -524,6 +524,15 @@ setup_job_dirs() {
   if ! { mkdir -p "$JOB_DATA_DIR/project" && chmod 700 "$JOB_DATA_DIR"; }; then
     warn "Could not create $JOB_DATA_DIR"
   fi
+  # con.16 moved job transcripts (and their tool-result spools) to
+  # $JOB_DATA_DIR/claude-config/projects/…; the old location sat inside the HA
+  # backup set and neither pruner bounds it any more — sweep it once.
+  local old_transcripts="$PERSIST_DIR/projects/-data-claude-jobs-project"
+  if [ -d "$old_transcripts" ]; then
+    rm -rf "$old_transcripts" \
+      && info "Removed pre-con.16 job transcripts at $old_transcripts (transcripts now live under $JOB_DATA_DIR/claude-config)" \
+      || warn "Could not remove $old_transcripts"
+  fi
   # /run is wiped with the container; a leftover `stopping` flag or pgid file
   # can only be from a previous life of this container (restart without
   # recreate), so clear them.

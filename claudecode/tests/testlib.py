@@ -191,6 +191,11 @@ class ScratchRoot:
 
         self.options_file = r / "data" / "options.json"
         self.options_file.write_text(json.dumps({"job_default_model": "opus", "enable_job_endpoint": True}))
+        # the interactive session's credential store (jc.CREDENTIALS_FILE): present on any
+        # logged-in install; its absence draws a staging warning the clean-run tests reject
+        self.credentials_file = self.persist / ".credentials.json"
+        self.credentials_file.write_text('{"claudeAiOauth": {"accessToken": "test-oauth-token"}}')
+        os.chmod(self.credentials_file, 0o600)
         self.built_version_file = self.etc / "claude-code-version"
         self.built_version_file.write_text(BUILT_CLI_VERSION + "\n")
         self.addon_version_file = self.etc / "claudecode-addon-version"

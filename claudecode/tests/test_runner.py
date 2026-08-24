@@ -549,6 +549,10 @@ class TestGates(RunnerCase):
     def test_concurrency_limit_publishes_skipped(self):
         self.hold_lock(self.s.state / "_global.lock", {"job": "energy-report", "run_id": "run-20260101T000000Z-bbbb"})
         self.s.setenv(CLAUDE_JOB_GLOBAL_WAIT_S="1")
+        # the lock holder's live spool: a skipped run must not touch it (it never held the slot)
+        sibling_spool = self.s.transcripts / "live-session" / "tool-results"
+        sibling_spool.mkdir(parents=True)
+        (sibling_spool / "r1.txt").write_text("the running job is still reading this")
         t0 = time.monotonic()
         rc, _, err = self.run_job()
         self.assertLess(time.monotonic() - t0, 10)
@@ -558,6 +562,7 @@ class TestGates(RunnerCase):
         self.assertEqual(self.s.fake_claude_calls(), [])
         self.assertEqual(self.s.job_log(JOB)[-1]["event"], "skipped_concurrency")
         self.assertEqual(list((self.s.run_dir / "jobs").iterdir()), [])
+        self.assertTrue((sibling_spool / "r1.txt").exists(), "skipped run purged the live sibling's spool")
 
     def test_ha_down_persists_unpublished_and_exits_zero(self):
         self.sup.route("POST", STATES, (500, {"message": "down"}), prefix=True)

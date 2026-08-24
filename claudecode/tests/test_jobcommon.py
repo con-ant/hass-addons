@@ -265,11 +265,13 @@ class TestFiles(JcCase):
         (sess / "tool-results").mkdir(parents=True)
         (sess / "tool-results" / "r1.txt").write_text("x" * 100)
         (sess / "tool-results" / "r2.txt").write_text("y")
+        (sess / "tool-results" / "pdf-abc").mkdir()                       # the CLI nests subdirs in here
+        (sess / "tool-results" / "pdf-abc" / "page1.png").write_bytes(b"p")
         busy = d / "busy-session"
         (busy / "tool-results").mkdir(parents=True)
         (busy / "tool-results" / "r.txt").write_text("z")
         (busy / "other.txt").write_text("keep me")                        # session dir not emptied -> stays
-        self.assertEqual(jc.purge_tool_results(), 3)
+        self.assertEqual(jc.purge_tool_results(), 4)
         self.assertFalse(sess.exists())                                   # emptied session dir removed
         self.assertFalse((busy / "tool-results").exists())
         self.assertTrue((busy / "other.txt").exists())
@@ -304,6 +306,21 @@ class TestFiles(JcCase):
         jc.ensure_job_config()
         self.assertTrue(link.is_symlink())
         self.assertEqual(real.read_text(), '{"claudeAiOauth": {"accessToken": "fresher"}}')
+        # newest wins, not job-leftover wins: a stale leftover (earlier expiresAt than the
+        # shared store — e.g. the terminal re-logged-in after a hard-killed run) is DISCARDED
+        real.write_text('{"claudeAiOauth": {"accessToken": "new", "expiresAt": 2000}}')
+        link.unlink()
+        link.write_text('{"claudeAiOauth": {"accessToken": "stale", "expiresAt": 1000}}')
+        self.assertFalse(jc.reconcile_job_credentials())
+        self.assertTrue(link.is_symlink())
+        self.assertIn('"new"', real.read_text())
+        # and a leftover with a LATER expiresAt still wins even if the store was written after it
+        link.unlink()
+        link.write_text('{"claudeAiOauth": {"accessToken": "renewed", "expiresAt": 3000}}')
+        real.write_text('{"claudeAiOauth": {"accessToken": "new", "expiresAt": 2000}}')
+        self.assertTrue(jc.reconcile_job_credentials())
+        self.assertIn('"renewed"', real.read_text())
+        self.assertTrue(link.is_symlink())
 
 
 class TestLocks(JcCase):
