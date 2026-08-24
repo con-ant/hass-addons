@@ -13,16 +13,18 @@ import jobcommon as jc
 import jobdef
 
 # Design §4.4 "The composed settings file" for health-check, plus the A4 sandbox guard.
+# The allow list's "<spool>" placeholder stands for jobdef.spool_read_rule(), whose path
+# depends on the (test-scratch) JOB_CONFIG_DIR; golden_settings() resolves it.
 GOLDEN_SETTINGS = {
     "permissions": {
         "defaultMode": "dontAsk",
         "allow": [
             "Bash(ha core check)",
             "Bash(ha core logs:*)",
-            "Bash(ha supervisor info)",
-            "Bash(ha resolution info)",
+            "Bash(ha supervisor info:*)",
+            "Bash(ha resolution info:*)",
             "Read(//homeassistant/**)",
-            "mcp__homeassistant__get_error_log",
+            "<spool>",
             "mcp__homeassistant__list_automations",
         ],
         "deny": [
@@ -43,7 +45,22 @@ GOLDEN_SETTINGS = {
             "Read(//backup/**)",
             "Read(//ssl/**)",
             "Read(//root/**)",
-            "Read(//data/**)",
+            # /data is enumerated, never `//data/**`: the spool rule's tool-results path must
+            # fall outside every deny glob (deny beats allow), while credentials, transcripts
+            # and CLI state stay denied.
+            "Read(//data/options.json)",
+            "Read(//data/claude-jobs/token)",
+            "Read(//data/claude-jobs/project/**)",
+            "Read(//data/claude-jobs/claude-config/.credentials.json)",
+            "Read(//data/claude-jobs/claude-config/.claude.json*)",
+            "Read(//data/claude-jobs/claude-config/*.json)",
+            "Read(//data/claude-jobs/claude-config/**/*.jsonl)",
+            "Read(//data/claude-jobs/claude-config/memory/**)",
+            "Read(//data/claude-jobs/claude-config/plugins/**)",
+            "Read(//data/claude-jobs/claude-config/settings/**)",
+            "Read(//data/claude-jobs/claude-config/shell-snapshots/**)",
+            "Read(//data/claude-jobs/claude-config/statsig/**)",
+            "Read(//data/claude-jobs/claude-config/todos/**)",
             "Read(//proc/**)",
             "Read(//run/claudecode/**)",
             "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch",
@@ -51,6 +68,13 @@ GOLDEN_SETTINGS = {
     },
     "sandbox": {"autoAllowBashIfSandboxed": False},
 }
+
+
+def golden_settings():
+    g = copy.deepcopy(GOLDEN_SETTINGS)
+    g["permissions"]["allow"] = [jobdef.spool_read_rule() if a == "<spool>" else a
+                                 for a in g["permissions"]["allow"]]
+    return g
 
 GOLDEN_RESULT_SCHEMA = {
     "type": "object",
@@ -69,10 +93,10 @@ GOLDEN_RESULT_SCHEMA = {
 }
 
 A25_ALLOWLIST = [
-    "ha core check", "ha core info", "ha core stats", "ha core logs *", "ha supervisor info",
-    "ha supervisor stats", "ha supervisor logs *", "ha resolution info", "ha os info", "ha host info",
-    "ha host logs *", "ha addons", "ha addons info *", "ha apps", "ha apps info *", "ha backups",
-    "ha backups info *",
+    "ha core check", "ha core info *", "ha core stats *", "ha core logs *", "ha supervisor info *",
+    "ha supervisor stats *", "ha supervisor logs *", "ha resolution info *", "ha os info *",
+    "ha host info *", "ha host logs *", "ha addons", "ha addons info *", "ha apps", "ha apps info *",
+    "ha backups", "ha backups info *",
 ]
 
 
@@ -133,19 +157,36 @@ class TestShippedFiles(JobdefCase):
         self.assertEqual(set(er.input), {"date"})
         self.assertEqual(er.input["date"].pattern, r"^\d{4}-\d{2}-\d{2}$")
         self.assertEqual(er.notify, {"info": ("persistent",), "ok": ("persistent",)})
-        self.assertEqual(jobdef.tools_csv(er), "")
+        self.assertEqual(jobdef.tools_csv(er), "Read,Grep,Glob")
+        self.assertNotIn("mcp__homeassistant__get_error_log", hc.tools)   # dead on current HA Core
 
     def test_policy_file_shape_and_golden_settings(self):
+        golden = golden_settings()
         policy = jobdef.load_policy()
         self.assertEqual(list(policy), ["permissions", "sandbox"])
-        self.assertEqual(policy["permissions"]["deny"], GOLDEN_SETTINGS["permissions"]["deny"])
+        self.assertEqual(policy["permissions"]["deny"], golden["permissions"]["deny"])
         job = self.load("health-check", HEALTH_CHECK_FM)
         composed = jobdef.compose_settings(job, policy)
-        self.assertEqual(composed, GOLDEN_SETTINGS)
+        self.assertEqual(composed, golden)
         self.assertEqual(list(composed["permissions"]), ["defaultMode", "allow", "deny"])
-        self.assertEqual(json.dumps(composed), json.dumps(GOLDEN_SETTINGS))  # order too
+        self.assertEqual(json.dumps(composed), json.dumps(golden))  # order too
         # policy object is not mutated
         self.assertNotIn("allow", policy["permissions"])
+        # The deny half must never swallow the spool rule's path (deny beats allow): a
+        # representative spooled tool-result path matches no deny glob — even under fnmatch,
+        # whose `*` is BROADER than the CLI's (it crosses `/`) — while credentials,
+        # transcripts and the endpoint token all stay covered.
+        import fnmatch
+        def matched_by(path):
+            return [r for r in golden["permissions"]["deny"]
+                    if r.startswith("Read(/") and fnmatch.fnmatch(path, r[len("Read(/"):-1])]
+        spool_path = "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/0e3a/tool-results/r1.txt"
+        self.assertEqual(matched_by(spool_path), [])
+        for p in ("/data/claude-jobs/claude-config/.credentials.json",
+                  "/data/claude-jobs/claude-config/.claude.json",
+                  "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project/abc.jsonl",
+                  "/data/claude-jobs/token", "/data/options.json"):
+            self.assertTrue(matched_by(p), p)
 
     def test_allowlist_file(self):
         al = jobdef.load_ha_allowlist()
@@ -155,9 +196,10 @@ class TestShippedFiles(JobdefCase):
 
     def test_contract_file(self):
         text = jobdef.load_contract()
-        self.assertLessEqual(len(text.splitlines()), 60)
+        self.assertLessEqual(len(text.splitlines()), 90)
         for needle in ("exactly once", "data", "Nobody", "read-only".replace("read-only", "do not change"),
-                       "headline", "120", "8000", "metrics", "denied", "partial result", "tokens"):
+                       "headline", "120", "8000", "metrics", "denied", "partial result", "tokens",
+                       "exact-match", "unverified", "2>&1"):
             self.assertIn(needle.lower(), text.lower(), needle)
 
     def test_schema_file_is_valid_draft_2020_12(self):
@@ -425,20 +467,25 @@ class TestPaths(JobdefCase):
         self.assertHasPrefix(errors, "paths[1]: duplicate")
 
     def test_allow_rules_and_tools_csv(self):
+        spool = jobdef.spool_read_rule()
+        self.assertEqual(spool, f"Read(/{jc.JOB_CONFIG_DIR}/projects/**/tool-results/**)")
         job = self.load("p", fm(paths=["/share/**", "/media/x/*"], tools=["mcp__homeassistant__get_entity", "Bash(ha core info)"]))
         self.assertEqual(jobdef.allow_rules(job), [
             "Bash(ha core info)",
             "Read(//share/**)",
             "Read(//media/x/*)",
+            spool,
             "mcp__homeassistant__get_entity"])
         self.assertEqual(jobdef.tools_csv(job), "Bash,Read,Grep,Glob")
+        # Read/Grep/Glob are always in the tool universe: every job must be able to read
+        # back its own spooled tool results, even with no paths: of its own
         job = self.load("p", fm(tools=["mcp__homeassistant__get_entity"]))
-        self.assertEqual(jobdef.tools_csv(job), "")
-        self.assertEqual(jobdef.allow_rules(job), ["mcp__homeassistant__get_entity"])
+        self.assertEqual(jobdef.tools_csv(job), "Read,Grep,Glob")
+        self.assertEqual(jobdef.allow_rules(job), [spool, "mcp__homeassistant__get_entity"])
         job = self.load("p", fm(tools=["mcp__homeassistant__get_entity"], paths=["/share/**"]))
         self.assertEqual(jobdef.tools_csv(job), "Read,Grep,Glob")
         job = self.load("p", MINIMAL_FM)
-        self.assertEqual(jobdef.tools_csv(job), "Bash")
+        self.assertEqual(jobdef.tools_csv(job), "Bash,Read,Grep,Glob")
 
 
 class TestToolRules(JobdefCase):
@@ -455,6 +502,13 @@ class TestToolRules(JobdefCase):
               "Bash(ha backups info abc123)", "Bash(ha host logs -n 100)", "Bash(ha os info)",
               "mcp__homeassistant__get_error_log", "mcp__homeassistant__list_automations"]
         self.assertEqual(self.errors_for(ok), [])
+
+    def test_get_error_log_draws_a_warning(self):
+        errors, warnings = self.validate("t", fm(tools=["mcp__homeassistant__get_error_log"]))
+        self.assertEqual(errors, [])
+        self.assertTrue(any("get_error_log is dead" in w and "ha core logs" in w for w in warnings), warnings)
+        _, warnings = self.validate("t", fm(tools=["mcp__homeassistant__list_automations"]))
+        self.assertFalse(any("get_error_log" in w for w in warnings), warnings)
 
     def test_rejected(self):
         cases = {
@@ -759,6 +813,7 @@ class TestPromptAndArgv(JobdefCase):
         expected = [
             "env", "-i", f"HOME={self.s.home}", f"PATH={LIB_DIR}/bin:/usr/local/bin:/usr/bin:/bin",
             "TERM=dumb", "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "TZ=Europe/Vienna",
+            f"CLAUDE_CONFIG_DIR={jc.JOB_CONFIG_DIR}",
             "CLAUDE_JOB_BROKER_PORT=41233", "CLAUDE_JOB_BROKER_NONCE=" + "n" * 64,
             "timeout", "--signal=TERM", "-k", "15", "600",
             str(self.s.claude_wrapper), "-p", "PROMPT",
@@ -778,7 +833,7 @@ class TestPromptAndArgv(JobdefCase):
         mcp_only = self.load("m", fm(tools=["mcp__homeassistant__get_entity"], max_cost_usd=0.5, timeout=90, max_turns=7))
         argv = jobdef.claude_argv(mcp_only, prompt="P", schema={}, settings_path="/s", mcp_path="/m", contract="C",
                                   broker_port=1, nonce="x", tz="UTC")
-        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
         self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "0.50")
         self.assertEqual(argv[argv.index("-k") + 2], "90")
         self.assertEqual(argv[argv.index("--max-turns") + 1], "7")

@@ -88,6 +88,7 @@ MSG_BLOCKED = {"message": "blocked by claude-job broker"}
 MSG_TOO_LARGE = {"message": "request body too large"}
 MSG_LENGTH = {"message": "content-length required"}
 MSG_BAD_LENGTH = {"message": "invalid content-length"}
+MSG_BAD_CHUNKING = {"message": "malformed chunked body"}
 MSG_UPSTREAM_DOWN = {"message": "upstream unavailable"}
 MSG_UPSTREAM_TIMEOUT = {"message": "upstream timeout"}
 MSG_UPSTREAM_BAD = {"message": "upstream response not filterable"}
@@ -407,9 +408,17 @@ class BrokerHandler(BaseHTTPRequestHandler):
         return parts.path, parts.query
 
     def _read_client_body(self, route, path):
-        """Read exactly Content-Length bytes (POST requires it; chunked refused; > cap -> 413 unread)."""
-        if self.headers.get("Transfer-Encoding"):
-            return self._reply_json(411, MSG_LENGTH, path)
+        """Read exactly Content-Length bytes (POST requires it; > cap -> 413 unread). Chunked is
+        refused with 411 everywhere except CHECK_ROUTE: the real `ha` CLI (go-resty) sends
+        POST /core/check with `Transfer-Encoding: chunked` and no Content-Length, so for that one
+        route the chunked stream is decoded up to route.body_cap and forwarded upstream with an
+        explicit Content-Length (urllib always sets one for a bytes body)."""
+        te = self.headers.get("Transfer-Encoding")
+        if te:
+            if route is not CHECK_ROUTE or te.strip().lower() != "chunked" \
+                    or self.headers.get("Content-Length") is not None:
+                return self._reply_json(411, MSG_LENGTH, path)
+            return self._read_chunked_body(route, path)
         raw_len = self.headers.get("Content-Length")
         if raw_len is None:
             if self.command == "POST":
@@ -425,6 +434,34 @@ class BrokerHandler(BaseHTTPRequestHandler):
             return self._reply_json(413, MSG_TOO_LARGE, path)
         data = self.rfile.read(length) if length else b""
         return data if self.command == "POST" else None
+
+    def _read_chunked_body(self, route, path):
+        """Decode one chunked request body, bounded by route.body_cap (0 for /core/check: only an
+        empty body — `0\\r\\n\\r\\n` — passes; any data chunk over the cap -> 413 like Content-Length)."""
+        body = b""
+        while True:
+            line = self.rfile.readline(34)             # chunk-size line; 32 hex digits is absurdly enough
+            if not line.endswith(b"\n"):
+                return self._reply_json(400, MSG_BAD_CHUNKING, path)
+            try:
+                size = int(line.strip().split(b";", 1)[0], 16)
+                if size < 0:
+                    raise ValueError
+            except ValueError:
+                return self._reply_json(400, MSG_BAD_CHUNKING, path)
+            if size == 0:
+                break
+            if len(body) + size > route.body_cap:
+                return self._reply_json(413, MSG_TOO_LARGE, path)
+            data = self.rfile.read(size)
+            if len(data) != size or self.rfile.read(2) != b"\r\n":
+                return self._reply_json(400, MSG_BAD_CHUNKING, path)
+            body += data
+        for _ in range(32):                            # trailer section: skip until the blank line
+            line = self.rfile.readline(1024)
+            if not line or line in (b"\r\n", b"\n"):
+                return body
+        return self._reply_json(400, MSG_BAD_CHUNKING, path)
 
     def _open_upstream(self, route, path, query, body):
         """Build the Supervisor request (3 forwarded headers + the real token) and open it."""

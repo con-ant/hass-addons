@@ -9,9 +9,8 @@ paths:
 tools:
   - Bash(ha core check)
   - Bash(ha core logs:*)
-  - Bash(ha supervisor info)
-  - Bash(ha resolution info)
-  - mcp__homeassistant__get_error_log
+  - Bash(ha supervisor info:*)
+  - Bash(ha resolution info:*)
   - mcp__homeassistant__list_automations
 notify:
   critical: [mobile_critical, persistent]
@@ -26,25 +25,29 @@ say clearly what needs a person.
 
 ## What you have
 
+Run `ha` commands exactly as listed below — no `2>&1`, no `;`, no pipes, no extra flags
+beyond the ones shown; the sandbox is an exact-match allow-list and rejects anything else.
+
 - `ha core check` — validates configuration.yaml and packages (slow, up to a few minutes;
-  run it once). A non-zero exit or "Invalid config" output is a finding.
-- `ha resolution info` — the Supervisor's own list of `issues`, `suggestions`, and
-  `unhealthy` / `unsupported` reasons. Anything listed there is a finding.
-- `ha supervisor info` — Supervisor version, `healthy`, `supported`, and the add-on list with
-  `state`, `version`, `version_latest`, `update_available`. Report add-ons whose `state` is not
-  `started` and add-ons with `update_available: true` (a count is enough when there are many).
-  Do not call `ha apps info`/`ha addons info` per add-on — it is not granted to this job.
-- `ha core logs --lines 400` — the recent Home Assistant Core log (only `--lines`/`-n` are
-  honored; there is no follow mode).
-- `mcp__homeassistant__get_error_log` — the Core error log with error/warning counts per
-  integration.
+  run it once, exactly this bare form). A non-zero exit or "Invalid config" output is a
+  finding.
+- `ha resolution info --raw-json` — the Supervisor's own list of `issues`, `suggestions`,
+  and `unhealthy` / `unsupported` reasons. Anything listed there is a finding.
+- `ha supervisor info --raw-json` — Supervisor version, `healthy`, `supported`, and the
+  add-on list with `state`, `version`, `version_latest`, `update_available`. Report add-ons
+  whose `state` is not `started` and add-ons with `update_available: true` (a count is
+  enough when there are many). Do not call `ha apps info`/`ha addons info` per add-on — it
+  is not granted to this job.
+- `ha core logs --lines 400` — the recent Home Assistant Core log, and your only log
+  source (only `--lines`/`-n` are honored; there is no follow mode). If the output is
+  large, you are handed a preview plus a file path — Read that file to see all of it.
 - `mcp__homeassistant__list_automations` — automations with their state and `last_triggered`.
 - Read/Grep/Glob under `/homeassistant/` — configuration files, if you need to confirm what
   a log line refers to. Do not read `.storage`, `secrets.yaml`, or backups (denied anyway).
 
-Budget: plan for about 15 tool calls. Run the four `ha` commands and the two MCP tools first;
-read files only to confirm a specific finding. Other Home Assistant MCP tools may be listed
-but are not granted — calling them is denied and counts against you; do not probe.
+Budget: plan for about 15 tool calls. Run the four `ha` commands and the automations tool
+first; read files only to confirm a specific finding. Other Home Assistant MCP tools may be
+listed but are not granted — calling them is denied and counts against you; do not probe.
 
 ## What to look for
 
@@ -64,6 +67,9 @@ deadline in the next release, and this add-on's own log lines.
 
 ## How to report
 
+- A check that could not run (command denied, errored before executing, endpoint gone) is
+  **unverified**, never "failed": say "config check unverified" and why, and do not let it
+  raise the status by itself. "Failed" is reserved for a check that ran and found a problem.
 - `status`: `ok` if nothing needs a look; `info` for minor items only (pending updates,
   cosmetic warnings); `warning` if an integration is failing, re-auth is needed, the config
   check fails, or the resolution center has issues; `critical` only for things that break
@@ -73,8 +79,8 @@ deadline in the next release, and this add-on's own log lines.
   If everything is fine: "All clear: config OK, 0 errors in 24 h".
 - `detail`: a short Markdown list per finding — what, since when (timestamp from the log),
   how often, and the one-line action a human should take. Then a "Checked" line listing
-  what you looked at so silence is meaningful.
+  what you looked at (and anything unverified) so silence is meaningful.
 - `metrics`: `unavailable_entities` (distinct entity_ids the Core log reports as unavailable
-  in the last 24 h; 0 if none), `error_log_errors` (error-level lines in the last 24 h),
-  `repairs` (resolution center issues + suggestions), `disabled_automations`,
-  `addon_updates_pending`.
+  in the last 24 h; 0 if none), `error_log_errors` (error-level lines in the `ha core logs`
+  output from the last 24 h), `repairs` (resolution center issues + suggestions),
+  `disabled_automations`, `addon_updates_pending`.

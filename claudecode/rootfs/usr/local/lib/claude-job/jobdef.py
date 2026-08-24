@@ -613,7 +613,7 @@ def _check_bash(pre: str, arg: str | None, job: JobDef, allowlist: list, errors:
                         f"(see /usr/share/claudecode/job-ha-allowlist)")
 
 
-def _check_tools(job: JobDef, allowlist: list, errors: list) -> None:
+def _check_tools(job: JobDef, allowlist: list, errors: list, warnings: list) -> None:
     """Rules T1–T8 (§4.2 tools, §4.5 layer 2)."""
     seen = set()
     if job.kind == "action" and len(job.tools) > 3:
@@ -637,6 +637,10 @@ def _check_tools(job: JobDef, allowlist: list, errors: list) -> None:
                                     "with no parentheses")
             elif m.group(1) not in ALLOWED_MCP_SERVERS:
                 errors.append(pre + "only the 'homeassistant' MCP server is wired for jobs")
+            elif t == "mcp__homeassistant__get_error_log":
+                warnings.append(pre + "get_error_log is dead on current HA Core (GET /api/error_log "
+                                      "is gone; the fallback is not proxied either) — use "
+                                      "Bash(ha core logs:*) as the log source instead")
             continue
         m = TOOL_ENTRY_RE.match(t)
         if not m:
@@ -765,7 +769,7 @@ def validate(job: JobDef, *, jobs_dir=None, notify_config: NotifyConfig | None =
         _check_description(job, errors, warnings)
         _check_model(job, allowed, errors)
         _check_paths(job, errors)
-        _check_tools(job, allowlist, errors)
+        _check_tools(job, allowlist, errors, warnings)
         _check_notify(job, cfg, errors, warnings)
         _check_input(job, errors)
         _check_actions(job, jobs_dir, errors)
@@ -937,15 +941,24 @@ def _is_bash(t: str) -> bool:
     return t == "Bash" or t.startswith("Bash(")
 
 
+def spool_read_rule() -> str:
+    """The one fixed allow rule every job gets: the CLI spools any large tool result to
+    `<config dir>/projects/<cwd-slug>/<session>/tool-results/*.txt` and hands the model a short
+    preview plus the path — without this rule the job is blind to its own `ha core logs` or
+    `get_history` output. It grants nothing else: transcripts (`*.jsonl`), credentials and every
+    other file under /data are enumerated in the job-policy.json deny baseline (deny beats allow)."""
+    return f"Read(/{jc.JOB_CONFIG_DIR}/projects/**/tool-results/**)"
+
+
 def allow_rules(job: JobDef) -> list:
     """`permissions.allow` of the composed settings, in the design §4.4 order: Bash rules
-    (file order), then Read(//…) per `paths:` entry, then MCP rules (file order). A Read
-    rule covers Grep/Glob too (probed 2.1.233); Grep()/Glob() rules are never matched by
-    the permission checks and only draw startup warnings."""
+    (file order), then Read(//…) per `paths:` entry, then the fixed tool-results spool rule,
+    then MCP rules (file order). A Read rule covers Grep/Glob too (probed 2.1.233); Grep()/Glob()
+    rules are never matched by the permission checks and only draw startup warnings."""
     bash = [t for t in job.tools if _is_bash(t)]
     rest = [t for t in job.tools if not _is_bash(t)]
     reads = [f"Read(/{p})" for p in job.paths]
-    return bash + reads + rest
+    return bash + reads + [spool_read_rule()] + rest
 
 
 def compose_settings(job: JobDef, policy: dict) -> dict:
@@ -967,13 +980,13 @@ def compose_settings(job: JobDef, policy: dict) -> dict:
 
 
 def tools_csv(job: JobDef) -> str:
-    """T9 / A6: built-ins only — `Bash` if any Bash rule, `Read,Grep,Glob` if `paths:`.
-    MCP tools never appear here; an MCP-only job yields `""` (the runner passes --tools "")."""
+    """T9 / A6: built-ins only — `Bash` if any Bash rule; `Read,Grep,Glob` always, because every
+    job must be able to read back its own spooled tool results (spool_read_rule(); with no
+    `paths:` those are the only files the rules let it read). MCP tools never appear here."""
     parts = []
     if any(_is_bash(t) for t in job.tools):
         parts.append("Bash")
-    if job.paths:
-        parts += ["Read", "Grep", "Glob"]
+    parts += ["Read", "Grep", "Glob"]
     if jc.INCLUDE_MCP_IN_TOOLS_FLAG:
         parts += [t for t in job.tools if t.startswith("mcp__")]
     return ",".join(parts)
@@ -1166,6 +1179,9 @@ def claude_argv(job: JobDef, *, prompt: str, schema: dict, settings_path: str, m
         f"HOME={os.environ.get('HOME', '/root')}",
         f"PATH={jc.LIB_DIR}/bin:/usr/local/bin:/usr/bin:/bin",
         "TERM=dumb", "LANG=C.UTF-8", "LC_ALL=C.UTF-8", f"TZ={tz}",
+        # Job-only config dir (§4.4 rev con.16): transcripts and spooled tool results land under
+        # a path the composed permissions can actually grant; credentials reach it via symlink.
+        f"CLAUDE_CONFIG_DIR={jc.JOB_CONFIG_DIR}",
         *passthrough,
         f"CLAUDE_JOB_BROKER_PORT={int(broker_port)}",
         f"CLAUDE_JOB_BROKER_NONCE={nonce}",

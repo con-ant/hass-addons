@@ -545,6 +545,8 @@ def stage_run(run: Run) -> None:
     if not os.environ.get("SUPERVISOR_TOKEN"):
         log("warning: SUPERVISOR_TOKEN is not set (not running under the Supervisor?): publishing to Home Assistant "
             "and the job's own `ha`/MCP reads will fail")
+    quietly("job config dir", jc.ensure_job_config, None)       # CLAUDE_CONFIG_DIR + credentials symlink
+    quietly("tool-results sweep", jc.purge_tool_results, 0)     # leftovers from a hard-killed run
     start_broker(run)
     run.tz = fetch_time_zone(run)
     check_abort(run)
@@ -847,6 +849,8 @@ def finish(run: Run, verdict: Verdict) -> int:
                                           status="error", reason="runner_crash"))
     guarded("run log", append_run_record, run, verdict, state)     # (b) step 11: JSONL
     guarded("publish", publish_terminal, run, state, aborting)     # (c) step 12: entity (+ cost rollup, cost_raw)
+    if not aborting:                                               # spool files hold whatever the job read; sweep
+        guarded("tool-results purge", jc.purge_tool_results)       # before the slot frees (abort path: next stage_run)
     release_global_lock(run)
     if notifier:
         guarded("notifier", run_notifier, run, state, notifier)     # (d) step 13, then one re-POST
@@ -1042,6 +1046,8 @@ def cleanup(run: Run) -> None:
     """Kill the broker, drop what THIS invocation created. Locks are released by process exit."""
     kill_child(run)
     stop_broker(run)
+    if run.staged:      # a mid-run token refresh replaces the credentials symlink; write it back
+        quietly("credentials reconcile", jc.reconcile_job_credentials, False)
     if run.job_lock is not None and run.input_file:  # the inbox hand-off is single-use — but only the run's owner may
         consume_inbox_file(run.input_file)            # eat it (a detaching parent or a skipper leaves it; the tick sweeps)
     mine = [run.pgid_path] if run.job_lock is not None else []          # written by take_job_lock()

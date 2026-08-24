@@ -68,9 +68,8 @@ HEALTH_CHECK_FM = {
     "tools": [
         "Bash(ha core check)",
         "Bash(ha core logs:*)",
-        "Bash(ha supervisor info)",
-        "Bash(ha resolution info)",
-        "mcp__homeassistant__get_error_log",
+        "Bash(ha supervisor info:*)",
+        "Bash(ha resolution info:*)",
         "mcp__homeassistant__list_automations",
     ],
     "notify": {
@@ -177,8 +176,9 @@ class ScratchRoot:
         self.disabled = self.state / "disabled"
         self.data = r / "data" / "claude-jobs"
         self.project = self.data / "project"
+        self.job_config = self.data / "claude-config"
         self.run_dir = r / "run" / "claudecode"
-        self.transcripts = self.persist / "projects" / str(self.project).replace("/", "-")
+        self.transcripts = self.job_config / "projects" / str(self.project).replace("/", "-")
         self.bin = r / "bin"
         self.home = r / "home"
         self.fakelogs = r / "fakelogs"

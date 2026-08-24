@@ -9,6 +9,7 @@ import threading
 import time
 import types
 import unittest
+from pathlib import Path
 
 from testlib import LIB_DIR, SHARE_DIR, ScratchRoot
 from fakes.fake_supervisor import FakeSupervisor
@@ -97,7 +98,9 @@ class TestPaths(JcCase):
             self.assertEqual(jc.TOKEN_FILE, "/data/claude-jobs/token")
             self.assertEqual(jc.OPTIONS_FILE, "/data/options.json")
             self.assertEqual(jc.PGID_DIR, "/run/claudecode/jobs")
-            self.assertEqual(jc.TRANSCRIPTS_DIR, "/homeassistant/.claudecode/projects/-data-claude-jobs-project")
+            self.assertEqual(jc.JOB_CONFIG_DIR, "/data/claude-jobs/claude-config")
+            self.assertEqual(jc.CREDENTIALS_FILE, "/homeassistant/.claudecode/.credentials.json")
+            self.assertEqual(jc.TRANSCRIPTS_DIR, "/data/claude-jobs/claude-config/projects/-data-claude-jobs-project")
             self.assertEqual(jc.SUPERVISOR_URL, "http://supervisor")
             self.assertEqual((jc.CLAUDE_BIN, jc.TIMEOUT_BIN, jc.RUNNER_BIN, jc.NOTIFY_BIN),
                              ("claude", "timeout", "claude-job", "claude-job-notify"))
@@ -254,6 +257,53 @@ class TestFiles(JcCase):
         self.assertTrue((d / "memory" / "keep.md").exists())
         self.assertTrue((sibling / "old.jsonl").exists())
         self.assertEqual(jc.prune_transcripts(self.s.root / "nope"), {"deleted": 0, "remaining_bytes": 0})
+
+    def test_purge_tool_results(self):
+        d = self.s.transcripts
+        (d / "keep.jsonl").write_text("transcript")                       # transcripts stay
+        sess = d / "0e3a-session"
+        (sess / "tool-results").mkdir(parents=True)
+        (sess / "tool-results" / "r1.txt").write_text("x" * 100)
+        (sess / "tool-results" / "r2.txt").write_text("y")
+        busy = d / "busy-session"
+        (busy / "tool-results").mkdir(parents=True)
+        (busy / "tool-results" / "r.txt").write_text("z")
+        (busy / "other.txt").write_text("keep me")                        # session dir not emptied -> stays
+        self.assertEqual(jc.purge_tool_results(), 3)
+        self.assertFalse(sess.exists())                                   # emptied session dir removed
+        self.assertFalse((busy / "tool-results").exists())
+        self.assertTrue((busy / "other.txt").exists())
+        self.assertTrue((d / "keep.jsonl").exists())
+        self.assertEqual(jc.purge_tool_results(), 0)                      # idempotent
+        self.assertEqual(jc.purge_tool_results(self.s.root / "nope"), 0)
+
+    def test_ensure_and_reconcile_job_credentials(self):
+        real = Path(jc.CREDENTIALS_FILE)
+        real.parent.mkdir(parents=True, exist_ok=True)
+        real.write_text('{"claudeAiOauth": {"accessToken": "old"}}')
+        link = Path(jc.JOB_CONFIG_DIR) / ".credentials.json"
+        jc.ensure_job_config()
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(real))
+        self.assertEqual(link.read_text(), '{"claudeAiOauth": {"accessToken": "old"}}')
+        self.assertEqual(stat.S_IMODE(os.stat(jc.JOB_CONFIG_DIR).st_mode), 0o700)
+        jc.ensure_job_config()                                            # idempotent, link untouched
+        self.assertTrue(link.is_symlink())
+        # a mid-run refresh replaced the symlink with a regular file (tmp+rename): reconcile
+        # moves the fresh content back to the real store and restores the symlink
+        link.unlink()
+        link.write_text('{"claudeAiOauth": {"accessToken": "fresh"}}')
+        self.assertTrue(jc.reconcile_job_credentials())
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(real.read_text(), '{"claudeAiOauth": {"accessToken": "fresh"}}')
+        self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o600)
+        self.assertFalse(jc.reconcile_job_credentials())                  # nothing to do now
+        # ensure_job_config() reconciles a leftover file before re-linking, too
+        link.unlink()
+        link.write_text('{"claudeAiOauth": {"accessToken": "fresher"}}')
+        jc.ensure_job_config()
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(real.read_text(), '{"claudeAiOauth": {"accessToken": "fresher"}}')
 
 
 class TestLocks(JcCase):
