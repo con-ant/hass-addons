@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.17] - 2026-08-24
+
+### Fixed
+- **Spooled tool output was still unreadable in con.16 (ancestor-directory
+  deny).** Verified on a real run and reproduced against CLI 2.1.241: Claude
+  Code evaluates `Read(...)` deny rules against every *parent directory* of a
+  requested file, and a denied ancestor beats any allow. The two con.16
+  hardening rules `Read(//data/claude-jobs/*)` and
+  `Read(//data/claude-jobs/claude-config/*)` matched the directories
+  `claude-config` and `claude-config/projects`, so the tool-results allow rule
+  never applied and jobs still saw "File is in a directory that is denied".
+  Both rules are removed and replaced with entries that name files or leaf
+  subtrees only (`token*`, `.credentials.json*`, `.claude.json*`, `*.json`,
+  `history.jsonl`, `**/*.jsonl`, and the CLI state dirs `backups/`,
+  `file-history/`, `memory/`, `paste-cache/`, `plugins/`,
+  `projects/**/memory/`, `session-env/`, `sessions/`, `settings/`,
+  `shell-snapshots/`, `statsig/`, `todos/`, `uploads/`); a regression test now
+  asserts that no deny glob matches the spool file *or any ancestor directory
+  of it*, while credentials/transcripts/token stay covered. End-to-end
+  verified against the real CLI: with the con.16 policy shape the spool read
+  is denied, with this one it succeeds — including via Grep, which resolves
+  through the Read allow (explicit `Grep()`/`Glob()` rules are still never
+  matched by file permission checks and only draw the startup warnings
+  con.15 removed, so none were added).
+
 ## [1.2.65-con.16] - 2026-08-24
 
 Four Claude-job harness defects found by the first real runs of the shipped jobs
