@@ -223,9 +223,10 @@ stale_after: 93600
   # 26 h suits a daily job. Absent = on-demand job, never counted stale.
 
 paths:
-  # OPTIONAL · list of absolute globs the job may READ. Each entry generates
-  # Read(//…), Grep(//…), Glob(//…) allow rules (double-slash absolute form —
-  # [verify] on the install) and pulls Read/Grep/Glob into --tools. Raw
+  # OPTIONAL · list of absolute globs the job may READ. Each entry generates a
+  # Read(//…) allow rule (double-slash absolute form — [verify] on the install;
+  # a Read rule also covers Grep/Glob, which have no rule form of their own)
+  # and pulls Read/Grep/Glob into --tools. Raw
   # Read()/Grep()/Glob() entries under tools: are REJECTED by the validator —
   # read grants exist only through this key, so the deny baseline (§4.4) always
   # composes with them. No paths: = the job can read only its empty cwd.
@@ -336,8 +337,6 @@ One executable, `/usr/local/bin/claude-job`, a **verb-subcommand CLI** invoked i
       "Bash(ha supervisor info)",
       "Bash(ha resolution info)",
       "Read(//homeassistant/**)",
-      "Grep(//homeassistant/**)",
-      "Glob(//homeassistant/**)",
       "mcp__homeassistant__get_error_log",
       "mcp__homeassistant__list_automations"
     ],
@@ -368,7 +367,7 @@ One executable, `/usr/local/bin/claude-job`, a **verb-subcommand CLI** invoked i
 }
 ```
 
-The `allow` half comes from frontmatter (validated); the `deny` half comes verbatim from the image. Deny beats allow — probed to hold even against an explicit `Bash(cat <denied-path>)` allow, and Grep/Glob resolve through the same Read rules, so the deny side needs only `Read(...)` entries. The set covers: the add-on's own OAuth credentials, settings and token stores (`.claudecode/**` — which also covers job state, logs and transcripts), HA secrets and auth (`secrets.yaml`, `.storage/**`, `.cloud/**`), bulk PII (`home-assistant_v2.db*`), full-system archives (`backups/**`, `//backup/**`), the generated package with the baked endpoint token (`claudecode_jobs.yaml` — without this line the shipped example's `paths: [/homeassistant/**]` could read the token, contradicting §8's output-channel claim), git metadata under every job-readable root (`.git/**` — remote URLs in `.git/config` commonly embed credentials on git-backed installs; the explicit `//homeassistant/.git/**` spelling is the belt for the mid-pattern `**` form until the §13 zero-segment probe lands), add-on config directories (`//addon_configs/**`, `//config/**` — moot under the current `map:`, which mounts `addon_config` (this add-on's own dir), not `all_addon_configs`, so sibling add-on configs are *not* mounted; shipped against map drift, since AppArmor already permits `/addon_configs/**`), private keys (`//ssl/**`), the config-dir symlink spelling (`//root/**` — which also covers `~/.git-credentials` and `~/.gitconfig`), the endpoint token and options (`//data/**`), other processes' environments (`//proc/**`), and the per-run nonce files (`//run/claudecode/**`).
+The `allow` half comes from frontmatter (validated); the `deny` half comes verbatim from the image. Deny beats allow — probed to hold even against an explicit `Bash(cat <denied-path>)` allow, and Grep/Glob resolve through the same Read rules, so both halves need only `Read(...)` entries (Grep()/Glob() rules are never matched by the permission checks). The set covers: the add-on's own OAuth credentials, settings and token stores (`.claudecode/**` — which also covers job state, logs and transcripts), HA secrets and auth (`secrets.yaml`, `.storage/**`, `.cloud/**`), bulk PII (`home-assistant_v2.db*`), full-system archives (`backups/**`, `//backup/**`), the generated package with the baked endpoint token (`claudecode_jobs.yaml` — without this line the shipped example's `paths: [/homeassistant/**]` could read the token, contradicting §8's output-channel claim), git metadata under every job-readable root (`.git/**` — remote URLs in `.git/config` commonly embed credentials on git-backed installs; the explicit `//homeassistant/.git/**` spelling is the belt for the mid-pattern `**` form until the §13 zero-segment probe lands), add-on config directories (`//addon_configs/**`, `//config/**` — moot under the current `map:`, which mounts `addon_config` (this add-on's own dir), not `all_addon_configs`, so sibling add-on configs are *not* mounted; shipped against map drift, since AppArmor already permits `/addon_configs/**`), private keys (`//ssl/**`), the config-dir symlink spelling (`//root/**` — which also covers `~/.git-credentials` and `~/.gitconfig`), the endpoint token and options (`//data/**`), other processes' environments (`//proc/**`), and the per-run nonce files (`//run/claudecode/**`).
 
 **Environment: `env -i` allowlist, not an unset denylist.** A denylist rots (this design's probe environment alone carries 40+ `CLAUDE_*` variables that did not exist a year ago); a closed allowlist cannot. The child environment is exactly: `HOME` (routes to the shared config dir → shared credentials), `PATH` (with the wrapper dir first — §4.5), `TERM=dumb`, `LANG`/`LC_ALL`, `TZ` (HA's, so job timestamps match the house), and the two broker variables (worthless after the run). `SUPERVISOR_TOKEN`, `HA_TOKEN`, and every interactive-session marker are gone because they were never granted.
 
