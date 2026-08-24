@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.15] - 2026-08-24
+
+### Fixed
+- **"Permission allow rule … is not matched by file permission checks" warnings
+  at Claude startup.** MCP setup pre-authorized `Glob(/config/**)`-style and
+  `Grep(…)` allow rules, but Claude Code's file permission checks only match
+  `Read(path)` rules — which were already in the list and cover all
+  file-reading tools (Read, Grep, Glob). The dead rules are no longer added,
+  and since `/root/.claude/settings.json` persists across restarts, the ones
+  written by earlier versions are removed automatically on boot — no manual
+  edits needed on existing installs.
+
 ## [1.2.65-con.14] - 2026-08-22
 
 ### Fixed
