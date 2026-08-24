@@ -2,16 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-
-### Changed
-- Claude Jobs: the composed per-run settings no longer emit `Grep(//…)` and
-  `Glob(//…)` allow rules for each `paths:` entry — same cleanup as
-  1.2.65-con.15 did for the interactive session. The `Read(//…)` rule already
-  covers all file-reading tools (probed; the deny baseline relies on the same
-  fact), so job permissions are unchanged — the dead rules just stop drawing
-  "not matched by file permission checks" warnings in job runs.
-
 ## [1.2.65-con.15] - 2026-08-24
 
 ### Fixed
@@ -23,6 +13,12 @@ All notable changes to this project will be documented in this file.
   and since `/root/.claude/settings.json` persists across restarts, the ones
   written by earlier versions are removed automatically on boot — no manual
   edits needed on existing installs.
+- Claude Jobs: the composed per-run settings likewise no longer emit
+  `Grep(//…)`/`Glob(//…)` allow rules for each `paths:` entry — the `Read(//…)`
+  rule already covers all file-reading tools (probed; the deny baseline relies
+  on the same fact), so job permissions are unchanged and job runs stop drawing
+  the same warnings. Job settings are composed fresh on every run, so no
+  cleanup of persisted state is needed.
 
 ## [1.2.65-con.14] - 2026-08-22
 
