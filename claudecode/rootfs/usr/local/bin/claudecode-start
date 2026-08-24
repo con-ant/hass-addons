@@ -440,7 +440,10 @@ configure_mcp() {
   if [ "$CLAUDE_OK" = "true" ] && [ "$ENABLE_MCP" = "true" ]; then
     if timeout 30 claude mcp add-json homeassistant '{"command":"hass-mcp"}' -s user; then
       info "MCP configured with Home Assistant integration"
-      local allowed='["mcp__homeassistant__get_version","mcp__homeassistant__get_entity","mcp__homeassistant__list_entities","mcp__homeassistant__search_entities_tool","mcp__homeassistant__domain_summary_tool","mcp__homeassistant__list_automations","mcp__homeassistant__get_history","mcp__homeassistant__get_error_log","Read(/homeassistant/**)","Read(/config/**)","Read(/share/**)","Read(/media/**)","Glob(/homeassistant/**)","Glob(/config/**)","Grep(/homeassistant/**)","Grep(/config/**)"]'
+      # Read(path) rules cover all file-reading tools (Read, Grep, Glob);
+      # Glob()/Grep() path rules are not matched by the permission checks and
+      # make Claude warn at startup, so only Read rules are listed here.
+      local allowed='["mcp__homeassistant__get_version","mcp__homeassistant__get_entity","mcp__homeassistant__list_entities","mcp__homeassistant__search_entities_tool","mcp__homeassistant__domain_summary_tool","mcp__homeassistant__list_automations","mcp__homeassistant__get_history","mcp__homeassistant__get_error_log","Read(/homeassistant/**)","Read(/config/**)","Read(/share/**)","Read(/media/**)"]'
       if settings_set --argjson tools "$allowed" '.permissions.allow = ($tools + (.permissions.allow // []) | unique)'; then
         info "Pre-authorized read-only MCP tools"
       else
@@ -475,6 +478,12 @@ configure_mcp() {
 }
 
 apply_settings() {
+  # Earlier versions pre-authorized Glob()/Grep() path rules that the permission
+  # checks never match (the Read() rules already cover those tools); settings.json
+  # persists across restarts, so drop them from existing installs.
+  local stale='["Glob(/homeassistant/**)","Glob(/config/**)","Grep(/homeassistant/**)","Grep(/config/**)"]'
+  settings_set --argjson stale "$stale" 'if .permissions.allow then .permissions.allow -= $stale else . end' \
+    || warn "Could not remove stale Glob()/Grep() allow rules from settings.json"
   if settings_set --arg mode "$DEFAULT_MODE" '.permissions.defaultMode = $mode'; then
     info "Default permission mode: $DEFAULT_MODE"
   else
