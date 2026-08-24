@@ -939,12 +939,12 @@ def _is_bash(t: str) -> bool:
 
 def allow_rules(job: JobDef) -> list:
     """`permissions.allow` of the composed settings, in the design §4.4 order: Bash rules
-    (file order), then Read/Grep/Glob(//…) per `paths:` entry, then MCP rules (file order)."""
+    (file order), then Read(//…) per `paths:` entry, then MCP rules (file order). A Read
+    rule covers Grep/Glob too (probed 2.1.233); Grep()/Glob() rules are never matched by
+    the permission checks and only draw startup warnings."""
     bash = [t for t in job.tools if _is_bash(t)]
     rest = [t for t in job.tools if not _is_bash(t)]
-    reads = []
-    for p in job.paths:
-        reads += [f"Read(/{p})", f"Grep(/{p})", f"Glob(/{p})"]
+    reads = [f"Read(/{p})" for p in job.paths]
     return bash + reads + rest
 
 

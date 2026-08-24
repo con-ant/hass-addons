@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Claude Jobs: the composed per-run settings no longer emit `Grep(//…)` and
+  `Glob(//…)` allow rules for each `paths:` entry — same cleanup as
+  1.2.65-con.15 did for the interactive session. The `Read(//…)` rule already
+  covers all file-reading tools (probed; the deny baseline relies on the same
+  fact), so job permissions are unchanged — the dead rules just stop drawing
+  "not matched by file permission checks" warnings in job runs.
+
 ## [1.2.65-con.15] - 2026-08-24
 
 ### Fixed

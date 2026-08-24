@@ -22,8 +22,6 @@ GOLDEN_SETTINGS = {
             "Bash(ha supervisor info)",
             "Bash(ha resolution info)",
             "Read(//homeassistant/**)",
-            "Grep(//homeassistant/**)",
-            "Glob(//homeassistant/**)",
             "mcp__homeassistant__get_error_log",
             "mcp__homeassistant__list_automations",
         ],
@@ -430,8 +428,8 @@ class TestPaths(JobdefCase):
         job = self.load("p", fm(paths=["/share/**", "/media/x/*"], tools=["mcp__homeassistant__get_entity", "Bash(ha core info)"]))
         self.assertEqual(jobdef.allow_rules(job), [
             "Bash(ha core info)",
-            "Read(//share/**)", "Grep(//share/**)", "Glob(//share/**)",
-            "Read(//media/x/*)", "Grep(//media/x/*)", "Glob(//media/x/*)",
+            "Read(//share/**)",
+            "Read(//media/x/*)",
             "mcp__homeassistant__get_entity"])
         self.assertEqual(jobdef.tools_csv(job), "Bash,Read,Grep,Glob")
         job = self.load("p", fm(tools=["mcp__homeassistant__get_entity"]))
