@@ -28,6 +28,17 @@ Modes
   sleep:<s>          sleep s seconds, then success
   ignore_term:<s>    ignore SIGTERM, sleep s seconds, then success
   exit:<n>           no output, exit n
+  loop:<n>[:<s>]     stream-json only: emit n identical assistant tool_use lines
+                     (Grep on a missing path) s seconds apart (default 0.2),
+                     then success — the runner's loop guard should kill it first
+
+--resume <sid>       the wrap-up re-invocation: the envelope carries <sid> as
+                     session_id and the scenario switches to
+                     $FAKE_CLAUDE_RESUME_SCENARIO (success) with cost
+                     $FAKE_CLAUDE_RESUME_COST (0.03), headline
+                     $FAKE_CLAUDE_RESUME_HEADLINE ("partial answer"), 2 turns.
+--output-format stream-json  a `system/init` line (session_id) precedes the
+                     envelope, as the real CLI does; `--verbose` is recorded.
 
 Modifiers (env): FAKE_CLAUDE_COST (0.12), FAKE_CLAUDE_TURNS (4),
 FAKE_CLAUDE_MODEL_ID (derived from --model), FAKE_CLAUDE_SO (JSON, verbatim
@@ -80,8 +91,10 @@ PARSED_FLAGS = {
     "--settings": "settings", "--mcp-config": "mcp_config", "--max-turns": "max_turns",
     "--max-budget-usd": "max_budget_usd", "--tools": "tools", "--output-format": "output_format",
     "--permission-mode": "permission_mode", "--setting-sources": "setting_sources",
-    "--append-system-prompt": "append_system_prompt",
+    "--append-system-prompt": "append_system_prompt", "--resume": "resume",
 }
+
+SESSION_ID = os.environ.get("FAKE_CLAUDE_SESSION_ID") or str(uuid.uuid4())
 
 
 def print_help() -> None:
@@ -119,6 +132,8 @@ def parse_argv(argv: list) -> dict:
             parsed["strict_mcp_config"] = True
         elif a == "--no-session-persistence":
             parsed["no_session_persistence"] = True
+        elif a == "--verbose":
+            parsed["verbose"] = True
         i += 1
     if "prompt" not in parsed and positional:
         parsed["prompt"] = positional[-1]
@@ -175,7 +190,7 @@ def base_envelope(parsed: dict, cost: float, turns: int) -> dict:
         "duration_api_ms": 1697,
         "num_turns": turns,
         "stop_reason": "tool_use",
-        "session_id": str(uuid.uuid4()),
+        "session_id": parsed.get("resume") or SESSION_ID,
         "total_cost_usd": cost,
         "usage": {
             "input_tokens": 10, "cache_creation_input_tokens": 7354, "cache_read_input_tokens": 0,
@@ -236,6 +251,26 @@ def emit(env: dict, code: int) -> int:
     return code
 
 
+def streaming(parsed: dict) -> bool:
+    return parsed.get("output_format") == "stream-json"
+
+
+def emit_init(parsed: dict) -> None:
+    """stream-json opens with a system/init line carrying the session id (real CLI 2.1.251)."""
+    if streaming(parsed):
+        sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": parsed.get("resume") or SESSION_ID,
+                                     "model": model_id(parsed), "tools": ["Grep", "Read"]}) + "\n")
+        sys.stdout.flush()
+
+
+def emit_tool_use(parsed: dict, name: str, tool_input: dict) -> None:
+    line = {"type": "assistant", "session_id": parsed.get("resume") or SESSION_ID,
+            "message": {"role": "assistant", "model": model_id(parsed), "content": [
+                {"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex[:24], "name": name, "input": tool_input}]}}
+    sys.stdout.write(json.dumps(line) + "\n")
+    sys.stdout.flush()
+
+
 DENIAL = {"tool_name": "Bash", "tool_use_id": "toolu_013MSkszDzEophTXb1HKuhwc",
           "tool_input": {"command": "ha addons", "description": "List add-ons"}}
 
@@ -247,7 +282,21 @@ def run_print_mode(argv: list) -> int:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     parsed = parse_argv(argv)
     log_invocation(argv, parsed)
+    if parsed.get("resume"):            # the wrap-up re-invocation has its own knobs
+        scenario = os.environ.get("FAKE_CLAUDE_RESUME_SCENARIO", "success")
+        name, _, arg = scenario.partition(":")
+        os.environ["FAKE_CLAUDE_COST"] = os.environ.get("FAKE_CLAUDE_RESUME_COST", "0.03")
+        os.environ["FAKE_CLAUDE_HEADLINE"] = os.environ.get("FAKE_CLAUDE_RESUME_HEADLINE", "partial answer")
+        os.environ["FAKE_CLAUDE_TURNS"] = "2"
+        os.environ.pop("FAKE_CLAUDE_SO", None)
+    emit_init(parsed)
 
+    if name == "loop":
+        n, _, every = (arg or "20").partition(":")
+        for _ in range(int(n)):
+            emit_tool_use(parsed, "Grep", {"pattern": "ERROR", "path": "/nonexistent/spool.txt"})
+            time.sleep(float(every or "0.2"))
+        return emit(success_envelope(parsed, "ok"), 0)
     if name == "success":
         return emit(success_envelope(parsed, arg or "ok"), 0)
     if name == "denial":

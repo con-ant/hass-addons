@@ -388,8 +388,14 @@ class TestEntityPayload(JcCase):
             "last_run": "2026-08-18T05:00:42Z", "started_at": "2026-08-18T05:00:00Z", "duration_s": 42.3, "cost_usd": 0.63,
             "run_count": 12, "model": "fable", "enabled": True, "stale_after": 93600, "run_id": "run-20260818T050000Z-3f9a",
             "session_id": "6f0", "envelope_subtype": "success", "reason": None, "trigger": "endpoint", "prev_status": "ok",
-            "skipped_since_last": 0, "notify_status": "sent:persistent,mobile(2)", "attempts": 1,
+            "skipped_since_last": 0, "notify_status": "sent:persistent,mobile(2)", "attempts": 1, "partial": False,
             "metrics": {"failing_integrations": 2}, "friendly_name": st["description"], "icon": "mdi:alert-outline"})
+
+    def test_terminal_partial_and_loop_guard_attributes(self):
+        st = terminal_state()
+        st["result"].update({"partial": True, "loop_guard": {"tool": "Grep", "repeats": 5, "input": "{}"}})
+        _, _, attrs = jc.entity_payload(st)
+        self.assertEqual((attrs["partial"], attrs["loop_guard"]), (True, {"tool": "Grep", "repeats": 5}))
         dumped = json.dumps(attrs)
         for banned in ("actions_selected", "restart_miele", "2026-08-17", "permission_denials", "secret raw", "input"):
             self.assertNotIn(banned, dumped)

@@ -300,6 +300,7 @@ class TestFileFormat(JobdefCase):
         self.assertEqual(job.kind, "job")
         self.assertEqual(job.model, "opus")
         self.assertEqual((job.timeout, job.max_cost_usd, job.max_turns), (600, 1.0, 50))
+        self.assertEqual((job.wrapup_budget_usd, job.loop_guard), (0.75, 5))
         self.assertEqual((job.enabled, job.min_interval, job.stale_after), (True, 60, None))
         self.assertEqual((job.paths, job.notify, job.renag_every, job.notify_recovery), ((), {}, 3, False))
         self.assertIsNone(job.input)
@@ -344,6 +345,8 @@ class TestStructural(JobdefCase):
         ("min_interval", 0, 86400, -1, 86401),
         ("stale_after", 60, 31708800, 59, 31708801),
         ("renag_every", 0, 100, -1, 101),
+        ("wrapup_budget_usd", 0, 2.0, -0.01, 2.01),
+        ("loop_guard", 0, 50, -1, 51),
     ]
 
     def test_every_bound(self):
@@ -851,7 +854,7 @@ class TestPromptAndArgv(JobdefCase):
             "CLAUDE_JOB_BROKER_PORT=41233", "CLAUDE_JOB_BROKER_NONCE=" + "n" * 64,
             "timeout", "--signal=TERM", "-k", "15", "600",
             str(self.s.claude_wrapper), "-p", "PROMPT",
-            "--output-format", "json",
+            "--output-format", "stream-json", "--verbose",
             "--json-schema", json.dumps(schema, separators=(",", ":")),
             "--model", "opus",
             "--max-turns", "50",
@@ -872,6 +875,29 @@ class TestPromptAndArgv(JobdefCase):
         self.assertEqual(argv[argv.index("-k") + 2], "90")
         self.assertEqual(argv[argv.index("--max-turns") + 1], "7")
         self.assertTrue(all(isinstance(a, str) for a in argv))
+
+    def test_claude_argv_wrapup_variant(self):
+        """The wrap-up re-invocation: same cage, `--resume <session>`, its own turn/cost/timeout bounds."""
+        job = self.load("health-check", HEALTH_CHECK_FM)
+        schema = jobdef.result_schema(job)
+        main = jobdef.claude_argv(job, prompt="PROMPT", schema=schema, settings_path="/s", mcp_path="/m", contract="C",
+                                  broker_port=1, nonce="x", tz="UTC")
+        wrap = jobdef.claude_argv(job, prompt=jobdef.wrapup_prompt("the cost cap ($1.50) was reached"), schema=schema,
+                                  settings_path="/s", mcp_path="/m", contract="C", broker_port=1, nonce="x", tz="UTC",
+                                  resume="sid-123", max_turns=3, max_budget_usd=0.75, timeout_s=180)
+        self.assertEqual(wrap[wrap.index("--resume") + 1], "sid-123")
+        self.assertEqual(wrap[wrap.index("--max-turns") + 1], "3")
+        self.assertEqual(wrap[wrap.index("--max-budget-usd") + 1], "0.75")
+        self.assertEqual(wrap[wrap.index("-k") + 2], "180")
+        self.assertNotIn("--resume", main)
+        self.assertIn("the cost cap ($1.50) was reached", wrap[wrap.index("-p") + 1])
+        self.assertIn("exactly once", wrap[wrap.index("-p") + 1])
+        # everything after the prompt/resume pair is the identical cage
+        strip = lambda a: [x for i, x in enumerate(a) if i > a.index("-p") + 1 and x not in ("--resume", "sid-123")]
+        m, w = strip(main), strip(wrap)
+        for flag in ("--json-schema", "--model", "--settings", "--permission-mode", "--tools", "--mcp-config",
+                     "--append-system-prompt", "--setting-sources"):
+            self.assertEqual(m[m.index(flag) + 1], w[w.index(flag) + 1], flag)
 
     def test_mcp_config(self):
         job = self.load("m", fm(tools=["Bash(ha core info)", "mcp__homeassistant__get_entity"]))

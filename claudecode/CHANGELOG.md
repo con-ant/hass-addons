@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.18] - 2026-08-30
+
+### Added
+- **Wrap-up after a cap (judgment row 15).** When a run ends on `error_max_budget_usd`
+  or `error_max_turns`, the runner no longer throws the whole run away. It resumes
+  the same session once (`claude -p --resume <session>`, identical cage) with a
+  submit-only prompt, `--max-turns 3`, its own small budget (frontmatter
+  `wrapup_budget_usd`, default 0.75, 0 disables) and its own timeout
+  (`WRAPUP_TIMEOUT_S`, 180 s; the tick's deadline is extended accordingly). A valid
+  result lands as `[partial] <headline>` with `status` escalated to at least
+  `warning`, `reason` = what stopped the main run (`max_budget` / `max_turns` /
+  `loop_guard`), `partial: true`, `cost_usd` = both invocations summed (the resumed
+  envelope's `total_cost_usd` covers only the wrap-up — probed on 2.1.251), and a
+  `wrapup` block in the result and the JSONL record. If the wrap-up produces no
+  result the original row 6/7 verdict stands, annotated with `wrapup.failed` and the
+  summed cost. Motivation: a real explain run burnt $6.33 and was killed by the cap
+  while its final `StructuredOutput` call was in flight — the analysis existed and
+  was lost.
+- **Loop guard (judgment row 14).** The run is now invoked with `--output-format
+  stream-json --verbose` (the last line is the same result envelope) and the runner
+  tails the stream while polling. `loop_guard` (frontmatter, default 5, 0 disables)
+  identical consecutive `tool_use` calls — same tool, same input — kill the run
+  (TERM, then KILL of its group) and go straight to the wrap-up above, with a prompt
+  that names the repeated call and forbids retrying it. Without a wrap-up (budget 0)
+  the run is `error` "stopped by loop guard: Grep ×5 identical calls"
+  (`reason: loop_guard`). The killed attempt prints no envelope, so its spend is
+  unknown (`cost_unknown: true`; the monthly rollup under-counts it). The same real
+  run above made 286 identical `Grep` calls against a mistyped path;
+  `--max-turns 60` did not stop it (CLI 2.1.250 — reported upstream), the guard
+  would have at call 5.
+- Entity attributes `partial` (bool, always present) and `loop_guard` (`{tool, repeats}`, when tripped; the call input stays in the state file and JSONL record — entity attributes never carry inputs).
+  Frontmatter schema: `wrapup_budget_usd` (0..2.00), `loop_guard` (0..50).
+
+### Changed
+- `claude_argv()` grew `resume=`/`max_turns=`/`max_budget_usd=`/`timeout_s=`
+  overrides for the wrap-up variant; `spawn_claude(run, argv=None)` likewise.
+  `run.argv` (and the logged `argv`) is always the main invocation; the wrap-up's
+  is `run.wrapup_argv`.
+- Test fake `claude`: understands `--output-format stream-json` (emits the
+  `system/init` line first), `--resume` (envelope keeps the session id; behaviour
+  from `FAKE_CLAUDE_RESUME_*`), and a `loop:<n>[:<s>]` scenario.
+
 ## [1.2.65-con.17] - 2026-08-24
 
 ### Fixed

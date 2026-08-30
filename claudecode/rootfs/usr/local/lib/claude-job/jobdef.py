@@ -78,7 +78,7 @@ INPUT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 FILE_MAX_BYTES = 64 * 1024
 KNOWN_KEYS = ("description", "kind", "model", "timeout", "max_cost_usd", "max_turns", "enabled",
               "min_interval", "stale_after", "paths", "tools", "notify", "renag_every",
-              "notify_recovery", "input", "actions")
+              "notify_recovery", "input", "actions", "wrapup_budget_usd", "loop_guard")
 INPUT_SPEC_KEYS = ("type", "description", "required", "default", "pattern", "enum", "max_length",
                    "minimum", "maximum")
 NOTIFY_FILE = "_notify.yaml"
@@ -160,6 +160,8 @@ class JobDef:
     timeout: int
     max_cost_usd: float
     max_turns: int
+    wrapup_budget_usd: float          # grace re-invocation budget after a cap/loop stop; 0 disables
+    loop_guard: int                   # identical consecutive tool calls before the runner kills the run; 0 disables
     enabled: bool
     min_interval: int
     stale_after: int | None
@@ -342,7 +344,8 @@ _schema_cache = {}
 def load_schema(share_dir=None) -> dict:
     """job-frontmatter.schema.json with the timeout/cost ceilings patched from jobcommon."""
     p = os.path.join(_share(share_dir), "job-frontmatter.schema.json")
-    key = (p, jc.JOB_MIN_TIMEOUT, jc.JOB_MAX_TIMEOUT, jc.JOB_MAX_COST_USD, jc.JOB_MAX_TURNS_CAP)
+    key = (p, jc.JOB_MIN_TIMEOUT, jc.JOB_MAX_TIMEOUT, jc.JOB_MAX_COST_USD, jc.JOB_MAX_TURNS_CAP,
+           jc.JOB_MAX_WRAPUP_USD, jc.JOB_MAX_LOOP_GUARD)
     if key not in _schema_cache:
         with open(p, encoding="utf-8") as f:
             schema = json.load(f)
@@ -351,6 +354,8 @@ def load_schema(share_dir=None) -> dict:
         props["timeout"]["maximum"] = jc.JOB_MAX_TIMEOUT
         props["max_cost_usd"]["maximum"] = jc.JOB_MAX_COST_USD
         props["max_turns"]["maximum"] = jc.JOB_MAX_TURNS_CAP
+        props["wrapup_budget_usd"]["maximum"] = jc.JOB_MAX_WRAPUP_USD
+        props["loop_guard"]["maximum"] = jc.JOB_MAX_LOOP_GUARD
         _schema_cache[key] = schema
     return _schema_cache[key]
 
@@ -465,6 +470,8 @@ def _build(name: str, path: str, mtime: float, fm: dict, body: str) -> JobDef:
         timeout=int(fm.get("timeout", jc.JOB_DEFAULT_TIMEOUT)),
         max_cost_usd=float(fm.get("max_cost_usd", jc.JOB_DEFAULT_COST_USD)),
         max_turns=int(fm.get("max_turns", jc.JOB_DEFAULT_MAX_TURNS)),
+        wrapup_budget_usd=float(fm.get("wrapup_budget_usd", jc.JOB_DEFAULT_WRAPUP_USD)),
+        loop_guard=int(fm.get("loop_guard", jc.JOB_DEFAULT_LOOP_GUARD)),
         enabled=bool(fm.get("enabled", True)), min_interval=int(fm.get("min_interval", 60)),
         stale_after=int(fm["stale_after"]) if fm.get("stale_after") is not None else None,
         paths=tuple(fm.get("paths") or ()),
@@ -1175,12 +1182,32 @@ def network_env_passthrough(env=None) -> dict:
     return {k: env[k] for k in NETWORK_ENV_PASSTHROUGH if env.get(k)}
 
 
+WRAPUP_PROMPT = (
+    "Your run was stopped by the runner: {why}. Do not call any other tool. Using only what you\n"
+    "already gathered, submit your result now with the structured result tool — exactly once, in\n"
+    "this turn. `status` reflects what you found, not the interruption; lead `detail` with the\n"
+    "findings you have and end it with one line naming what was left unchecked."
+)
+
+
+def wrapup_prompt(why: str) -> str:
+    """The prompt of the grace re-invocation (`--resume` of the stopped session): submit, nothing else."""
+    return WRAPUP_PROMPT.format(why=why)
+
+
 def claude_argv(job: JobDef, *, prompt: str, schema: dict, settings_path: str, mcp_path: str,
-                contract: str, broker_port: int, nonce: str, tz: str, extra_env: dict | None = None) -> list:
+                contract: str, broker_port: int, nonce: str, tz: str, extra_env: dict | None = None,
+                resume: str | None = None, max_turns: int | None = None, max_budget_usd: float | None = None,
+                timeout_s: int | None = None) -> list:
     """The exact §4.4 invocation as an argv list (env -i allowlist, GNU timeout, claude -p).
     A3: CLAUDE_JOB_BROKER_PORT carries the bare port number. `extra_env` is for
-    network_env_passthrough() only; the runner passes nothing else."""
+    network_env_passthrough() only; the runner passes nothing else.
+    `resume` (+ the three bound overrides) builds the wrap-up variant: the same cage, `--resume
+    <session>` of the stopped run, a tiny turn/cost budget and its own short timeout."""
     passthrough = [f"{k}={v}" for k, v in (extra_env or {}).items() if k in NETWORK_ENV_PASSTHROUGH]
+    turns = int(job.max_turns if max_turns is None else max_turns)
+    budget = float(job.max_cost_usd if max_budget_usd is None else max_budget_usd)
+    wall = int(job.timeout if timeout_s is None else timeout_s)
     return [
         "env", "-i",
         f"HOME={os.environ.get('HOME', '/root')}",
@@ -1192,13 +1219,16 @@ def claude_argv(job: JobDef, *, prompt: str, schema: dict, settings_path: str, m
         *passthrough,
         f"CLAUDE_JOB_BROKER_PORT={int(broker_port)}",
         f"CLAUDE_JOB_BROKER_NONCE={nonce}",
-        jc.TIMEOUT_BIN, "--signal=TERM", "-k", str(int(jc.JOB_KILL_GRACE_S)), str(int(job.timeout)),
+        jc.TIMEOUT_BIN, "--signal=TERM", "-k", str(int(jc.JOB_KILL_GRACE_S)), str(wall),
         jc.CLAUDE_BIN, "-p", prompt,
-        "--output-format", "json",
+        *(["--resume", str(resume)] if resume else []),
+        # stream-json (which -p requires --verbose for) writes every message as it happens, so the
+        # runner can watch tool calls mid-run (loop guard); the last line is the same result envelope.
+        "--output-format", "stream-json", "--verbose",
         "--json-schema", json.dumps(schema, separators=(",", ":")),
         "--model", job.model,
-        "--max-turns", str(int(job.max_turns)),
-        "--max-budget-usd", f"{job.max_cost_usd:.2f}",
+        "--max-turns", str(turns),
+        "--max-budget-usd", f"{budget:.2f}",
         "--setting-sources", "",
         "--settings", str(settings_path),
         "--permission-mode", "dontAsk",

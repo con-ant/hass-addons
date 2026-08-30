@@ -59,6 +59,11 @@ You run under a turn limit, a cost cap, and a wall-clock timeout. A partial resu
 submitted in time beats a complete one that never arrives: if you are running long, stop
 gathering and report what you have, saying what you skipped.
 
+Never repeat a tool call that just failed with the same input: the runner stops a run that
+makes the same call several times in a row, and a retried "Path does not exist" will not
+succeed. If the runner has to stop you (cap or repeated call), it resumes you once with a
+message saying so — when that happens, submit immediately from what you already have.
+
 If a tool call is denied or fails, do not retry it in other forms and do not stop. Finish
 with what you could gather and say in `detail` which call was denied and what that left
 unchecked. A check that never executed (denied, or the endpoint errored before running it)

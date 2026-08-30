@@ -153,7 +153,7 @@ class TestJudgmentRows(RunnerCase):
         self.assertEqual(c["cwd"], str(self.s.project))
         self.assertTrue(c["stdin_is_devnull"])
         # PWD comes from the wrapper's /bin/sh; PYTHON*/TYPEGUARD_* from this box's interpreter start-up.
-        env_keys = {k for k in c["env_keys"] if not k.startswith(("FAKE_CLAUDE_", "PYTHON", "TYPEGUARD_"))} - {"PWD"}
+        env_keys = {k for k in c["env_keys"] if not k.startswith(("FAKE_CLAUDE_", "PYTHON", "TYPEGUARD_"))} - {"PWD", "SHLVL"}
         # proxy/CA variables pass through only when the add-on itself has them (jobdef.NETWORK_ENV_PASSTHROUGH)
         env_keys -= set(jobdef.NETWORK_ENV_PASSTHROUGH)
         self.assertEqual(env_keys, CHILD_ENV_KEYS)
@@ -166,7 +166,11 @@ class TestJudgmentRows(RunnerCase):
         run_files = str(self.s.run_dir / "run")
         self.assertEqual((p["model"], p["output_format"], p["permission_mode"], p["setting_sources"], p["tools"],
                           p["max_turns"], p["max_budget_usd"], p["strict_mcp_config"]),
-                         ("opus", "json", "dontAsk", "", "Bash,Read,Grep,Glob", "50", "1.50", True))
+                         ("opus", "stream-json", "dontAsk", "", "Bash,Read,Grep,Glob", "50", "1.50", True))
+        self.assertTrue(p["verbose"])
+        self.assertEqual(self.result()["partial"], False)
+        self.assertIsNone(self.result()["wrapup"])
+        self.assertNotIn("loop_guard", self.last_post()["attributes"])
         self.assertEqual(p["settings"], f"{run_files}/{JOB}.settings.json")
         self.assertEqual(p["mcp_config"], f"{run_files}/{JOB}.mcp.json")
         self.assertEqual(json.loads(p["json_schema"])["properties"]["status"]["enum"], ["ok", "info", "warning", "critical"])
@@ -268,13 +272,17 @@ class TestJudgmentRows(RunnerCase):
         self.assertEqual(events, ["auth_retry", "run"])
         self.assertEqual(self.s.read_json(self.s.state / "_cost.json")["runs"], 1)
 
-    def test_row7_budget_cap(self):
+    def test_row7_budget_cap_wrapup_disabled(self):
+        self.s.write_job(JOB, {**HEALTH_CHECK_FM, "wrapup_budget_usd": 0}, "Check the house.\n")
         self.scenario("budget")
         rc, _, _ = self.run_job()
         self.assertOutcome(rc, 1, "error", "max_budget", 7)
         self.assertEqual(self.result()["headline"], "stopped at budget cap $1.50")
+        self.assertEqual(len(self.s.fake_claude_calls()), 1)
+        self.assertIsNone(self.result()["wrapup"])
 
-    def test_row6_max_turns(self):
+    def test_row6_max_turns_wrapup_disabled(self):
+        self.s.write_job(JOB, {**HEALTH_CHECK_FM, "wrapup_budget_usd": 0}, "Check the house.\n")
         self.scenario("max_turns")
         rc, _, _ = self.run_job()
         self.assertOutcome(rc, 1, "error", "max_turns", 6)
@@ -324,6 +332,139 @@ class TestJudgmentRows(RunnerCase):
 
 
 # ---------------------------------------------------------------------------------------------
+class TestWrapupAndLoopGuard(RunnerCase):
+    """§4.6 rows 14/15: a run stopped by a cap or by the runner's loop guard is resumed once,
+    submit-only, so the analysis already paid for still lands (as a `[partial]` warning)."""
+
+    def test_row15_budget_cap_wrapup_partial_result(self):
+        self.scenario("budget", FAKE_CLAUDE_COST="1.6", FAKE_CLAUDE_TURNS="40")
+        rc, out, _ = self.run_job()
+        self.assertOutcome(rc, 0, "warning", "max_budget", 15)
+        res = self.result()
+        self.assertEqual(res["headline"], "[partial] partial answer")
+        self.assertTrue(res["partial"])
+        self.assertTrue(res["detail"].startswith("> **Partial result** — the cost cap ($1.50) was reached"))
+        self.assertEqual((res["cost_usd"], res["over_budget"], res["attempts"], res["num_turns"]), (1.63, True, 2, 42))
+        self.assertEqual(res["wrapup"], {"reason": "max_budget", "ok": True, "row": 13, "first_cost_usd": 1.6,
+                                         "first_num_turns": 40, "cost_usd": 0.03})
+        calls = self.s.fake_claude_calls()
+        self.assertEqual(len(calls), 2)
+        first_sid = res["session_id"]
+        self.assertEqual(calls[1]["parsed"]["resume"], first_sid)
+        self.assertEqual((calls[1]["parsed"]["max_turns"], calls[1]["parsed"]["max_budget_usd"]), ("3", "0.75"))
+        self.assertIn("the cost cap ($1.50) was reached", calls[1]["parsed"]["prompt"])
+        self.assertNotIn("<job-input>", calls[1]["parsed"]["prompt"])
+        # same cage on the wrap-up: settings, mcp, tools, contract
+        for k in ("settings", "mcp_config", "tools", "append_system_prompt", "permission_mode", "model"):
+            self.assertEqual(calls[0]["parsed"][k], calls[1]["parsed"][k], k)
+        self.assertEqual([ln["event"] for ln in self.s.job_log(JOB)], ["wrapup", "run"])
+        rec = self.s.job_log(JOB)[-1]
+        self.assertEqual((rec["wrapup"]["reason"], rec["judgment_row"], rec["cost_usd"]), ("max_budget", 15, 1.63))
+        self.assertEqual(self.s.read_json(self.s.state / "_cost.json")["total_usd"], 1.63)
+        attrs = self.last_post()["attributes"]
+        self.assertEqual((attrs["partial"], attrs["reason"], attrs["cost_usd"]), (True, "max_budget", 1.63))
+        self.assertEqual([p["state"] for p in self.posts()], ["running", "warning"])
+        self.assertIn("row 15", out)
+
+    def test_row15_never_downgrades_and_strips_over_budget_prefix(self):
+        self.scenario("budget", FAKE_CLAUDE_RESUME_SCENARIO="success:critical", FAKE_CLAUDE_RESUME_COST="2.0")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 0, "critical", "max_budget", 15)
+        self.assertEqual(self.result()["headline"], "[partial] partial answer")   # not "[partial] [over budget] …"
+
+    def test_row15_max_turns_wrapup(self):
+        self.scenario("max_turns")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 0, "warning", "max_turns", 15)
+        self.assertIn("the turn limit (50) was reached", self.s.fake_claude_calls()[1]["parsed"]["prompt"])
+
+    def test_row7_wrapup_without_result_keeps_the_cap_verdict(self):
+        self.scenario("budget", FAKE_CLAUDE_RESUME_SCENARIO="no_so")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 1, "error", "max_budget", 7)
+        res = self.result()
+        self.assertEqual(res["headline"], "stopped at budget cap $1.50")
+        self.assertEqual((res["wrapup"]["ok"], res["wrapup"]["failed"], res["cost_usd"], res["attempts"]),
+                         (False, "no_result", 0.15, 2))
+        self.assertFalse(res["partial"])
+        self.assertEqual(res["envelope_subtype"], "error_max_budget_usd")   # the main run's envelope is what gets logged
+
+    def test_row15_wrapup_extends_the_deadline_the_tick_watches(self):
+        """Mid wrap-up the state file and pgid file carry a deadline pushed out by WRAPUP_TIMEOUT_S (+ kill
+        grace) from the wrap-up start, attempt 2 and the stop reason — so the tick never demotes a live wrap-up."""
+        self.s.setenv(CLAUDE_JOB_WRAPUP_TIMEOUT_S="300")
+        self.scenario("budget", FAKE_CLAUDE_RESUME_SCENARIO="sleep:3")
+        proc = self.spawn_job()
+        pgid_file = self.s.run_dir / "jobs" / f"{JOB}.pgid"
+        self.assertTrue(wait_for(lambda: [l for l in self.s.job_log(JOB) if l["event"] == "wrapup"], timeout=20))
+        time.sleep(0.5)                                   # inside the wrap-up's 3 s sleep now
+        st, pg = self.state(), self.s.read_json(pgid_file)
+        self.assertEqual((st["status"], st["run"]["attempt"], st["run"]["wrapup"]), ("running", 2, "max_budget"))
+        self.assertEqual(st["run"]["deadline"], pg["deadline"])
+        import jobcommon
+        event = [l for l in self.s.job_log(JOB) if l["event"] == "wrapup"][0]
+        extended = (jobcommon.parse_iso(pg["deadline"]) - jobcommon.parse_iso(event["ts"])).total_seconds()
+        self.assertGreaterEqual(extended, 300 + 15 - 2)
+        self.assertLess(extended, 300 + 15 + 30)
+        proc.communicate(timeout=30)
+        self.assertOutcome(proc.returncode, 0, "warning", "max_budget", 15)
+        self.assertEqual(self.result()["attempts"], 2)
+
+    def test_row14_loop_guard_kills_and_wraps_up(self):
+        self.scenario("loop:200:0.05")
+        rc, _, err = self.run_job()
+        self.assertOutcome(rc, 0, "warning", "loop_guard", 15)
+        res = self.result()
+        self.assertEqual(res["loop_guard"]["tool"], "Grep")
+        self.assertEqual(res["loop_guard"]["repeats"], 5)
+        self.assertIn("/nonexistent/spool.txt", res["loop_guard"]["input"])
+        self.assertTrue(res["cost_unknown"])                       # the killed attempt printed no envelope
+        self.assertEqual(res["cost_usd"], 0.03)
+        self.assertEqual(res["headline"], "[partial] partial answer")
+        self.assertIn("loop guard: Grep called 5× with identical input", err)
+        calls = self.s.fake_claude_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["parsed"]["resume"], res["session_id"])
+        self.assertIn("the same Grep call was repeated 5 times", calls[1]["parsed"]["prompt"])
+        self.assertEqual(self.last_post()["attributes"]["loop_guard"]["repeats"], 5)
+
+    def test_row14_loop_guard_without_wrapup(self):
+        self.s.write_job(JOB, {**HEALTH_CHECK_FM, "wrapup_budget_usd": 0, "loop_guard": 3}, "Check the house.\n")
+        self.scenario("loop:200:0.05")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 1, "error", "loop_guard", 14)
+        self.assertEqual(self.result()["headline"], "stopped by loop guard: Grep ×3 identical calls")
+        self.assertEqual(len(self.s.fake_claude_calls()), 1)
+        self.assertTrue(self.result()["cost_unknown"])
+
+    def test_loop_guard_off_lets_the_run_finish(self):
+        self.s.write_job(JOB, {**HEALTH_CHECK_FM, "loop_guard": 0}, "Check the house.\n")
+        self.scenario("loop:8:0.01")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 0, "ok", None, 13)
+        self.assertEqual(len(self.s.fake_claude_calls()), 1)
+
+    def test_loop_guard_counts_only_consecutive_identical_calls(self):
+        m = load_runner_module()
+        run = m.Run(name=JOB, trigger="manual", forced=False, run_id="run-20260101T000000Z-abcd", json_out=False)
+        run.job = jobdef.load(str(self.s.write_job(JOB, {**HEALTH_CHECK_FM, "loop_guard": 3})))
+        run.out_path = str(self.s.root / "stream.out")
+        run.claude = None
+        lines = [{"type": "system", "subtype": "init", "session_id": "sid-1"}]
+        def call(name, inp):
+            return {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}}
+        lines += [call("Grep", {"p": 1}), call("Grep", {"p": 1}), call("Read", {"f": "x"}), call("Grep", {"p": 1}),
+                  call("Grep", {"p": 1})]
+        with open(run.out_path, "w") as f:
+            f.write("\n".join(json.dumps(x) for x in lines) + "\n" + '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Grep","input":{"p":1}')
+        m.watch_stream(run)
+        self.assertEqual((run.stream_session_id, run.stream_repeats, run.loop_hit), ("sid-1", 2, None))
+        with open(run.out_path, "a") as f:                       # the partial line completes: third identical call
+            f.write("}]}}\n")
+        m.watch_stream(run)
+        self.assertEqual(run.loop_hit["repeats"], 3)
+
+
 class TestAbort(RunnerCase):
     def test_term_during_run_aborts_within_budget(self):
         self.scenario("ignore_term:30")                  # claude ignores TERM → runner must KILL the group
@@ -928,6 +1069,15 @@ class TestJudgePure(unittest.TestCase):
         self.assertNotIn("envelope_dropped", rec)
         small = {"event": "run", "envelope": {"result": "ok"}, "headline": "h"}
         self.assertEqual(self.m.fit_line(dict(small)), small)
+
+    def test_parse_envelope_takes_only_the_result_line(self):
+        init = json.dumps({"type": "system", "subtype": "init", "session_id": "s"})
+        assistant = json.dumps({"type": "assistant", "message": {"content": []}})
+        result = json.dumps({"type": "result", "subtype": "success", "session_id": "s"})
+        self.assertEqual(self.m.parse_envelope("\n".join([init, assistant, result]))["subtype"], "success")
+        self.assertIsNone(self.m.parse_envelope("\n".join([init, assistant])))      # died before the envelope
+        self.assertIsNone(self.m.parse_envelope(init + "\nnot json"))
+        self.assertEqual(self.m.parse_envelope(result)["type"], "result")
 
     def test_headline_cap_and_argv_elision(self):
         v = self.judge(stdout=self.env(subtype="error_during_execution", is_error=True, errors=["x" * 500]))

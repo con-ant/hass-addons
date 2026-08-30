@@ -73,6 +73,9 @@ ENVELOPE_RESULT_LOG_CAP = 2048   # 2c
 JSONL_LINE_CAP = 16 * 1024       # 2c
 DENIALS_CAP = 20
 CRED_SYNC_INTERVAL_S = 15        # mid-run credential sync throttle (run_attempt)
+STREAM_POLL_S = 0.5              # how often run_attempt reads new stream-json lines (loop guard)
+STREAM_READ_CAP = 4 * 1024 * 1024   # bytes of new stream output consumed per read
+WRAPUP_REASONS = ("max_budget", "max_turns", "loop_guard")   # stops that get the grace re-invocation
 NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # 127.0.0.1 never goes via a proxy
 
 # The abort flag: signal handlers set it, polling loops read it (R3).
@@ -148,6 +151,15 @@ class Run:
     next_cred_sync: float = 0.0       # monotonic throttle for the mid-run credential sync
     aborting: bool = False
     finishing: bool = False
+    # stream-json watcher (loop guard) — reset by spawn_claude()
+    stream_offset: int = 0
+    stream_buf: bytes = b""
+    stream_next: float = 0.0
+    stream_session_id: Optional[str] = None
+    stream_last_key: Optional[str] = None
+    stream_repeats: int = 0
+    loop_hit: Optional[dict] = None   # {"tool", "repeats", "input"} once the guard tripped and the child was killed
+    wrapup_argv: Optional[list] = None
 
     def __post_init__(self):          # file locations (2b, 2f); all keyed by name
         self.slug = jobdef.slug(self.name)
@@ -634,8 +646,9 @@ def write_pgid_file(run: Run) -> None:
 
 # ── step 9 ──────────────────────────────────────────────────────────────────
 
-def spawn_claude(run: Run) -> None:
-    """The exact §4.4 invocation. stdout/stderr go to files, not pipes, so waiting is pure polling (R3)."""
+def spawn_claude(run: Run, argv: Optional[list] = None) -> None:
+    """The exact §4.4 invocation. stdout/stderr go to files, not pipes, so waiting is pure polling (R3).
+    `argv` overrides the main invocation for the wrap-up (§4.6 row 15); run.argv stays the main one."""
     if run.argv is None:
         run.argv = jobdef.claude_argv(run.job, prompt=jobdef.assemble_prompt(run.job, run.input), schema=run.schema,
                                      settings_path=run.settings_path, mcp_path=run.mcp_path,
@@ -646,7 +659,7 @@ def spawn_claude(run: Run) -> None:
     try:
         # No start_new_session: GNU timeout puts itself (and claude) in its own process group anyway (A30);
         # the pgid file's child_pgid is how the stop path and the tick reach that group.
-        run.claude = subprocess.Popen(run.argv, cwd=jc.PROJECT_DIR, stdin=subprocess.DEVNULL,
+        run.claude = subprocess.Popen(argv or run.argv, cwd=jc.PROJECT_DIR, stdin=subprocess.DEVNULL,
                                       stdout=out, stderr=err, close_fds=True)
     finally:
         os.close(out)
@@ -654,6 +667,8 @@ def spawn_claude(run: Run) -> None:
     run.spawn_t = time.monotonic()
     run.attempts += 1
     run.exit_code, run.envelope = None, None
+    run.stream_offset, run.stream_buf, run.stream_next = 0, b"", 0.0
+    run.stream_last_key, run.stream_repeats, run.loop_hit = None, 0, None
     write_pgid_file(run)
 
 
@@ -671,6 +686,12 @@ def wait_and_judge(run: Run) -> Verdict:
         spawn_claude(run)
         run.retried_auth = True
         verdict = run_attempt(run, auth_retried=True)
+    if verdict.reason in WRAPUP_REASONS and float(run.job.wrapup_budget_usd) > 0:   # §4.6 row 15
+        session_id = verdict.extra.get("session_id") or run.stream_session_id
+        if session_id:
+            verdict = wrapup(run, verdict, session_id)
+        else:
+            verdict.extra["wrapup"] = {"reason": verdict.reason, "ok": False, "failed": "no session id to resume"}
     return verdict
 
 
@@ -685,9 +706,14 @@ def run_attempt(run: Run, *, auth_retried: bool) -> Verdict:
         if time.monotonic() >= run.next_cred_sync and not os.path.islink(link):
             run.next_cred_sync = time.monotonic() + CRED_SYNC_INTERVAL_S
             quietly("mid-run credentials sync", lambda: jc.reconcile_job_credentials(restore_link=False), False)
+        if time.monotonic() >= run.stream_next:
+            run.stream_next = time.monotonic() + STREAM_POLL_S
+            quietly("stream watch", lambda: watch_stream(run), None)
         time.sleep(POLL_S)
     run.exit_code = normalize_exit(run.claude.returncode)
     run.elapsed = time.monotonic() - run.spawn_t
+    if run.loop_hit is not None:                      # the guard killed the child: row 14, no envelope to judge
+        return loop_guard_verdict(run)
     if run.exit_code > 128:                           # killed by a signal: the stop path signals claude's group and ours
         ABORT.wait(ABORT_RACE_WAIT_S)                 # almost together — if our TERM is in flight this is row 2, not row 4
         check_abort(run)
@@ -718,8 +744,133 @@ def auth_retry_pause(run: Run) -> None:
         time.sleep(POLL_S)
 
 
+# ── loop guard (§4.6 row 14) ─────────────────────────────────────────────────
+
+def watch_stream(run: Run) -> None:
+    """Read the stream-json lines claude appended since the last look. Remembers the session id
+    (needed for a wrap-up when the run dies without an envelope) and counts identical consecutive
+    tool calls; at `loop_guard` repeats the child is killed and run.loop_hit is set."""
+    try:
+        size = os.stat(run.out_path).st_size
+    except OSError:
+        return
+    if size <= run.stream_offset:
+        return
+    with open(run.out_path, "rb") as f:
+        f.seek(run.stream_offset)
+        chunk = f.read(STREAM_READ_CAP)
+    run.stream_offset += len(chunk)
+    data = run.stream_buf + chunk
+    lines = data.split(b"\n")
+    run.stream_buf = lines.pop()                      # a partial last line waits for the next read
+    for raw in lines:
+        raw = raw.strip()
+        if not raw.startswith(b"{"):
+            continue
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("session_id") and not run.stream_session_id:
+            run.stream_session_id = str(msg["session_id"])
+        if msg.get("type") != "assistant":
+            continue
+        content = (msg.get("message") or {}).get("content") if isinstance(msg.get("message"), dict) else None
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            key = str(block.get("name")) + "\0" + json.dumps(block.get("input"), sort_keys=True, separators=(",", ":"))
+            run.stream_repeats = run.stream_repeats + 1 if key == run.stream_last_key else 1
+            run.stream_last_key = key
+            limit = int(run.job.loop_guard) if run.job else 0
+            if limit > 0 and run.stream_repeats >= limit and run.loop_hit is None:
+                run.loop_hit = {"tool": str(block.get("name")), "repeats": run.stream_repeats,
+                                "input": json.dumps(block.get("input"), sort_keys=True)[:200]}
+                log(f"loop guard: {run.loop_hit['tool']} called {run.stream_repeats}× with identical input; stopping the run")
+                kill_child(run)
+                return
+
+
+def loop_guard_verdict(run: Run) -> Verdict:
+    """Row 14: the runner killed a looping run. Usually there is no envelope, so this attempt's
+    spend is unknown; if claude still managed to print one on TERM, its facts are kept."""
+    hit = run.loop_hit or {}
+    envelope = parse_envelope(jc.read_text(run.out_path, "") or "")
+    facts = envelope_facts(envelope) if envelope else {"envelope": None, "session_id": run.stream_session_id,
+                                                       "cost_usd": 0.0, "cost_unknown": True}
+    facts.setdefault("session_id", run.stream_session_id)
+    facts.update({"loop_guard": hit, "hard_killed": run.exit_code == 137,
+                  "raw_tail": (jc.read_text(run.err_path, "") or "")[-TAIL_CHARS:] or None})
+    return Verdict("error", cap(f"stopped by loop guard: {hit.get('tool')} ×{hit.get('repeats')} identical calls"),
+                   reason="loop_guard", row=14, extra=facts)
+
+
+# ── wrap-up (§4.6 row 15) ────────────────────────────────────────────────────
+
+def wrapup_why(run: Run, first: Verdict) -> str:
+    if first.reason == "max_budget":
+        return f"the cost cap (${run.job.max_cost_usd:.2f}) was reached"
+    if first.reason == "max_turns":
+        return f"the turn limit ({run.job.max_turns}) was reached"
+    hit = first.extra.get("loop_guard") or {}
+    return (f"the same {hit.get('tool')} call was repeated {hit.get('repeats')} times with identical input — "
+            "that source is unavailable, do not try it again")
+
+
+def wrapup(run: Run, first: Verdict, session_id: str) -> Verdict:
+    """Grace re-invocation: `--resume` the stopped session with a submit-only prompt, a tiny budget
+    and its own timeout. A valid result comes back as row 15 (`[partial]`, ≥ warning, reason = what
+    stopped the main run); anything else keeps the main run's verdict, annotated."""
+    argv = jobdef.claude_argv(run.job, prompt=jobdef.wrapup_prompt(wrapup_why(run, first)), schema=run.schema,
+                              settings_path=run.settings_path, mcp_path=run.mcp_path, contract=jobdef.load_contract(),
+                              broker_port=run.broker_port, nonce=run.nonce, tz=run.tz,
+                              extra_env=jobdef.network_env_passthrough(), resume=session_id,
+                              max_turns=int(jc.JOB_WRAPUP_MAX_TURNS), max_budget_usd=float(run.job.wrapup_budget_usd),
+                              timeout_s=int(jc.JOB_WRAPUP_TIMEOUT_S))
+    log(f"{first.reason}: resuming session {session_id[:8]}… for a wrap-up (≤ ${run.job.wrapup_budget_usd:.2f}, "
+        f"{int(jc.JOB_WRAPUP_TIMEOUT_S)}s)")
+    jc.append_jsonl(run.log_path, {"ts": jc.now_iso(), "event": "wrapup", "job": run.name, "run_id": run.run_id,
+                                   "session_id": session_id, "reason": first.reason,
+                                   "first_cost_usd": round(float(first.extra.get("cost_usd") or 0.0), 4)})
+    run.deadline = iso_plus(jc.now_iso(), float(jc.JOB_WRAPUP_TIMEOUT_S) + float(jc.JOB_KILL_GRACE_S))
+    state = read_state(run)
+    if isinstance(state.get("run"), dict):
+        state["run"].update({"deadline": run.deadline, "attempt": run.attempts + 1, "wrapup": first.reason})
+        write_state(run, state)
+    first_envelope, first_cost = run.envelope, float(first.extra.get("cost_usd") or 0.0)
+    first_turns = first.extra.get("num_turns")
+    run.claude = None
+    spawn_claude(run, argv=argv)
+    run.wrapup_argv = argv
+    second = run_attempt(run, auth_retried=True)
+    cost = round(first_cost + float(second.extra.get("cost_usd") or 0.0), 4)
+    info = {"reason": first.reason, "ok": second.row in (11, 12, 13), "row": second.row,
+            "first_cost_usd": round(first_cost, 4), "first_num_turns": first_turns,
+            "cost_usd": round(float(second.extra.get("cost_usd") or 0.0), 4)}
+    if not info["ok"]:
+        info["failed"] = second.reason or second.headline
+        first.extra.update({"wrapup": info, "cost_usd": cost, "over_budget": cost > run.job.max_cost_usd})
+        run.envelope = first_envelope
+        log(f"wrap-up did not produce a result ({info['failed']}); keeping the {first.reason} verdict")
+        return first
+    x = second.extra
+    headline = second.headline
+    for prefix in ("[over budget] ",):               # row 12's own marker would duplicate [partial]
+        if headline.startswith(prefix):
+            headline = headline[len(prefix):]
+    x.update({"cost_usd": cost, "over_budget": cost > run.job.max_cost_usd, "wrapup": info, "partial": True,
+              "cost_unknown": bool(first.extra.get("cost_unknown", False)),
+              "num_turns": (first_turns or 0) + int(x.get("num_turns") or 0),
+              "loop_guard": first.extra.get("loop_guard")})
+    x["detail"] = f"> **Partial result** — {wrapup_why(run, first)}; the runner resumed the session once to collect what was already gathered.\n\n" + str(x.get("detail") or "")
+    return Verdict(jobdef.escalate(second.status, "warning"), cap("[partial] " + headline), reason=first.reason, row=15, extra=x)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# The judgment table (§4.6 rows 3–13; row 1 = invalid_verdict(), row 2 = check_abort()).
+# The judgment table (§4.6 rows 3–13; row 1 = invalid_verdict(), row 2 = check_abort(),
+# row 14 = loop_guard_verdict(), row 15 = wrapup()).
 # Pure function: no I/O, importable by tests.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -774,7 +925,9 @@ def judge(*, exit_code: int, elapsed: float, timeout_s: int, stdout: str, stderr
 
 
 def parse_envelope(stdout: str) -> Optional[dict]:
-    """stdout of a finished run is ONE JSON object with type=result (A5); tolerate leading noise via the last line."""
+    """The result envelope is the LAST line of stdout: one JSON object with type=result (A5). Under
+    stream-json every preceding line is a typed message too (system/init, assistant, user), so only
+    `type == "result"` counts; leading noise and a missing envelope both yield None."""
     text = stdout.strip()
     lines = [ln for ln in text.splitlines() if ln.strip()]
     for cand in [text] + ([lines[-1]] if lines and lines[-1] != text else []):
@@ -782,7 +935,7 @@ def parse_envelope(stdout: str) -> Optional[dict]:
             obj = json.loads(cand)
         except ValueError:
             continue
-        if isinstance(obj, dict) and ("type" in obj or "subtype" in obj):
+        if isinstance(obj, dict) and obj.get("type") == "result":
             return obj
     return None
 
@@ -930,6 +1083,8 @@ def build_result(run: Run, v: Verdict) -> dict:
         "metrics": x.get("metrics") or {}, "actions_selected": x.get("actions_selected") or [],
         "input": run.input, "raw_tail": x.get("raw_tail"), "result_tail": x.get("result_tail"),
         "holder": x.get("holder"),
+        "partial": bool(x.get("partial", False)), "wrapup": x.get("wrapup"), "loop_guard": x.get("loop_guard"),
+        "cost_unknown": bool(x.get("cost_unknown", False)),
     }
 
 
@@ -962,6 +1117,7 @@ def append_run_record(run: Run, v: Verdict, state: dict) -> None:
         "judgment_row": v.row, "state": v.status, "headline": v.headline, "reason": v.reason,
         "cost_usd": result["cost_usd"], "hard_killed": result["hard_killed"],
         "validation_errors": result["validation_errors"], "denials": len(result["permission_denials"]),
+        "wrapup": result.get("wrapup"), "loop_guard": result.get("loop_guard"),
         "input": run.input}))
 
 

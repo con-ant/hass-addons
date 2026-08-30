@@ -76,6 +76,18 @@ max_cost_usd: 1.50
 max_turns: 50
   # optional · default 50 · 2..200 (submitting the result itself uses a turn).
 
+wrapup_budget_usd: 0.75
+  # optional · default 0.75 · 0..2.00. When the run is stopped by the cost cap, the turn
+  # limit or the loop guard, the runner resumes the session ONCE with a submit-only
+  # prompt and this much extra budget, so the analysis already paid for still lands
+  # (status ≥ `warning`, headline prefixed `[partial]`). 0 = no wrap-up: the run is a
+  # plain `error` as before. The final cost can exceed max_cost_usd by up to this much.
+
+loop_guard: 5
+  # optional · default 5 · 0..50. Identical consecutive tool calls (same tool, same
+  # input) before the runner kills the run and goes to the wrap-up. Catches the
+  # "retry the same failing Grep 286 times" failure that max_turns does not. 0 = off.
+
 enabled: true
   # optional · default true. false = born disabled, pending human review — what a
   # Claude-authored job should ship with. Runtime pausing uses the flag file
@@ -217,9 +229,12 @@ absent. Inside a run:
   one harmless `[ha-broker] 403 GET /core/api/hassio/core/logs` line in the add-on log per
   `get_error_log` call (hass-mcp probes that path before its fallback).
 
-**Bounds.** Every run has three: `max_turns` catches loops, `max_cost_usd` hard-stops
-spend, `timeout` catches hangs — and only the timeout produces no result at all. Size them
-so the typed bounds trip first: `timeout ≥ max_turns × 10 s`.
+**Bounds.** Every run has four: `loop_guard` catches a run repeating one failing call,
+`max_turns` bounds the total number of turns, `max_cost_usd` hard-stops spend, `timeout`
+catches hangs — and only the timeout produces no result at all. Size them so the typed
+bounds trip first: `timeout ≥ max_turns × 10 s`. The first three do not lose the work:
+unless `wrapup_budget_usd` is 0, the runner resumes the stopped session once, submit-only,
+and publishes what was gathered as a `[partial]` result (`partial: true` attribute).
 
 **Writing the prompt.** The job runs with a fixed system-prompt contract
 (`/usr/share/claudecode/job-contract.md`): it is unattended, nobody answers questions,
@@ -993,8 +1008,10 @@ judgment row, envelope, cost); the run transcript under
 | `sensor.claude_jobs_attention` does not exist at all | the `packages:` include is missing, HA was not restarted after adding it, or HA rejected the package — Settings → System → Logs, search `claudecode_jobs` (a duplicate `rest_command` name from the interim setup is the usual cause) |
 | job entity `error`, headline `runner died without reporting` (`reason: lost`) | the run's process disappeared without writing a result — container killed, host reboot, out of memory. Demoted by the tick; the next run heals it. Check the add-on log around `started_at` |
 | `error` · `claude.ai login expired — run /login in the terminal` | the OAuth login is gone (one automatic retry already happened). Open the terminal, start `claude`, run `/login` |
-| `error` · `stopped at budget cap $1.00` (`reason: max_budget`) | the run hit `max_cost_usd` mid-flight. Raise it (≤ 5.00), narrow the prompt, or use a cheaper `model:` |
-| `error` · `hit max turns (50) before finishing` | raise `max_turns` (≤ 200) or narrow the job; keep `timeout ≥ max_turns × 10 s` |
+| `warning` (or higher) · `[partial] …` (`reason: max_budget` / `max_turns` / `loop_guard`, `partial: true`) | the run was stopped by that bound and the runner's wrap-up collected what it had. The answer is real but incomplete — `detail` opens with what stopped it and ends with what was left unchecked. Recurring: raise the bound, narrow the prompt, or fix whatever the model was retrying (`loop_guard` attribute names the call) |
+| `error` · `stopped at budget cap $1.00` (`reason: max_budget`) | the run hit `max_cost_usd` mid-flight and the wrap-up produced nothing (or `wrapup_budget_usd: 0`). Raise the cap (≤ 5.00), narrow the prompt, or use a cheaper `model:` |
+| `error` · `hit max turns (50) before finishing` | as above for `max_turns`: raise it (≤ 200) or narrow the job; keep `timeout ≥ max_turns × 10 s` |
+| `error` · `stopped by loop guard: Grep ×5 identical calls` (`reason: loop_guard`) | the model repeated one tool call with identical input `loop_guard` times and the wrap-up produced nothing (or is off). `loop_guard` in the attributes names the call; the transcript shows why it kept failing. `cost_unknown: true` — the killed attempt printed no envelope, so that spend is missing from the monthly rollup |
 | `error` · `timed out after 600s` | no result at all was produced. Raise `timeout` (≤ 3600) or find the slow tool call in the transcript |
 | `error` · `completed without submitting a result` | the model finished without using the result tool — usually a `tools:` list too narrow to do the job, or a prompt that invites conversation. Read the transcript |
 | `error` · `invalid definition: …` (`cost_usd: 0`) | run `claude-job validate <name>`; all errors are listed in the `validation_errors` attribute |

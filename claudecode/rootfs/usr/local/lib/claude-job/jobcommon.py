@@ -140,6 +140,12 @@ JOB_MAX_COST_USD = 5.00             # frontmatter `max_cost_usd` ceiling
 JOB_DEFAULT_COST_USD = 1.00
 JOB_DEFAULT_MAX_TURNS = 50
 JOB_MAX_TURNS_CAP = 200
+JOB_DEFAULT_WRAPUP_USD = 0.75       # frontmatter `wrapup_budget_usd`: grace re-invocation after a cap/loop stop (0 = off)
+JOB_MAX_WRAPUP_USD = 2.00
+JOB_WRAPUP_TIMEOUT_S = 180          # wall clock of the wrap-up invocation (`timeout` for the resumed claude)
+JOB_WRAPUP_MAX_TURNS = 3            # the wrap-up may only submit (one tool turn + slack)
+JOB_DEFAULT_LOOP_GUARD = 5          # frontmatter `loop_guard`: identical consecutive tool calls before the runner intervenes (0 = off)
+JOB_MAX_LOOP_GUARD = 50
 JOB_DEFAULT_MODEL = "opus"          # overridden by add-on option job_default_model (jobdef.default_model)
 JOB_ANCHOR_SCAN_INTERVAL_S = 60     # rendered into the package's rest: block
 JOB_TRANSCRIPT_KEEP_DAYS = 30       # A.7
@@ -172,6 +178,8 @@ NOTIFIER_TIMEOUT_S = 45             # runner waits this long for claude-job-noti
 _TUNABLES = (
     "JOB_MAX_CONCURRENT", "JOB_GLOBAL_WAIT_S", "JOB_MAX_TIMEOUT", "JOB_MIN_TIMEOUT", "JOB_DEFAULT_TIMEOUT",
     "JOB_MAX_COST_USD", "JOB_DEFAULT_COST_USD", "JOB_DEFAULT_MAX_TURNS", "JOB_MAX_TURNS_CAP",
+    "JOB_DEFAULT_WRAPUP_USD", "JOB_MAX_WRAPUP_USD", "JOB_WRAPUP_TIMEOUT_S", "JOB_WRAPUP_MAX_TURNS",
+    "JOB_DEFAULT_LOOP_GUARD", "JOB_MAX_LOOP_GUARD",
     "JOB_DEFAULT_MODEL", "JOB_ANCHOR_SCAN_INTERVAL_S", "JOB_TRANSCRIPT_KEEP_DAYS", "JOB_TRANSCRIPT_MAX_BYTES",
     "JOB_LOG_PRUNE_BYTES", "JOB_LOG_KEEP_LINES", "JOB_LOG_BACKSTOP_BYTES", "JOB_ENDPOINT_PORT",
     "JOB_ENDPOINT_BIND", "JOB_ENDPOINT_BODY_CAP", "JOB_INPUT_MAX_BYTES", "JOB_STOP_GRACE_S",
@@ -784,8 +792,11 @@ def entity_payload(state: dict):
         "skipped_since_last": int(stats.get("skipped_since_last") or 0),
         "notify_status": notify.get("notify_status"),
         "attempts": result.get("attempts"),
+        "partial": bool(result.get("partial", False)),
         "metrics": metrics,
     }
+    if isinstance(result.get("loop_guard"), dict):        # tool + count only; the call's input stays in the state file/log
+        attrs["loop_guard"] = {k: result["loop_guard"].get(k) for k in ("tool", "repeats")}
     verrs = result.get("validation_errors")
     if isinstance(verrs, list) and verrs:
         attrs["validation_errors"] = [str(v) for v in verrs[:10]]

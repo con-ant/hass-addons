@@ -13,6 +13,8 @@
     "timeout": {"type": "integer", "minimum": 30, "maximum": 3600},
     "max_cost_usd": {"type": "number", "minimum": 0.01, "maximum": 5.0},
     "max_turns": {"type": "integer", "minimum": 2, "maximum": 200},
+    "wrapup_budget_usd": {"type": "number", "minimum": 0, "maximum": 2.0},
+    "loop_guard": {"type": "integer", "minimum": 0, "maximum": 50},
     "enabled": {"type": "boolean"},
     "min_interval": {"type": "integer", "minimum": 0, "maximum": 86400},
     "stale_after": {"type": "integer", "minimum": 60, "maximum": 31708800},
