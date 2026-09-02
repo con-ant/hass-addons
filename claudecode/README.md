@@ -357,6 +357,14 @@ Claude Code manages its own authentication. If you have issues:
 3. Check browser console for errors
 4. Review add-on logs for ttyd errors
 
+A **blank white panel** in Chrome with `WebAssembly is not defined` in the
+console means the browser has the V8 JIT disabled (managed devices:
+`DefaultJavaScriptJitSetting` policy; or the "JavaScript optimisation and
+security" site setting), which removes WebAssembly entirely. Since
+1.2.65-con.18 the terminal works without WebAssembly (only sixel image
+support, which is off anyway, needs it) — older versions need a browser with
+WebAssembly available.
+
 ### Session not persisting
 
 1. Ensure `session_persistence` is set to true
