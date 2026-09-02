@@ -1,0 +1,24 @@
+<script>
+// WebAssembly shim for browsers where WebAssembly is absent. Chrome removes
+// the WebAssembly global entirely when the V8 JIT is blocked (enterprise
+// policy DefaultJavaScriptJitSetting=2, or the "JavaScript optimisation"
+// site setting) - Chrome has no wasm interpreter. The ttyd client bundle
+// (xterm-addon-image + inwasm) captures `WebAssembly` at module-init time,
+// so without the global the whole script dies before drawing anything and
+// the panel is a blank white iframe. Every actual wasm call is lazy and only
+// reached via the image addon, which ttyd loads only when enableSixel is on
+// (this add-on never sets it). A throwing placeholder keeps init alive and
+// gives a clear error should sixel ever be enabled here.
+(function () {
+  if (typeof WebAssembly !== 'undefined') return;
+  function unavailable() {
+    throw new Error('WebAssembly is unavailable in this browser (JIT disabled by policy); sixel image support is off');
+  }
+  var shim = { __ttydShim: true, Module: unavailable, Instance: unavailable, Memory: unavailable,
+    compile: function () { return Promise.reject(new Error('WebAssembly unavailable')); },
+    instantiate: function () { return Promise.reject(new Error('WebAssembly unavailable')); },
+    validate: function () { return false; } };
+  window.WebAssembly = shim;
+  console.warn('[ttyd] WebAssembly is not available in this browser; using a placeholder (terminal works, sixel images disabled)');
+})();
+</script>

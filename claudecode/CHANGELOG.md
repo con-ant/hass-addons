@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.18] - 2026-09-02
+
+### Fixed
+- **Blank white panel in Chrome when WebAssembly is unavailable.** The ttyd
+  web client bundle captures the `WebAssembly` global at module-init time
+  (xterm-addon-image via inwasm), so on a browser that has no such global
+  the whole script dies with `Uncaught ReferenceError: WebAssembly is not
+  defined` before drawing anything; the ingress iframe stays blank and the
+  add-on log shows `HTTP /` but never `/token` or `WS /ws`. Chrome removes
+  the global entirely when the V8 JIT is blocked — enterprise policy
+  `DefaultJavaScriptJitSetting=2` on managed devices (`chrome://policy`), or
+  the "JavaScript optimisation and security" site setting — because Chrome
+  has no wasm interpreter. The client build stage now splices a small
+  placeholder (`ttyd-client/wasm-shim.html`, via `inject-wasm-shim.js`) in
+  front of the bundle when `WebAssembly` is undefined: every real wasm use in
+  the bundle is lazy and only reachable through the sixel image decoder,
+  which ttyd loads only with `enableSixel` (never set here), so the terminal
+  is unaffected and the placeholder throws a clear error should sixel ever
+  be enabled. Verified in Chromium with `WebAssembly` deleted before load:
+  unpatched page throws and renders nothing, patched page connects and
+  renders the shell. The splice fails the build if the bundle's script tag
+  is missing or no longer unique, so a future ttyd client cannot silently
+  ship unshimmed.
+
 ## [1.2.65-con.17] - 2026-08-24
 
 ### Fixed

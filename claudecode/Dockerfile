@@ -11,7 +11,8 @@ ARG BUILD_FROM
 # working across npm signing-key rotations (which have broken pinned
 # corepacks before); transport is TLS and dependency integrity comes from
 # the yarn.lock checksums. Drop this stage and the --index flag once a ttyd
-# release newer than 1.7.7 ships and the download below is bumped.
+# release newer than 1.7.7 ships and the download below is bumped - but keep
+# the shim injection below (or re-verify it is no longer needed).
 FROM ${BUILD_FROM} AS ttyd-client
 RUN apk add --no-cache curl nodejs npm
 ARG TTYD_CLIENT_COMMIT=2922cb89f518bae4d0fcf4d757a7419638fc71fc
@@ -24,6 +25,15 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     COREPACK_INTEGRITY_KEYS=0
 RUN npm install -g corepack@0.35.0 && corepack enable && \
     yarn install --immutable && yarn run inline
+# The client bundle captures the WebAssembly global at module-init time (via
+# xterm-addon-image / inwasm). Chrome removes that global entirely when the
+# V8 JIT is blocked (enterprise policy DefaultJavaScriptJitSetting=2, or the
+# "JavaScript optimisation" site setting), so on such browsers the script
+# throws before rendering anything and the ingress panel is a blank white
+# iframe. Splice in a placeholder so init survives; the terminal itself never
+# touches wasm (only sixel images do, and enableSixel is never set here).
+COPY ttyd-client/ /ttyd-client/
+RUN node /ttyd-client/inject-wasm-shim.js /ttyd/html/dist/inline.html /ttyd-client/wasm-shim.html
 
 FROM ${BUILD_FROM}
 
