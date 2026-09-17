@@ -66,6 +66,18 @@ configuration:
     name: Enable the job trigger endpoint
     description: >-
       Let Home Assistant trigger Claude Jobs: starts an HTTP endpoint on port 7682 (add-on network only, bearer token in /data/claude-jobs/token; see `claude-job token show`) and writes the claudecode_jobs.yaml package into your config directory at every start. Off = jobs can still be run from the terminal.
+  enable_usage_sensors:
+    name: Claude subscription usage sensors
+    description: >-
+      With the job endpoint on, poll your claude.ai plan limits (5-hour session, weekly, weekly per-model, extra usage, weekly breakdown by surface) every usage_poll_interval seconds and expose them as sensor.claude_usage_* in the generated package. Whole-account figures; the login token is only read, never refreshed, so on an idle install the values can go stale (binary_sensor.claude_usage_stale).
+  usage_poll_interval:
+    name: Usage poll interval (seconds)
+    description: >-
+      How often the add-on asks api.anthropic.com for the usage figures and how often Home Assistant polls the add-on for them. 60-3600; default 300.
+  usage_keepalive_job:
+    name: Usage keepalive job (optional)
+    description: >-
+      Name of a job (e.g. usage-keepalive, shipped) the endpoint runs at most once an hour while the claude.ai access token has expired, so the CLI itself renews it and the usage sensors stay fresh. Costs one small model call per run. Empty = off.
   debug_logging:
     name: Debug startup logging
     description: >-

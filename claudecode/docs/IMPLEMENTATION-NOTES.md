@@ -21,8 +21,9 @@ is not built.
 | notifier | `/usr/local/bin/claude-job-notify` | Python 3 |
 | trigger endpoint + the tick | `/usr/local/bin/claude-job-endpoint` | Python 3 (stdlib only) |
 | HA package/blueprint renderer | `/usr/local/lib/claude-job/render_package.py` | Python 3 |
+| subscription usage poller (`GET /usage`, tick duty 6) | `/usr/local/lib/claude-job/usage.py` | Python 3 (stdlib only) |
 | image policy | `/usr/share/claudecode/{job-policy.json, job-contract.md, job-frontmatter.schema.json, job-ha-allowlist}` | data |
-| shipped examples | `/usr/share/claudecode/jobs/{health-check,energy-report}.md` (seeded into the jobs dir once) | data |
+| shipped examples | `/usr/share/claudecode/jobs/{health-check,energy-report,usage-keepalive}.md` (seeded into the jobs dir once) | data |
 | package/blueprint templates | `/usr/share/claudecode/templates/` | data |
 | boot/stop integration | `claudecode-start` (`setup_job_dirs`, `cli_preflight_log`, `allow_job_commands`, `ensure_job_token`, `render_job_package`, `start_job_endpoint`, `stop_job_spawners`/`signal_job_runs`/`reap_job_runs`, `on_stop`) | bash |
 | tests (dev box, no HA, no tokens) | `claudecode/tests/` — `python3 -m unittest discover -s claudecode/tests -p 'test_*.py'` | Python 3 |

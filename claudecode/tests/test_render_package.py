@@ -30,6 +30,12 @@ ANCHOR_ATTRIBUTES = ["worst_status", "stale_jobs", "failed_jobs", "disabled_jobs
                      "endpoint_version"]
 PLACEHOLDER_RE = re.compile(r"__[A-Z_]+__")
 HAS_GIT = shutil.which("git") is not None
+# The GET /usage snapshot keys the usage sensors read (usage.py `snapshot()`); same contract discipline.
+USAGE_SENSORS = ["Claude Usage Last Success", "Claude Usage Session", "Claude Usage Session Reset", "Claude Usage Weekly",
+                 "Claude Usage Weekly Reset", "Claude Usage Weekly Model", "Claude Usage Weekly Model Reset",
+                 "Claude Usage Extra Used", "Claude Usage Extra Spend"]
+USAGE_SURFACE_SENSORS = ["Claude Usage Weekly Claude Code", "Claude Usage Weekly Chats", "Claude Usage Weekly Cowork",
+                         "Claude Usage Weekly Other"]
 
 
 class HaLoader(yaml.SafeLoader):
@@ -105,10 +111,11 @@ class RenderPackageTest(unittest.TestCase):
         self.assertIn("claudecode_jobs: !include claudecode_jobs.yaml", text)
         self.assertIsNone(PLACEHOLDER_RE.search(text), "unreplaced placeholder")
 
-        # token: exactly the 3 rest_command headers + 1 rest header, nowhere else
+        # token: exactly the 3 rest_command headers + 2 rest headers (jobs + usage), nowhere else
         token_lines = [l for l in text.splitlines() if TOKEN in l]
-        self.assertEqual(text.count(TOKEN), 4)
-        self.assertEqual(len(token_lines), 4)
+        self.assertEqual(text.count(TOKEN), 5)
+        self.assertEqual(len(token_lines), 5)
+        self.assertNotIn("__USAGE_", text)                          # region markers never reach the file
         for line in token_lines:
             self.assertEqual(line.strip(), f'Authorization: "Bearer {TOKEN}"')
 
@@ -136,6 +143,48 @@ class RenderPackageTest(unittest.TestCase):
         self.assertIn("availability", anchor)
         self.assertIn("int(0)", anchor["value_template"])
         self.assertEqual(anchor["json_attributes"], ANCHOR_ATTRIBUTES)
+
+        # the usage block (add-on option enable_usage_sensors, default on): its own rest resource at the
+        # usage poll cadence, registry sensors with availability guards, timestamps as device_class
+        usage_rest = doc["rest"][1]
+        self.assertEqual(usage_rest["resource"], base + "/usage")
+        self.assertEqual((usage_rest["method"], usage_rest["scan_interval"], usage_rest["timeout"]), ("GET", 300, 10))
+        self.assertEqual(usage_rest["headers"]["Authorization"], f"Bearer {TOKEN}")
+        self.assertEqual([s["name"] for s in usage_rest["sensor"]], USAGE_SENSORS)
+        stale = usage_rest["binary_sensor"][0]
+        self.assertEqual((stale["name"], stale["unique_id"], stale["device_class"]),
+                         ("Claude Usage Stale", "claudecode_usage_stale", "problem"))
+        self.assertIn("availability", stale)
+        by_name = {s["name"]: s for s in usage_rest["sensor"]}
+        for s in usage_rest["sensor"]:
+            self.assertTrue(s["unique_id"].startswith("claudecode_usage_"), s["name"])
+            self.assertIn("availability", s, s["name"])
+            self.assertIn("value_json", s["availability"], s["name"])
+            self.assertNotIn("int(0)", s["value_template"], "never coerce a missing value to zero")
+            self.assertNotIn("float(0)", s["value_template"], "never coerce a missing value to zero")
+        for name in ("Claude Usage Session", "Claude Usage Weekly", "Claude Usage Weekly Model", "Claude Usage Extra Used"):
+            self.assertEqual((by_name[name]["unit_of_measurement"], by_name[name]["state_class"]), ("%", "measurement"), name)
+        for name in ("Claude Usage Session Reset", "Claude Usage Weekly Reset", "Claude Usage Weekly Model Reset",
+                     "Claude Usage Last Success"):
+            self.assertEqual(by_name[name]["device_class"], "timestamp", name)
+            self.assertNotIn("state_class", by_name[name], name)
+        self.assertEqual(by_name["Claude Usage Session"]["json_attributes_path"], "$.session")
+        self.assertEqual(by_name["Claude Usage Session"]["json_attributes"], ["resets_at", "severity", "is_active"])
+        self.assertEqual(by_name["Claude Usage Weekly"]["json_attributes_path"], "$.weekly")
+        self.assertIn("breakdown", by_name["Claude Usage Weekly"]["json_attributes"])
+        self.assertIn("breakdown_rows", by_name["Claude Usage Weekly"]["json_attributes"])
+        self.assertEqual(by_name["Claude Usage Weekly Model"]["json_attributes"], ["model", "resets_at", "severity", "is_active"])
+        self.assertEqual(by_name["Claude Usage Last Success"]["json_attributes"],
+                         ["stale", "last_error", "last_error_detail", "last_attempt", "age_s", "poll_interval_s",
+                          "credential_expires_at", "subscription_type", "rate_limit_tier"])
+        spend = by_name["Claude Usage Extra Spend"]
+        self.assertEqual((spend["device_class"], spend["state_class"], spend["unit_of_measurement"]), ("monetary", "total", "USD"))
+        surfaces = doc["template"][1]["sensor"]
+        self.assertEqual([s["name"] for s in surfaces], USAGE_SURFACE_SENSORS)
+        for s in surfaces:
+            self.assertIn("sensor.claude_usage_weekly", s["availability"])
+            self.assertEqual((s["unit_of_measurement"], s["state_class"]), ("%", "measurement"))
+        self.assertIn(".get('claude_code') is number", surfaces[0]["availability"])
 
         cost = doc["template"][0]["sensor"][0]
         self.assertEqual(cost["name"], "Claude Jobs Monthly Cost")      # -> sensor.claude_jobs_monthly_cost
@@ -184,6 +233,39 @@ class RenderPackageTest(unittest.TestCase):
         self.assertEqual(doc["rest"][0]["scan_interval"], 120)
         self.assertEqual(doc["rest_command"]["claude_job_republish"]["url"], f"http://{FAKE_HOST}:8123/republish")
 
+    def test_usage_block_can_be_left_out(self):
+        # by flag ...
+        self.render("--no-usage")
+        text = self.pkg.read_text()
+        self.assertEqual(text.count(TOKEN), 4)
+        code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        self.assertNotIn("/usage", code)
+        self.assertNotIn("claude_usage", code)
+        self.assertNotIn("__USAGE_", text)
+        doc = ha_yaml_load(text)
+        self.assertEqual(sorted(doc), ["automation", "rest", "rest_command", "template"])
+        self.assertEqual(len(doc["rest"]), 1)
+        self.assertEqual(len(doc["template"]), 1)
+        self.assertEqual(doc["template"][0]["sensor"][0]["name"], "Claude Jobs Monthly Cost")
+        self.assertIn("usage sensors off", "\n".join(self.render("--no-usage")[0].splitlines()))
+        # ... and by add-on option (the flag's default), with --usage overriding it back on
+        self.s.options_file.write_text('{"job_default_model": "opus", "enable_job_endpoint": true, '
+                                       '"enable_usage_sensors": false, "usage_poll_interval": 600}')
+        self.render()
+        self.assertEqual(self.pkg.read_text().count(TOKEN), 4)
+        self.render("--usage")
+        doc = ha_yaml_load(self.pkg.read_text())
+        self.assertEqual(doc["rest"][1]["scan_interval"], 600, "option usage_poll_interval drives the HA poll cadence")
+        self.render("--usage", "--usage-scan-interval", "120")
+        self.assertEqual(ha_yaml_load(self.pkg.read_text())["rest"][1]["scan_interval"], 120)
+        _, err = self.render("--usage-scan-interval", "0", expect_rc=2)
+        self.assertIn("usage-scan-interval", err)
+        # turning the block off/on is a material change -> reloads
+        self.sup.clear()
+        self.render("--usage")
+        self.render("--usage")
+        self.assertEqual(len(self.reload_posts()), 2)
+
     def test_out_and_blueprint_out_flags(self):
         out = self.s.root / "elsewhere" / "pkg.yaml"
         bp = self.s.root / "elsewhere" / "bp" / "schedule.yaml"
@@ -231,7 +313,7 @@ class RenderPackageTest(unittest.TestCase):
         alt = self.s.root / "alt-token"
         alt.write_text(TOKEN2 + "\n")
         self.render("--token-file", str(alt), token=None)
-        self.assertEqual(self.pkg.read_text().count(TOKEN2), 4)
+        self.assertEqual(self.pkg.read_text().count(TOKEN2), 5)
 
     def test_invalid_hostname_exits_2_and_writes_nothing(self):
         for bad in ("Bad_Host", "-leading-dash", "dots.not.allowed", "UPPER", "a" * 64, "spa ce"):
@@ -265,7 +347,7 @@ class RenderPackageTest(unittest.TestCase):
         # token rotation is a material change -> reload again
         self.render(token=TOKEN2)
         third = self.pkg.read_text()
-        self.assertEqual(third.count(TOKEN2), 4)
+        self.assertEqual(third.count(TOKEN2), 5)
         self.assertNotIn(TOKEN, third)
         self.assertEqual(self.reload_posts(), ["/core/api/services/rest_command/reload",
                                                "/core/api/services/rest/reload"])
@@ -338,16 +420,28 @@ class RenderPackageTest(unittest.TestCase):
         text = TEMPLATE.read_text()
         self.assertEqual(sorted(set(PLACEHOLDER_RE.findall(text))),
                          sorted(["__ADDON_VERSION__", "__CLAUDECODE_HOST__", "__CLAUDECODE_PORT__",
-                                 "__CLAUDECODE_TOKEN__", "__GENERATED_AT__", "__SCAN_INTERVAL__"]))
-        self.assertEqual(text.count("__CLAUDECODE_TOKEN__"), 4)
+                                 "__CLAUDECODE_TOKEN__", "__GENERATED_AT__", "__SCAN_INTERVAL__",
+                                 "__USAGE_SCAN_INTERVAL__", "__USAGE_BEGIN__", "__USAGE_END__"]))
+        self.assertEqual(text.count("__CLAUDECODE_TOKEN__"), 5)
+        # region markers: balanced, on comment lines only, and the two regions hold the usage block
+        marks = [l.strip() for l in text.splitlines() if "__USAGE_BEGIN__" in l or "__USAGE_END__" in l]
+        self.assertEqual(len(marks), 4)
+        self.assertTrue(all(m.startswith("#") for m in marks), marks)
+        self.assertEqual(["__USAGE_BEGIN__" in m for m in marks], [True, False, True, False])
         self.assertEqual(sum("GENERATED" in l for l in text.splitlines()), 1,
                          "exactly one line may carry the GENERATED marker (material-change comparison keys on it)")
-        rendered = text
-        for ph, val in (("__CLAUDECODE_HOST__", "h"), ("__CLAUDECODE_PORT__", "1"), ("__CLAUDECODE_TOKEN__", TOKEN),
-                        ("__SCAN_INTERVAL__", "60"), ("__ADDON_VERSION__", "v"), ("__GENERATED_AT__", "t")):
-            rendered = rendered.replace(ph, val)
-        doc = ha_yaml_load(rendered)
-        self.assertEqual(doc["rest"][0]["sensor"][0]["json_attributes"], ANCHOR_ATTRIBUTES)
+        import render_package as rp
+        for on in (True, False):
+            rendered = rp.render(text, host="h", port=1, token=TOKEN, scan_interval=60, version="v", generated_at="t",
+                                 usage_enabled=on, usage_scan_interval=300)
+            self.assertIsNone(PLACEHOLDER_RE.search(rendered), on)
+            doc = ha_yaml_load(rendered)
+            self.assertEqual(doc["rest"][0]["sensor"][0]["json_attributes"], ANCHOR_ATTRIBUTES)
+            self.assertEqual(len(doc["rest"]), 2 if on else 1)
+        with self.assertRaises(ValueError):
+            rp.select_regions("# __USAGE_BEGIN__\nx\n", usage_enabled=True)
+        with self.assertRaises(ValueError):
+            rp.select_regions("a\n# __USAGE_END__\n", usage_enabled=False)
 
     def test_module_is_importable_and_exposes_main(self):
         import importlib

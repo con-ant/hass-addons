@@ -1,6 +1,6 @@
 name: Claude Code
 description: Run Claude Code AI assistant inside Home Assistant to create automations, debug issues, and manage your smart home configuration
-version: "1.2.65-con.18"
+version: "1.2.65-con.19"
 slug: claudecode
 url: https://github.com/con-ant/hass-addons
 arch:
@@ -49,6 +49,9 @@ options:
   extra_npm_packages: []
   job_default_model: opus
   enable_job_endpoint: false
+  enable_usage_sensors: true
+  usage_poll_interval: 300
+  usage_keepalive_job: ""
   debug_logging: false
 schema:
   enable_mcp: bool
@@ -67,6 +70,9 @@ schema:
     - str?
   job_default_model: list(fable|opus|sonnet|haiku)
   enable_job_endpoint: bool
+  enable_usage_sensors: bool
+  usage_poll_interval: int(60,3600)
+  usage_keepalive_job: str?
   debug_logging: bool
 environment:
   TERM: xterm-256color

@@ -75,6 +75,7 @@ JOB_CONFIG_DIR = CREDENTIALS_FILE = ""
 SUPERVISOR_URL = CLAUDE_BIN = TIMEOUT_BIN = RUNNER_BIN = NOTIFY_BIN = BROKER_SCRIPT = ""
 BUILT_CLI_VERSION_FILE = ADDON_VERSION_FILE = ""
 STOPPING_FILE = COST_FILE = COST_LOCK = GLOBAL_LOCK = PREFLIGHT_CACHE = ""
+USAGE_URL = ""
 
 
 def _configure() -> None:
@@ -123,6 +124,9 @@ def _configure() -> None:
     g["COST_FILE"] = g["STATE_DIR"] + "/_cost.json"
     g["COST_LOCK"] = g["STATE_DIR"] + "/_cost.lock"
     g["GLOBAL_LOCK"] = g["STATE_DIR"] + "/_global.lock"
+    # Subscription usage (usage.py): the undocumented endpoint the CLI's own /usage screen reads.
+    # Env-overridable so tests can point it at a local fake; production never sets it.
+    g["USAGE_URL"] = _env("USAGE_URL", "https://api.anthropic.com/api/oauth/usage")
     _configure_constants()
     g["_addon_version_cache"] = None
 
@@ -168,6 +172,8 @@ AUTH_RETRY_JITTER_S = 5
 DETAIL_ATTR_CAP = 900               # §4.10 entity `detail` attribute cap
 PREFLIGHT_CACHE_TTL_S = 3600        # 2f cli_preflight.json validity
 NOTIFIER_TIMEOUT_S = 45             # runner waits this long for claude-job-notify
+USAGE_POLL_INTERVAL_S = 300         # usage.py: default poll cadence (add-on option usage_poll_interval overrides)
+USAGE_TIMEOUT_S = 10                # usage.py: one HTTP round trip, never longer
 
 _TUNABLES = (
     "JOB_MAX_CONCURRENT", "JOB_GLOBAL_WAIT_S", "JOB_MAX_TIMEOUT", "JOB_MIN_TIMEOUT", "JOB_DEFAULT_TIMEOUT",
@@ -178,7 +184,7 @@ _TUNABLES = (
     "JOB_TERM_TRAP_BUDGET_S", "JOB_TERM_CHILD_WAIT_S", "JOB_TERM_PUBLISH_TIMEOUT_S", "JOB_KILL_GRACE_S",
     "TICK_INTERVAL_S", "STUCK_MARGIN_S", "WATCHDOG_KILL_S", "CANARY_INTERVAL_S", "PRUNE_INTERVAL_S",
     "PRUNE_FIRST_DELAY_S", "TMP_MAX_AGE_S", "AUTH_RETRY_BASE_S", "AUTH_RETRY_JITTER_S", "DETAIL_ATTR_CAP",
-    "PREFLIGHT_CACHE_TTL_S", "NOTIFIER_TIMEOUT_S",
+    "PREFLIGHT_CACHE_TTL_S", "NOTIFIER_TIMEOUT_S", "USAGE_POLL_INTERVAL_S", "USAGE_TIMEOUT_S",
 )
 _TUNABLE_DEFAULTS = {name: globals()[name] for name in _TUNABLES}
 
@@ -524,6 +530,27 @@ def ensure_job_config() -> None:
         os.symlink(CREDENTIALS_FILE, link)
     except OSError as e:
         log("claude-job", f"could not link job credentials: {e}")
+
+
+def oauth_credentials() -> dict | None:
+    """READ-ONLY view of the `claudeAiOauth` block from the newest credential lineage: the
+    shared store (CREDENTIALS_FILE) or a regular file a mid-run refresh left behind in
+    JOB_CONFIG_DIR, picked by the same newest-wins key reconcile_job_credentials() uses.
+    Never writes, never refreshes, never touches the symlink (a second refresher would race the
+    CLI and rotate the refresh token from under it). None when nothing readable carries the block."""
+    candidates = [CREDENTIALS_FILE]
+    leftover = JOB_CONFIG_DIR + "/.credentials.json"
+    if os.path.isfile(leftover) and not os.path.islink(leftover):
+        candidates.append(leftover)
+    best, best_key = None, None
+    for path in candidates:
+        obj = read_json(path, None)
+        if not isinstance(obj, dict) or not isinstance(obj.get("claudeAiOauth"), dict):
+            continue
+        key = _credentials_recency(path)
+        if best is None or key > best_key:
+            best, best_key = dict(obj["claudeAiOauth"]), key
+    return best
 
 
 def purge_tool_results(directory: str | None = None) -> int:

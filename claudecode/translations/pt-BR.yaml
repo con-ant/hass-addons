@@ -70,6 +70,18 @@ configuration:
     name: Ativar o endpoint de jobs
     description: >-
       Permite que o Home Assistant dispare os Claude Jobs: inicia um endpoint HTTP na porta 7682 (apenas rede interna de add-ons, token em /data/claude-jobs/token; veja `claude-job token show`) e grava o pacote claudecode_jobs.yaml no seu diretório de configuração a cada inicialização. Desativado = os jobs só rodam pelo terminal.
+  enable_usage_sensors:
+    name: Sensores de uso da assinatura Claude
+    description: >-
+      Com o endpoint de jobs ativo, consulta os limites do seu plano claude.ai (sessão de 5 horas, semanal, semanal por modelo, uso extra, detalhamento semanal por superfície) a cada usage_poll_interval segundos e os expõe como sensor.claude_usage_* no pacote gerado. Números da conta inteira; o token de login é apenas lido, nunca renovado, então em uma instalação ociosa os valores podem ficar desatualizados (binary_sensor.claude_usage_stale).
+  usage_poll_interval:
+    name: Intervalo de consulta de uso (segundos)
+    description: >-
+      Com que frequência o add-on pede os números de uso à api.anthropic.com e o Home Assistant os consulta no add-on. 60-3600; padrão 300.
+  usage_keepalive_job:
+    name: Job de manutenção do token (opcional)
+    description: >-
+      Nome de um job (ex. usage-keepalive, incluído) que o endpoint executa no máximo uma vez por hora enquanto o token de acesso do claude.ai estiver expirado, para que a própria CLI o renove e os sensores de uso continuem atualizados. Custa uma pequena chamada ao modelo por execução. Vazio = desativado.
   debug_logging:
     name: Log de depuração da inicialização
     description: >-

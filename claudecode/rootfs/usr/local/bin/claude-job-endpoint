@@ -13,6 +13,8 @@ Routes (JSON `application/json; charset=utf-8` unless noted; all but /health nee
                              claude_version, cli_preflight, stopping}      (unauthenticated)
   GET  /jobs                 200 summary object the anchor REST sensor consumes (2k + A23)
   GET  /jobs/<tok>/detail    200 text/markdown = last result's `detail`; 204 if none
+  GET  /usage                200 the Claude subscription usage snapshot (usage.py) for the package's
+                             usage sensors; 404 {error: usage_disabled} when enable_usage_sensors is off
   POST /jobs/<tok>/run       202 {accepted, job, run_id}; benign declines are 200
                              {accepted:false, reason: disabled|rate_limited}; 401/404/413/411/400/408/
                              503 stopping/503 cli_preflight_failed/422 not_triggerable|invalid_input
@@ -44,18 +46,21 @@ its own try/except so one failure never stops the others):
   3. canary every >= 600 s: GET sensor.claude_jobs_cost_raw from Core; 404 => force + duty 2
      (also run lazily from GET /jobs);
   4. daily backstop prune of logs/*.jsonl (> 2 MiB -> last 200 lines) and the transcript dir;
-  5. every pass: unlink *.tmp.* under state/ and logs/ and inbox/*.json older than 1 h.
+  5. every pass: unlink *.tmp.* under state/ and logs/ and inbox/*.json older than 1 h;
+  6. subscription usage (usage.py): start one background poll of api.anthropic.com when due
+     (every usage_poll_interval s, single flight, never on the tick thread itself), and -- only
+     with usage_keepalive_job set -- spawn that job at most hourly while the token has expired.
 
 CLI: claude-job-endpoint [--bind ADDR] [--port N] [--no-tick] [--tick-once]
 Env test seams: CLAUDE_JOB_ENDPOINT_BIND/_PORT, CLAUDE_JOB_TICK_INTERVAL_S, _STUCK_MARGIN_S,
 _WATCHDOG_KILL_S, _CANARY_INTERVAL_S, _PRUNE_INTERVAL_S, _PRUNE_FIRST_DELAY_S, _TMP_MAX_AGE_S,
-plus every jobcommon path override. SIGTERM/SIGINT -> stop serving, exit 0; runner processes
+_USAGE_URL, _USAGE_POLL_INTERVAL_S, _USAGE_TIMEOUT_S, plus every jobcommon path override. SIGTERM/SIGINT -> stop serving, exit 0; runner processes
 are never touched on shutdown.
 """
 import os, sys, pathlib  # noqa: E401 -- shared bootstrap (breakdown §0)
 _LIB = os.environ.get("CLAUDE_JOB_LIB_DIR") or str(pathlib.Path(__file__).resolve().parent.parent / "lib" / "claude-job")
 sys.path.insert(0, _LIB)
-import jobcommon as jc, jobdef  # noqa: E401,E402
+import jobcommon as jc, jobdef, usage  # noqa: E401,E402
 
 import argparse  # noqa: E402
 import hmac  # noqa: E402
@@ -75,6 +80,7 @@ FAILED_STATUSES = ("error", "invalid_state")     # invalid_state = unreadable/co
 STATE_WRITE_LOCK = threading.Lock()              # serializes this process's state-file writes: jc.atomic_write_json's
                                                  # tmp name is per-pid, so two threads must not write one path at once
 COST_SEED_RETRY_S = 60.0
+KEEPALIVE_MIN_INTERVAL_S = 3600.0        # usage keepalive job: at most one spawn per hour
 LOST_DETAIL = ("The runner process disappeared before it reported a result (container killed, "
                "out of memory, or a crash). The next run of this job replaces this state.")
 
@@ -153,6 +159,9 @@ class Endpoint:
         self.children = []                          # Popen objects, kept only so we can reap them
         self.watchdog_seen = set()                   # run_ids already reported by the watchdog (M5)
         self.last_cost_seed_try = None
+        self.usage = usage.UsagePoller()             # subscription usage (tick duty 6, GET /usage)
+        self.keepalive_job = self.keepalive_job_option()
+        self.last_keepalive_mono = None
 
     # -- flags --
     def preflight_ok(self) -> bool:
@@ -228,6 +237,58 @@ class Endpoint:
                 log(f"seeded {jc.COST_FILE} (time zone {tz})")
         finally:
             jc.unlock(fd)
+
+    # -- usage keepalive (opt-in): the CLI's own refresh path is a model call, so run a job --
+    @staticmethod
+    def keepalive_job_option():
+        """`usage_keepalive_job` (a job name/slug), or None when unset/invalid."""
+        v = jc.addon_option("usage_keepalive_job")
+        if not isinstance(v, str) or not v.strip():
+            return None
+        tok = v.strip()
+        if len(tok) > jobdef.NAME_MAX or not jobdef.SLUG_TOKEN_RE.fullmatch(tok):
+            log(f"usage_keepalive_job {v!r} is not a valid job name; keepalive off")
+            return None
+        return jobdef.name_from_token(tok)
+
+    def usage_keepalive(self) -> str | None:
+        """Tick duty 6b. Spawn `usage_keepalive_job` (through the ordinary run path: the runner's
+        lock, entity and notifications all apply) when the usage poll is `unauthorized` AND the
+        credential store's own `expiresAt` is in the past -- a rejected-but-unexpired token means
+        a revoked login, which a run cannot fix. At most once per KEEPALIVE_MIN_INTERVAL_S; never
+        while stopping or with the CLI preflight failed. Returns the run_id when spawned."""
+        name = self.keepalive_job
+        if not name or not self.usage.enabled:
+            return None
+        snap = self.usage.snapshot()
+        if snap.get("last_error") != "unauthorized":
+            return None
+        exp = jc.parse_iso(snap.get("credential_expires_at"))
+        if exp is None or exp > jc.now_utc():
+            return None
+        now = time.monotonic()
+        with self.flag_lock:
+            if self.last_keepalive_mono is not None and now - self.last_keepalive_mono < KEEPALIVE_MIN_INTERVAL_S:
+                return None
+            self.last_keepalive_mono = now
+        if self.stopping() or not self.preflight_ok():
+            return None
+        if not os.path.isfile(jobdef.job_path(name)):
+            log(f"usage keepalive: job '{name}' does not exist (copy it from /usr/share/claudecode/jobs/)")
+            return None
+        job, _errors = load_job(name)
+        if jc.is_flag_disabled(name) or (job is not None and not job.enabled) or \
+                (job is not None and job.kind == "action"):
+            log(f"usage keepalive: job '{name}' is disabled or not a runnable job; not spawning")
+            return None
+        try:
+            run_id = self.spawn_run(name, None)
+        except OSError as exc:
+            log(f"usage keepalive: cannot start {name}: {exc}")
+            return None
+        log(f"usage keepalive: access token expired at {snap.get('credential_expires_at')}; "
+            f"spawned job '{name}' ({run_id}) so the CLI renews it")
+        return run_id
 
     # -- rate limit (cost protection, §4.9): reserve the slot before spawning --
     def rate_check_and_reserve(self, name: str, min_interval: float):
@@ -479,6 +540,7 @@ ROUTES = (
     ("GET", re.compile(r"^/health$"), "health", False),
     ("GET", re.compile(r"^/jobs$"), "jobs_summary", True),
     ("GET", re.compile(r"^/jobs/([^/]+)/detail$"), "job_detail", True),
+    ("GET", re.compile(r"^/usage$"), "usage_snapshot", True),
     ("POST", re.compile(r"^/jobs/([^/]+)/run$"), "job_run", True),
     ("POST", re.compile(r"^/jobs/([^/]+)/enable$"), "job_enable", True),
     ("POST", re.compile(r"^/jobs/([^/]+)/disable$"), "job_disable", True),
@@ -645,6 +707,7 @@ class Handler(BaseHTTPRequestHandler):
             "claude_version": ep.preflight.get("claude_version"),
             "cli_preflight": ep.preflight_ok(),
             "stopping": stopping,
+            "usage_sensors": ep.usage.enabled,
         })
 
     def jobs_summary(self):
@@ -662,6 +725,16 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(result, dict) or result.get("detail") is None:
             return self.send_bytes(204, b"", "text/markdown; charset=utf-8")
         self.send_bytes(200, str(result.get("detail")).encode("utf-8"), "text/markdown; charset=utf-8")
+
+    def usage_snapshot(self):
+        ep = self.ep
+        if not ep.usage.enabled:
+            return self.send_json(404, {"error": "usage_disabled"})
+        try:
+            ep.usage.maybe_poll()                    # lazily, like the canary: a due poll starts in the background
+        except Exception as exc:  # noqa: BLE001
+            log(f"usage poll could not start: {exc!r}")
+        self.send_json(200, ep.usage.snapshot())
 
     def job_run(self, tok):
         """2k order: (401 done) -> 404 -> 413/400 -> stopping -> disabled -> preflight ->
@@ -772,12 +845,13 @@ class Tick(threading.Thread):
             next_regular = time.monotonic() + jc.TICK_INTERVAL_S
             self.run_once()
 
-    def run_once(self):
+    def run_once(self, wait_usage: bool = False):
         self.safely("duty1 demote_stuck", self.duty1_demote_stuck)
         self.safely("duty2 publish_pending", self.duty2_publish_pending)
         self.safely("duty3 canary", self.duty3_canary)
         self.safely("duty4 daily_prune", self.duty4_daily_prune)
         self.safely("duty5 tmp_cleanup", self.duty5_tmp_cleanup)
+        self.safely("duty6 usage", lambda: self.duty6_usage(wait=wait_usage))
         self.safely("reap", self.ep.reap_children)
 
     @staticmethod
@@ -954,6 +1028,15 @@ class Tick(threading.Thread):
             finally:
                 jc.unlock(fd)
 
+    def duty6_usage(self, wait: bool = False):
+        """Start a background usage poll when due (never blocks: the request runs on its own
+        thread), then the opt-in keepalive. `wait` (--tick-once only) joins the poll so a
+        synchronous pass ends with the snapshot updated."""
+        t = self.ep.usage.maybe_poll()
+        if wait and t is not None:
+            t.join(jc.USAGE_TIMEOUT_S + 5)
+        self.ep.usage_keepalive()
+
     def duty5_tmp_cleanup(self):
         cutoff = time.time() - jc.TMP_MAX_AGE_S
         victims = []
@@ -1010,7 +1093,7 @@ def main(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001
         log(f"cost file seeding failed: {exc!r}")
     if args.tick_once:
-        Tick(ep).run_once()
+        Tick(ep).run_once(wait_usage=True)
         return 0
     try:
         server = Server((args.bind, args.port), ep)
@@ -1029,7 +1112,9 @@ def main(argv=None) -> int:
         tick = Tick(ep)
         tick.start()
     log(f"listening on {args.bind}:{server.server_address[1]} (addon {ep.addon_version}, "
-        f"claude {preflight.get('claude_version') or 'unknown'}, tick {'off' if args.no_tick else 'on'})")
+        f"claude {preflight.get('claude_version') or 'unknown'}, tick {'off' if args.no_tick else 'on'}, "
+        f"usage sensors {'every %ds' % ep.usage.interval_s if ep.usage.enabled else 'off'}"
+        f"{', keepalive job ' + ep.keepalive_job if ep.keepalive_job else ''})")
     try:
         server.serve_forever(poll_interval=0.25)
     finally:
