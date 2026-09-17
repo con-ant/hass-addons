@@ -234,11 +234,11 @@ turns them into registry entities:
 | Entity | What it is |
 |---|---|
 | `sensor.claude_usage_session` | 5-hour window used, % (attributes `resets_at`, `severity`, `is_active`) |
-| `sensor.claude_usage_weekly` | 7-day window used, % (all models); attribute `breakdown` = `{claude_code, chats, cowork, other}` %, plus `breakdown_rows` as the API reports them |
+| `sensor.claude_usage_weekly` | 7-day window used, % (all models); attribute `breakdown` = `{claude_code, chats, cowork, other}` — each surface's **share of this week's usage** (they sum to 100, not % of the cap), plus `breakdown_rows` as the API reports them |
 | `sensor.claude_usage_weekly_model` | the per-model 7-day cap (attribute `model`, currently "Fable"); it can run ahead of the all-model figure |
 | `sensor.claude_usage_session_reset` · `_weekly_reset` · `_weekly_model_reset` | when each window resets (`device_class: timestamp`) |
-| `sensor.claude_usage_weekly_claude_code` · `_chats` · `_cowork` · `_other` | the weekly breakdown by surface as plain % sensors (each `unavailable` while the API reports no row of that name) |
-| `sensor.claude_usage_extra_used` · `sensor.claude_usage_extra_spend` | extra (pay-as-you-go) usage: % of the monthly limit, and the amount spent as the API reports it (attributes `is_enabled`, `monthly_limit`, `currency`, `disabled_reason`) |
+| `sensor.claude_usage_weekly_claude_code` · `_chats` · `_cowork` · `_other` | the weekly breakdown by surface as plain sensors: each surface's share of this week's usage in % ("Claude Code 96 %" means 96 % of what was used this week, not 96 % of the limit); each `unavailable` while the API reports no row of that name |
+| `sensor.claude_usage_extra_used` · `sensor.claude_usage_extra_spend` | extra (pay-as-you-go) usage: % of the monthly limit, and the amount spent this month in major units (the API reports cents; 241 → 2.41). Attributes `is_enabled`, `monthly_limit`, `currency`, `disabled_reason` |
 | `sensor.claude_usage_last_success` | when the figures were last fetched; attributes `stale`, `last_error`, `last_error_detail`, `age_s`, `credential_expires_at`, `subscription_type` |
 | `binary_sensor.claude_usage_stale` | **on** when the numbers above are not fresh: the last poll failed and the last good values are being shown, or nothing has been fetched yet |
 

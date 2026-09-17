@@ -65,16 +65,17 @@ class TestParse(unittest.TestCase):
         w = d["weekly"]
         self.assertEqual((w["used_percent"], w["resets_at"], w["severity"], w["is_active"]),
                          (41.3, "2026-09-21T07:00:00+00:00", "info", True))
-        self.assertEqual(w["breakdown"], {"claude_code": 30.1, "chats": 6.0, "cowork": 4.2, "other": 1.0})
+        self.assertEqual(w["breakdown"], {"claude_code": 96.0, "chats": 4.0, "cowork": 0.0, "other": 0.0})
         self.assertEqual([r["display_name"] for r in w["breakdown_rows"]], ["Claude Code", "Chats", "Cowork", "Other"])
-        self.assertEqual(w["breakdown_rows"][0], {"key": "claude_code", "display_name": "Claude Code", "percent": 30.1})
+        self.assertEqual(w["breakdown_rows"][0], {"key": "claude_code", "display_name": "Claude Code", "percent": 96.0})
         self.assertEqual((w["breakdown_as_of"], w["breakdown_window_started_at"]),
                          ("2026-09-17T12:34:56+00:00", "2026-09-14T07:00:00+00:00"))
         self.assertEqual(d["weekly_scoped"], {"used_percent": 57.0, "resets_at": "2026-09-21T07:00:00+00:00",
                                               "severity": "warning", "is_active": True, "model": "Fable"})
         self.assertEqual(d["weekly_scoped_all"], [d["weekly_scoped"]])
-        self.assertEqual(d["extra_usage"], {"is_enabled": True, "monthly_limit": 50.0, "used_credits": 7.25,
-                                            "utilization": 14.5, "currency": "USD", "disabled_reason": None})
+        # amounts arrive in minor units (241 / 20000 with decimal_places 2 = $2.41 of $200.00)
+        self.assertEqual(d["extra_usage"], {"is_enabled": False, "monthly_limit": 200.0, "used_credits": 2.41,
+                                            "utilization": 1.2, "currency": "USD", "disabled_reason": None})
         # nothing but derived numbers/strings: no token-shaped or unknown keys leak through
         self.assertEqual(sorted(d), ["extra_usage", "session", "weekly", "weekly_scoped", "weekly_scoped_all"])
         self.assertNotIn("_fixture_note", json.dumps(d))
@@ -113,6 +114,29 @@ class TestParse(unittest.TestCase):
                     {"five_hour": {"utilization": "n/a"}, "limits": [{"kind": "weekly_scoped"}]},
                     {"limits": ["session"]}, {"unrelated": {"utilization": 5}}):
             self.assertIsNone(usage.parse_usage(bad), bad)
+
+    def test_extra_usage_minor_units(self):
+        # decimal_places alone
+        d = usage.parse_usage({"five_hour": {"utilization": 1}, "extra_usage": {
+            "is_enabled": True, "monthly_limit": 5000, "used_credits": 1234, "utilization": 24.68, "currency": "EUR",
+            "decimal_places": 2}})
+        self.assertEqual((d["extra_usage"]["used_credits"], d["extra_usage"]["monthly_limit"], d["extra_usage"]["currency"]),
+                         (12.34, 50.0, "EUR"))
+        # no decimal_places: cents assumed
+        d = usage.parse_usage({"five_hour": {"utilization": 1}, "extra_usage": {"monthly_limit": 20000, "used_credits": 241}})
+        self.assertEqual((d["extra_usage"]["used_credits"], d["extra_usage"]["monthly_limit"]), (2.41, 200.0))
+        # a spend block wins over extra_usage and carries its own exponent; its percent fills a missing utilization
+        d = usage.parse_usage({"five_hour": {"utilization": 1},
+                               "extra_usage": {"monthly_limit": 1, "used_credits": 1, "decimal_places": 0},
+                               "spend": {"used": {"amount_minor": 1500, "currency": "GBP", "exponent": 3},
+                                         "limit": {"amount_minor": 30000, "exponent": 3}, "percent": 5}})
+        self.assertEqual(d["extra_usage"], {"is_enabled": None, "monthly_limit": 30.0, "used_credits": 1.5,
+                                            "utilization": 5.0, "currency": "GBP", "disabled_reason": None})
+        # garbage exponents fall back to cents; garbage amounts are null
+        d = usage.parse_usage({"five_hour": {"utilization": 1},
+                               "extra_usage": {"monthly_limit": "x", "used_credits": 100, "decimal_places": 99},
+                               "spend": {"used": {"amount_minor": "n/a"}}})
+        self.assertEqual((d["extra_usage"]["used_credits"], d["extra_usage"]["monthly_limit"]), (1.0, None))
 
     def test_slug(self):
         self.assertEqual(usage.slug("Claude Code"), "claude_code")
@@ -182,9 +206,9 @@ class TestPoller(UsageCase):
         self.assertEqual(snap["age_s"], 0)
         self.assertEqual((snap["poll_interval_s"], snap["polls"], snap["last_http_status"]), (60, 1, 200))
         self.assertEqual(snap["session"]["used_percent"], 12.5)
-        self.assertEqual(snap["weekly"]["breakdown"]["claude_code"], 30.1)
+        self.assertEqual(snap["weekly"]["breakdown"]["claude_code"], 96.0)
         self.assertEqual(snap["weekly_scoped"]["model"], "Fable")
-        self.assertEqual(snap["extra_usage"]["used_credits"], 7.25)
+        self.assertEqual((snap["extra_usage"]["used_credits"], snap["extra_usage"]["monthly_limit"]), (2.41, 200.0))
         self.assertEqual(snap["credential_expires_at"], "2027-01-15T08:00:00Z")
         self.assertEqual((snap["subscription_type"], snap["rate_limit_tier"]), ("max", "default_claude_max_5x"))
         text = json.dumps(snap)

@@ -15,7 +15,7 @@
 #   rest:      sensor.claude_usage_* / binary_sensor.claude_usage_stale → Claude subscription usage (polls GET /usage;
 #              whole-account Max/Pro plan limits; omitted when the add-on option enable_usage_sensors is off)
 #   template:  sensor.claude_jobs_monthly_cost   → statistics-grade monthly spend
-#   template:  sensor.claude_usage_weekly_<surface> → the weekly breakdown by surface as plain % sensors
+#   template:  sensor.claude_usage_weekly_<surface> → each surface's share of this week's usage, as plain % sensors
 #   automation: republish on HA start · attention alarm · alarm clear
 #   a commented-out example schedule (use the "Claude Job · run on a schedule" blueprint instead)
 
@@ -135,7 +135,8 @@ rest:
         availability: "{{ value_json is defined and value_json is mapping and value_json.session is mapping and value_json.session.resets_at is string }}"
         value_template: "{{ value_json.session.resets_at }}"
       - name: "Claude Usage Weekly"               # → sensor.claude_usage_weekly; the 7-day window across all models, % used;
-        unique_id: "claudecode_usage_weekly"      #   attribute `breakdown` = {claude_code: %, chats: %, cowork: %, other: %}
+        unique_id: "claudecode_usage_weekly"      #   attribute `breakdown` = {claude_code, chats, cowork, other}: each surface's
+                                                  #   SHARE of this week's usage in % (sums to 100; not % of the cap)
         unit_of_measurement: "%"
         state_class: measurement
         icon: "mdi:calendar-week"
@@ -187,8 +188,8 @@ rest:
           - used_credits
           - currency
           - disabled_reason
-      - name: "Claude Usage Extra Spend"          # → sensor.claude_usage_extra_spend; extra usage spent this month, as the API
-        unique_id: "claudecode_usage_extra_spend" #   reports it (`used_credits`; the `currency` attribute on Extra Used says which)
+      - name: "Claude Usage Extra Spend"          # → sensor.claude_usage_extra_spend; extra usage spent this month in major units
+        unique_id: "claudecode_usage_extra_spend" #   (the add-on converts the API's minor units; `currency` sits on Extra Used)
         device_class: monetary
         state_class: total
         unit_of_measurement: "USD"
@@ -206,8 +207,9 @@ template:
         availability: "{{ state_attr('sensor.claude_jobs_attention', 'cost_month_usd') | is_number }}"
         state: "{{ state_attr('sensor.claude_jobs_attention', 'cost_month_usd') | float(0) | round(2) }}"
         last_reset: "{{ state_attr('sensor.claude_jobs_attention', 'cost_month_start') }}"
-  # __USAGE_BEGIN__ — the weekly breakdown by surface as plain % sensors (each is `unavailable` while the API
-  # reports no row of that name; the raw rows stay on sensor.claude_usage_weekly's `breakdown_rows` attribute)
+  # __USAGE_BEGIN__ — the weekly breakdown by surface as plain % sensors: each surface's SHARE of this week's usage
+  # (they sum to 100; "Claude Code 96 %" is 96 % of what was used, not of the limit). Each is `unavailable` while the
+  # API reports no row of that name; the raw rows stay on sensor.claude_usage_weekly's `breakdown_rows` attribute.
   - sensor:
       - name: "Claude Usage Weekly Claude Code"   # → sensor.claude_usage_weekly_claude_code
         unique_id: "claudecode_usage_weekly_claude_code"

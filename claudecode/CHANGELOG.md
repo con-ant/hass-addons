@@ -13,7 +13,10 @@ All notable changes to this project will be documented in this file.
   (7-day %, with the by-surface `breakdown` attribute),
   `sensor.claude_usage_weekly_model` (the per-model weekly cap), the three
   `*_reset` timestamps, `sensor.claude_usage_weekly_claude_code` / `_chats` /
-  `_cowork` / `_other`, `sensor.claude_usage_extra_used` / `_extra_spend`,
+  `_cowork` / `_other` (each surface's share of the week's usage),
+  `sensor.claude_usage_extra_used` / `_extra_spend` (the API reports extra
+  usage in minor units with `decimal_places` and a `spend` block; the sensor
+  shows major units),
   `sensor.claude_usage_last_success` (poll health in its attributes) and
   `binary_sensor.claude_usage_stale`. New route `GET /usage` on the endpoint;
   new options `enable_usage_sensors` (default on), `usage_poll_interval`

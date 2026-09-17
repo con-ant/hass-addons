@@ -153,16 +153,46 @@ def _breakdown(obj) -> dict:
     return out
 
 
-def _extra_usage(obj) -> dict:
+def _exponent(v, default=2) -> int:
+    """`decimal_places` / `exponent`: a small non-negative int, else the default (cents)."""
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 6:
+        return default
+    return v
+
+
+def _amount(minor, exponent) -> float | None:
+    """Minor units (cents) -> major units with 2 dp, or None."""
+    if isinstance(minor, bool) or not isinstance(minor, (int, float)) or not math.isfinite(minor):
+        return None
+    return round(float(minor) / (10 ** exponent), 2)
+
+
+def _extra_usage(obj, spend=None) -> dict:
+    """Extra (pay-as-you-go) usage. Amounts arrive in MINOR units: `extra_usage.used_credits` /
+    `monthly_limit` with `decimal_places` (live: 241 / 20000, decimal_places 2 = $2.41 of $200), and
+    the `spend` block repeats them as `{amount_minor, currency, exponent}`. `spend` wins when present;
+    either way the snapshot carries major units (2 dp) so `device_class: monetary` reads right."""
     src = obj if isinstance(obj, dict) else {}
-    return {
+    sp = spend if isinstance(spend, dict) else {}
+    used = sp.get("used") if isinstance(sp.get("used"), dict) else {}
+    limit = sp.get("limit") if isinstance(sp.get("limit"), dict) else {}
+    places = _exponent(src.get("decimal_places"))
+    out = {
         "is_enabled": _bool(src.get("is_enabled")),
-        "monthly_limit": _money(src.get("monthly_limit")),
-        "used_credits": _money(src.get("used_credits")),
+        "monthly_limit": _amount(src.get("monthly_limit"), places),
+        "used_credits": _amount(src.get("used_credits"), places),
         "utilization": _num(src.get("utilization")),
         "currency": _str(src.get("currency")),
         "disabled_reason": _str(src.get("disabled_reason")),
     }
+    if used.get("amount_minor") is not None:
+        out["used_credits"] = _amount(used.get("amount_minor"), _exponent(used.get("exponent"))) or out["used_credits"]
+        out["currency"] = _str(used.get("currency")) or out["currency"]
+    if limit.get("amount_minor") is not None:
+        out["monthly_limit"] = _amount(limit.get("amount_minor"), _exponent(limit.get("exponent"))) or out["monthly_limit"]
+    if out["utilization"] is None:
+        out["utilization"] = _num(sp.get("percent"))
+    return out
 
 
 def parse_usage(obj) -> dict | None:
@@ -199,7 +229,7 @@ def parse_usage(obj) -> dict | None:
         "weekly": weekly,
         "weekly_scoped": scoped,
         "weekly_scoped_all": scoped_all,
-        "extra_usage": _extra_usage(obj.get("extra_usage")),
+        "extra_usage": _extra_usage(obj.get("extra_usage"), obj.get("spend")),
     }
 
 
@@ -273,6 +303,11 @@ class UsagePoller:
             if self.last_attempt_mono is None:
                 return True
             return time.monotonic() - self.last_attempt_mono >= self.interval_s
+
+    def current_error(self):
+        """The last attempt's error kind (or None) without touching the credential files."""
+        with self.lock:
+            return self.last_error
 
     def maybe_poll(self):
         """Start a background poll if one is due and none is running. Returns the Thread or None."""

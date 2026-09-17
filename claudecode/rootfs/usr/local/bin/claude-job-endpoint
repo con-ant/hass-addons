@@ -258,8 +258,8 @@ class Endpoint:
         a revoked login, which a run cannot fix. At most once per KEEPALIVE_MIN_INTERVAL_S; never
         while stopping or with the CLI preflight failed. Returns the run_id when spawned."""
         name = self.keepalive_job
-        if not name or not self.usage.enabled:
-            return None
+        if not name or not self.usage.enabled or self.usage.current_error() != "unauthorized":
+            return None                              # cheap check first: snapshot() re-reads the credential files
         snap = self.usage.snapshot()
         if snap.get("last_error") != "unauthorized":
             return None

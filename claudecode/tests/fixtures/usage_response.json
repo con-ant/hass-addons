@@ -1,5 +1,5 @@
 {
-  "_fixture_note": "Shape of GET https://api.anthropic.com/api/oauth/usage as observed from inside the add-on on 2026-09-17 (Max plan); values are made up, unknown/experimental keys are kept so the parser is exercised against them.",
+  "_fixture_note": "Shape of GET https://api.anthropic.com/api/oauth/usage as observed from inside the add-on on 2026-09-17 (Max plan). extra_usage / spend are the live values (amounts in MINOR units: 241 = $2.41, 20000 = $200.00); the window percentages are made up; unknown/experimental keys are kept so the parser is exercised against them.",
   "five_hour": {
     "utilization": 12.5,
     "resets_at": "2026-09-17T15:00:00.000000+00:00",
@@ -15,33 +15,98 @@
   "seven_day_opus": null,
   "seven_day_sonnet": null,
   "limits": [
-    {"kind": "session", "percent": 12, "severity": "info", "resets_at": "2026-09-17T15:00:00+00:00", "scope": null, "is_active": true},
-    {"kind": "weekly_all", "percent": 41, "severity": "info", "resets_at": "2026-09-21T07:00:00+00:00", "scope": null, "is_active": true},
-    {"kind": "weekly_scoped", "percent": 57, "severity": "warning", "resets_at": "2026-09-21T07:00:00+00:00",
-     "scope": {"model": {"display_name": "Fable", "id": "claude-fable-5-1"}}, "is_active": true},
-    {"kind": "future_kind_we_do_not_know", "percent": 3},
+    {
+      "kind": "session",
+      "percent": 12,
+      "severity": "info",
+      "resets_at": "2026-09-17T15:00:00+00:00",
+      "scope": null,
+      "is_active": true
+    },
+    {
+      "kind": "weekly_all",
+      "percent": 41,
+      "severity": "info",
+      "resets_at": "2026-09-21T07:00:00+00:00",
+      "scope": null,
+      "is_active": true
+    },
+    {
+      "kind": "weekly_scoped",
+      "percent": 57,
+      "severity": "warning",
+      "resets_at": "2026-09-21T07:00:00+00:00",
+      "scope": {
+        "model": {
+          "display_name": "Fable",
+          "id": "claude-fable-5-1"
+        }
+      },
+      "is_active": true
+    },
+    {
+      "kind": "future_kind_we_do_not_know",
+      "percent": 3
+    },
     "not-a-dict"
   ],
   "extra_usage": {
-    "is_enabled": true,
-    "monthly_limit": 50.0,
-    "used_credits": 7.25,
-    "utilization": 14.5,
+    "is_enabled": false,
+    "monthly_limit": 20000,
+    "used_credits": 241.0,
+    "utilization": 1.205,
     "currency": "USD",
+    "decimal_places": 2,
     "disabled_reason": null
   },
   "seven_day_breakdown": {
     "as_of": "2026-09-17T12:34:56Z",
     "window_started_at": "2026-09-14T07:00:00Z",
     "rows": [
-      {"key": "claude_code", "display_name": "Claude Code", "percent": 30.1},
-      {"key": "chats", "display_name": "Chats", "percent": 6.0},
-      {"key": "cowork", "display_name": "Cowork", "percent": 4.2},
-      {"key": "other", "display_name": "Other", "percent": 1.0},
-      {"key": "broken", "display_name": "Broken", "percent": "n/a"},
+      {
+        "key": "claude_code",
+        "display_name": "Claude Code",
+        "percent": 96.0
+      },
+      {
+        "key": "chats",
+        "display_name": "Chats",
+        "percent": 4.0
+      },
+      {
+        "key": "cowork",
+        "display_name": "Cowork",
+        "percent": 0.0
+      },
+      {
+        "key": "other",
+        "display_name": "Other",
+        "percent": 0.0
+      },
+      {
+        "key": "broken",
+        "display_name": "Broken",
+        "percent": "n/a"
+      },
       null
     ]
   },
   "billing_cycle": null,
-  "flags": {"something": true}
+  "flags": {
+    "something": true
+  },
+  "spend": {
+    "used": {
+      "amount_minor": 241,
+      "currency": "USD",
+      "exponent": 2
+    },
+    "limit": {
+      "amount_minor": 20000,
+      "currency": "USD",
+      "exponent": 2
+    },
+    "percent": 1,
+    "something_experimental": null
+  }
 }
