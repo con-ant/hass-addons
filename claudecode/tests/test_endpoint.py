@@ -19,13 +19,15 @@ import time
 import unittest
 
 from testlib import ScratchRoot, run_cli, wait_for, ENDPOINT, HEALTH_CHECK_FM, MINIMAL_FM, \
-    SUPERVISOR_TOKEN, ADDON_VERSION, BUILT_CLI_VERSION
+    SUPERVISOR_TOKEN, ADDON_VERSION, BUILT_CLI_VERSION, TESTS_DIR
 from fakes.fake_supervisor import FakeSupervisor
 import jobcommon as jc
 import jobdef
 
 TOKEN = "cd" * 32
 OTHER_TOKEN = "ef" * 32
+USAGE_PATH = "/fake/api/oauth/usage"
+USAGE_RECORDED = json.loads((TESTS_DIR / "fixtures" / "usage_response.json").read_text())
 ACTION_FM = {"description": "restart thing", "kind": "action", "tools": ["Bash(ha core restart)"]}
 INPUT_FM = dict(MINIMAL_FM, description="energy", min_interval=0,
                 input={"date": {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}$",
@@ -136,6 +138,8 @@ class EndpointCase(unittest.TestCase):
         cls.s = ScratchRoot().start()
         cls.sup = FakeSupervisor().start()
         cls.s.with_supervisor(cls.sup).use_fake_runner()
+        cls.s.setenv(CLAUDE_JOB_USAGE_URL=cls.sup.url + USAGE_PATH, CLAUDE_JOB_USAGE_TIMEOUT_S="5")
+        cls.sup.route("GET", USAGE_PATH, (200, USAGE_RECORDED))
         cls.s.write_token(TOKEN)
         cls.seed()
         cls.ep = EndpointProc(cls.s, cls.endpoint_args, cls.endpoint_env)
@@ -204,6 +208,7 @@ class TestHTTP(EndpointCase):
         h = json.loads(body)
         self.assertEqual(h["status"], "ok")
         self.assertEqual((h["jobs_dir"], h["token_set"], h["cli_preflight"], h["stopping"]), (True, True, True, False))
+        self.assertIs(h["usage_sensors"], True)
         self.assertEqual(h["version"], ADDON_VERSION)
         self.assertEqual(h["claude_version"], BUILT_CLI_VERSION)
         self.assertIsInstance(h["uptime_s"], int)
@@ -223,7 +228,7 @@ class TestHTTP(EndpointCase):
 
     # -- auth --
     def test_401_matrix(self):
-        routes = [("GET", "/jobs"), ("GET", "/jobs/health-check/detail"), ("POST", "/jobs/no-limit/run"),
+        routes = [("GET", "/jobs"), ("GET", "/usage"), ("GET", "/jobs/health-check/detail"), ("POST", "/jobs/no-limit/run"),
                   ("POST", "/jobs/no-limit/enable"), ("POST", "/jobs/no-limit/disable"),
                   ("POST", "/republish"), ("POST", "/action")]
         for method, path in routes:
@@ -256,6 +261,7 @@ class TestHTTP(EndpointCase):
         self.assertEqual(rjson(self.ep.port, "PUT", "/jobs", body={}), (405, {"error": "method_not_allowed"}))
         self.assertEqual(self.get("/republish")[0], 405)
         self.assertEqual(self.post("/jobs", {})[0], 405)
+        self.assertEqual(self.post("/usage", {})[0], 405)
         status, _h, body = request(self.ep.port, "HEAD", "/health", token=None)
         self.assertEqual((status, body), (405, b""))
 
@@ -489,6 +495,35 @@ class TestHTTP(EndpointCase):
             self.sup.unroute("POST", "/core/api/states/")
 
     # -- logging --
+    def test_usage_route_serves_the_snapshot_and_polls_lazily_without_the_tick(self):
+        """--no-tick: nothing has polled yet, so the first GET /usage carries no data and starts
+        one background poll; the next GET (once it landed) carries the fixture's numbers."""
+        status, first = self.get("/usage")
+        self.assertEqual(status, 200)
+        for key in ("enabled", "session", "weekly", "weekly_scoped", "extra_usage", "stale", "has_data"):
+            self.assertIn(key, first)
+        self.assertTrue(wait_for(lambda: self.get("/usage")[1]["has_data"], timeout=10), self.ep.stderr())
+        status, snap = self.get("/usage")
+        self.assertEqual((snap["enabled"], snap["ok"], snap["stale"], snap["last_error"]), (True, True, False, None))
+        self.assertEqual(snap["session"]["used_percent"], 12.5)
+        self.assertEqual(snap["weekly"]["used_percent"], 41.3)
+        self.assertEqual(snap["weekly"]["breakdown"], {"claude_code": 96.0, "chats": 4.0, "cowork": 0.0, "other": 0.0})
+        self.assertEqual((snap["weekly_scoped"]["model"], snap["weekly_scoped"]["used_percent"]), ("Fable", 57.0))
+        self.assertEqual((snap["extra_usage"]["used_credits"], snap["extra_usage"]["monthly_limit"]), (2.41, 200.0))
+        self.assertEqual(snap["session"]["resets_at"], "2026-09-17T15:00:00+00:00")
+        self.assertRegex(snap["generated_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        reqs = self.sup.find("GET", USAGE_PATH)
+        self.assertEqual(len(reqs), 1, "one lazy poll, single flight, not one per GET")
+        self.assertEqual(reqs[0]["headers"]["authorization"], "Bearer test-oauth-token")
+        self.assertEqual(reqs[0]["headers"]["anthropic-beta"], "oauth-2025-04-20")
+        body = json.dumps(snap)
+        for secret in ("test-oauth-token", "accessToken", "refreshToken", TOKEN, SUPERVISOR_TOKEN):
+            self.assertNotIn(secret, body)
+        # another GET inside the interval starts nothing
+        self.get("/usage")
+        time.sleep(0.2)
+        self.assertEqual(len(self.sup.find("GET", USAGE_PATH)), 1)
+
     def test_zz_log_has_only_non_2xx_lines_and_never_the_token(self):
         request(self.ep.port, "POST", "/jobs/health-check/run", token=OTHER_TOKEN, body={})
         self.assertTrue(wait_for(lambda: "401 POST /jobs/health-check/run" in self.ep.stderr()))
@@ -497,6 +532,7 @@ class TestHTTP(EndpointCase):
         self.assertNotIn(TOKEN, err)
         self.assertNotIn(OTHER_TOKEN, err)
         self.assertNotIn(SUPERVISOR_TOKEN, err)
+        self.assertNotIn("test-oauth-token", err)
         self.assertNotIn("] 200 ", err)
         self.assertNotIn("] 202 ", err)
 
@@ -985,6 +1021,72 @@ class TestSpawnFailed(EndpointCase):
         self.assertIn("cannot start", self.ep.stderr())
 
 
+class TestUsageDisabled(EndpointCase):
+    @classmethod
+    def seed(cls):
+        cls.s.options_file.write_text(json.dumps({"job_default_model": "opus", "enable_job_endpoint": True,
+                                                  "enable_usage_sensors": False}))
+
+    def test_disabled_answers_404_never_polls_and_health_says_so(self):
+        self.assertEqual(self.get("/usage"), (404, {"error": "usage_disabled"}))
+        self.assertIs(self.get("/health", token=None)[1]["usage_sensors"], False)
+        self.assertEqual(self.get("/usage", token=OTHER_TOKEN)[0], 401)       # auth still comes first
+        time.sleep(0.2)
+        self.assertEqual(self.sup.find("GET", USAGE_PATH), [])
+        self.assertIn("usage sensors off", self.ep.stderr())
+
+
+class TestUsageKeepalive(EndpointCase):
+    """Opt-in keepalive: with usage_keepalive_job set, an `unauthorized` poll on a token whose own
+    expiresAt is past spawns that job (through the ordinary run path) at most hourly."""
+    endpoint_args = ()                                       # tick on
+    endpoint_env = {"CLAUDE_JOB_TICK_INTERVAL_S": "1", "CLAUDE_JOB_USAGE_POLL_INTERVAL_S": "60"}
+
+    @classmethod
+    def seed(cls):
+        cls.s.options_file.write_text(json.dumps({"job_default_model": "opus", "enable_job_endpoint": True,
+                                                  "usage_keepalive_job": "usage_keepalive"}))
+        cls.s.write_job("usage-keepalive", dict(MINIMAL_FM, model="haiku", min_interval=0))
+        cls.s.credentials_file.write_text(json.dumps({"claudeAiOauth": {"accessToken": "test-oauth-token",
+                                                                        "expiresAt": 1000}}))    # long expired
+        cls.sup.route("GET", USAGE_PATH, (401, {"error": "expired"}))
+
+    def test_expired_and_rejected_token_spawns_the_job_once_per_hour(self):
+        self.assertTrue(wait_for(lambda: self.get("/usage")[1]["last_error"] == "unauthorized", timeout=10), self.ep.stderr())
+        self.assertTrue(wait_for(lambda: len(self.runner_calls_for("usage-keepalive")) == 1, timeout=10), self.ep.stderr())
+        call = self.runner_calls_for("usage-keepalive")[0]
+        self.assertEqual(call["argv"][0:3], ["run", "usage-keepalive", "--run-id"])
+        self.assertEqual(call["argv"][4:6], ["--trigger", "endpoint"])
+        self.assertIn("usage keepalive: access token expired at 1970-01-01T00:00:01Z; spawned job 'usage-keepalive'",
+                      self.ep.stderr())
+        time.sleep(2.5)                                       # several ticks later: still exactly one spawn
+        self.assertEqual(len(self.runner_calls_for("usage-keepalive")), 1)
+        snap = self.get("/usage")[1]
+        self.assertEqual((snap["stale"], snap["has_data"]), (False, False))
+        self.assertEqual(snap["credential_expires_at"], "1970-01-01T00:00:01Z")
+
+
+class TestUsageKeepaliveNotForRevokedLogin(EndpointCase):
+    """A 401 on a token that has NOT expired by its own clock is a revoked login: no run can fix it."""
+    endpoint_args = ()
+    endpoint_env = {"CLAUDE_JOB_TICK_INTERVAL_S": "1"}
+
+    @classmethod
+    def seed(cls):
+        cls.s.options_file.write_text(json.dumps({"job_default_model": "opus", "enable_job_endpoint": True,
+                                                  "usage_keepalive_job": "usage-keepalive"}))
+        cls.s.write_job("usage-keepalive", dict(MINIMAL_FM, min_interval=0))
+        cls.s.credentials_file.write_text(json.dumps({"claudeAiOauth": {"accessToken": "test-oauth-token",
+                                                                        "expiresAt": 4_000_000_000_000}}))
+        cls.sup.route("GET", USAGE_PATH, (401, {"error": "revoked"}))
+
+    def test_no_spawn(self):
+        self.assertTrue(wait_for(lambda: self.get("/usage")[1]["last_error"] == "unauthorized", timeout=10), self.ep.stderr())
+        time.sleep(2.5)
+        self.assertEqual(self.runner_calls_for("usage-keepalive"), [])
+        self.assertNotIn("usage keepalive", self.ep.stderr())
+
+
 class TestCanary(EndpointCase):
     endpoint_env = {"CLAUDE_JOB_CANARY_INTERVAL_S": "0"}
 
@@ -1055,6 +1157,39 @@ class TestTickPrune(TickCase):
             files.append(p)
         self.tick(CLAUDE_JOB_PRUNE_FIRST_DELAY_S="0", CLAUDE_JOB_TRANSCRIPT_MAX_BYTES="1000")
         self.assertEqual([p.exists() for p in files], [False, False, True])
+
+
+class TestTickUsage(TickCase):
+    def setUp(self):
+        super().setUp()
+        self.s.setenv(CLAUDE_JOB_USAGE_URL=self.sup.url + USAGE_PATH, CLAUDE_JOB_USAGE_TIMEOUT_S="5")
+
+    def test_tick_once_polls_synchronously_and_a_bad_body_is_one_log_line(self):
+        self.sup.route("GET", USAGE_PATH, (200, USAGE_RECORDED))
+        err = self.tick()
+        self.assertEqual(len(self.sup.find("GET", USAGE_PATH)), 1)
+        self.assertNotIn("usage:", err)                         # success is silent
+        self.assertNotIn("test-oauth-token", err)
+        self.sup.route("GET", USAGE_PATH, (200, "<html>not json</html>"))
+        err = self.tick()
+        self.assertEqual(err.count("usage: malformed_body"), 1, err)
+        self.assertIn("no values yet", err)                     # a fresh process has no last good values
+        self.assertEqual(self.s.fake_runner_calls(), [], "no keepalive without usage_keepalive_job")
+
+    def test_tick_once_with_usage_off_never_calls_out(self):
+        self.s.options_file.write_text(json.dumps({"job_default_model": "opus", "enable_job_endpoint": True,
+                                                   "enable_usage_sensors": False}))
+        self.sup.route("GET", USAGE_PATH, (200, USAGE_RECORDED))
+        self.tick()
+        self.assertEqual(self.sup.find("GET", USAGE_PATH), [])
+
+    def test_invalid_keepalive_option_is_logged_and_ignored(self):
+        self.s.options_file.write_text(json.dumps({"job_default_model": "opus", "enable_job_endpoint": True,
+                                                   "usage_keepalive_job": "../etc/passwd"}))
+        self.sup.route("GET", USAGE_PATH, (401, "no"))
+        err = self.tick()
+        self.assertIn("usage_keepalive_job '../etc/passwd' is not a valid job name; keepalive off", err)
+        self.assertEqual(self.s.fake_runner_calls(), [])
 
 
 class TestTickTmpCleanup(TickCase):

@@ -76,6 +76,18 @@ configuration:
     name: Activer le point d'accès des tâches
     description: >-
       Permet à Home Assistant de déclencher les Claude Jobs : démarre un point d'accès HTTP sur le port 7682 (réseau interne des add-ons uniquement, jeton dans /data/claude-jobs/token ; voir `claude-job token show`) et écrit le paquet claudecode_jobs.yaml dans votre répertoire de configuration à chaque démarrage. Désactivé = les tâches ne se lancent que depuis le terminal.
+  enable_usage_sensors:
+    name: Capteurs d'utilisation de l'abonnement Claude
+    description: >-
+      Avec le point d'accès des tâches actif, interroge les limites de votre forfait claude.ai (session de 5 heures, hebdomadaire, hebdomadaire par modèle, utilisation supplémentaire, répartition hebdomadaire par surface) toutes les usage_poll_interval secondes et les expose comme sensor.claude_usage_* dans le paquet généré. Chiffres du compte entier ; le jeton de connexion est seulement lu, jamais renouvelé, donc sur une installation inactive les valeurs peuvent devenir périmées (binary_sensor.claude_usage_stale).
+  usage_poll_interval:
+    name: Intervalle d'interrogation de l'utilisation (secondes)
+    description: >-
+      Fréquence à laquelle l'add-on demande les chiffres d'utilisation à api.anthropic.com et à laquelle Home Assistant les relit auprès de l'add-on. 60-3600 ; 300 par défaut.
+  usage_keepalive_job:
+    name: Tâche de maintien du jeton (optionnel)
+    description: >-
+      Nom d'une tâche (p. ex. usage-keepalive, fournie) que le point d'accès lance au plus une fois par heure tant que le jeton d'accès claude.ai est expiré, afin que la CLI elle-même le renouvelle et que les capteurs d'utilisation restent à jour. Coûte un petit appel au modèle par exécution. Vide = désactivé.
   debug_logging:
     name: Journalisation de débogage au démarrage
     description: >-

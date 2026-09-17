@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.19] - 2026-09-17
+
+### Added
+- **Claude subscription usage in Home Assistant.** With the job endpoint on, the
+  add-on now polls the figures the Claude Code `/usage` screen shows — the
+  whole claude.ai subscription, every surface sharing it — and the generated
+  `claudecode_jobs.yaml` package exposes them as registry entities:
+  `sensor.claude_usage_session` (5-hour window %), `sensor.claude_usage_weekly`
+  (7-day %, with the by-surface `breakdown` attribute),
+  `sensor.claude_usage_weekly_model` (the per-model weekly cap), the three
+  `*_reset` timestamps, `sensor.claude_usage_weekly_claude_code` / `_chats` /
+  `_cowork` / `_other` (each surface's share of the week's usage),
+  `sensor.claude_usage_extra_used` / `_extra_spend` (the API reports extra
+  usage in minor units with `decimal_places` and a `spend` block; the sensor
+  shows major units),
+  `sensor.claude_usage_last_success` (poll health in its attributes) and
+  `binary_sensor.claude_usage_stale`. New route `GET /usage` on the endpoint;
+  new options `enable_usage_sensors` (default on), `usage_poll_interval`
+  (60–3600 s, default 300) and `usage_keepalive_job` (default off). The poll is
+  gentle (one request per interval, single flight, short timeout, off the tick
+  thread) and logs failures once per kind. The claude.ai access token is only
+  read (through the existing newest-wins credential view), never refreshed; on
+  a 401 — expected once the ~8 h token expires on an idle install — the last
+  good values stay published with `stale: true` and `last_success`, never zeros.
+  The token never reaches HA, the package file or the log. The README section
+  "Claude subscription usage" documents the entities and the freshness caveat.
+- **`usage-keepalive` example job.** The CLI renews the token only when it calls
+  the model, so freshness on an idle install is one tiny job: haiku, two turns,
+  no tools. Schedule it with the blueprint, or set `usage_keepalive_job:
+  usage-keepalive` and the endpoint runs it at most hourly, only while the
+  token's own expiry is past (a rejected but unexpired token is a revoked
+  login and is left alone). Seeded on fresh installs; existing ones copy it
+  from `/usr/share/claudecode/jobs/`.
+
+### Changed
+- `GET /health` reports `usage_sensors`; the endpoint's start line and the
+  add-on boot log say whether the usage poll is on and at what cadence.
+  `render_package.py` gained `--usage` / `--no-usage` / `--usage-scan-interval`
+  and leaves the usage block out of the package when the option is off. Tests:
+  new `test_usage.py` (parser against a recorded-shape fixture, 401 keeps the
+  last good values, malformed bodies, log-once, single flight), plus endpoint,
+  tick and render cases.
+
 ## [1.2.65-con.18] - 2026-09-02
 
 ### Fixed

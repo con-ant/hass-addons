@@ -169,6 +169,14 @@ class TestShippedFiles(JobdefCase):
         self.assertEqual(er.notify, {"info": ("persistent",), "ok": ("persistent",)})
         self.assertEqual(jobdef.tools_csv(er), "Read,Grep,Glob")
         self.assertNotIn("mcp__homeassistant__get_error_log", hc.tools)   # dead on current HA Core
+        # the usage keepalive: the cheapest possible run (haiku, two turns, no real tool use)
+        ka, errors, warnings = jobdef.load_and_validate("usage-keepalive", jobs_dir=SHARE_DIR / "jobs")
+        self.assertIsNotNone(ka)
+        self.assertEqual((errors, warnings), ([], []))
+        self.assertEqual((ka.model, ka.max_turns, ka.max_cost_usd, ka.timeout, ka.min_interval, ka.stale_after),
+                         ("haiku", 2, 0.05, 120, 900, None))
+        self.assertEqual(ka.kind, "job")
+        self.assertTrue(ka.enabled)
 
     def test_policy_file_shape_and_golden_settings(self):
         golden = golden_settings()

@@ -12,7 +12,10 @@
 # What is in here (fixed; nothing is per-job — Claude Code add-on, design "Claude Jobs" §4.10):
 #   rest_command.claude_job_run / claude_job_set_enabled / claude_job_republish   → call the add-on's job endpoint
 #   rest:      sensor.claude_jobs_attention      → the alarm anchor (polls GET /jobs; unavailable = endpoint down)
+#   rest:      sensor.claude_usage_* / binary_sensor.claude_usage_stale → Claude subscription usage (polls GET /usage;
+#              whole-account Max/Pro plan limits; omitted when the add-on option enable_usage_sensors is off)
 #   template:  sensor.claude_jobs_monthly_cost   → statistics-grade monthly spend
+#   template:  sensor.claude_usage_weekly_<surface> → each surface's share of this week's usage, as plain % sensors
 #   automation: republish on HA start · attention alarm · alarm clear
 #   a commented-out example schedule (use the "Claude Job · run on a schedule" blueprint instead)
 
@@ -79,6 +82,121 @@ rest:
           - preflight
           - endpoint_version
 
+  # __USAGE_BEGIN__ — Claude subscription usage (add-on option enable_usage_sensors; the add-on polls
+  # api.anthropic.com every usage_poll_interval seconds and serves the last snapshot on GET /usage; this
+  # block polls at the same cadence). Values are whole-account: every Claude surface on the subscription.
+  # On a failed refresh (expired login token, network) the add-on keeps serving the LAST GOOD numbers with
+  # stale: true — these sensors never drop to zero, and binary_sensor.claude_usage_stale says when to doubt them.
+  - resource: "http://__CLAUDECODE_HOST__:__CLAUDECODE_PORT__/usage"
+    method: GET
+    scan_interval: __USAGE_SCAN_INTERVAL__
+    timeout: 10
+    headers:
+      Authorization: "Bearer __CLAUDECODE_TOKEN__"
+      Accept: "application/json"
+    binary_sensor:
+      - name: "Claude Usage Stale"                # → binary_sensor.claude_usage_stale; on = the numbers below are not fresh
+        unique_id: "claudecode_usage_stale"       #   (last poll failed and the last good values are shown, or no data yet)
+        device_class: problem
+        availability: "{{ value_json is defined and value_json is mapping and 'stale' in value_json }}"
+        value_template: "{{ (value_json.stale | bool(false)) or not (value_json.has_data | bool(false)) }}"
+    sensor:
+      - name: "Claude Usage Last Success"         # → sensor.claude_usage_last_success; when the numbers were last fetched;
+        unique_id: "claudecode_usage_last_success" #  attributes carry the poll health (last_error, age_s, token expiry)
+        device_class: timestamp
+        icon: "mdi:cloud-check-outline"
+        availability: "{{ value_json is defined and value_json is mapping and value_json.last_success is string }}"
+        value_template: "{{ value_json.last_success }}"
+        json_attributes:
+          - stale
+          - last_error
+          - last_error_detail
+          - last_attempt
+          - age_s
+          - poll_interval_s
+          - credential_expires_at
+          - subscription_type
+          - rate_limit_tier
+      - name: "Claude Usage Session"              # → sensor.claude_usage_session; the 5-hour window, % used
+        unique_id: "claudecode_usage_session"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: "mdi:timer-sand"
+        availability: "{{ value_json is defined and value_json is mapping and value_json.session is mapping and value_json.session.used_percent is number }}"
+        value_template: "{{ value_json.session.used_percent }}"
+        json_attributes_path: "$.session"
+        json_attributes:
+          - resets_at
+          - severity
+          - is_active
+      - name: "Claude Usage Session Reset"        # → sensor.claude_usage_session_reset
+        unique_id: "claudecode_usage_session_reset"
+        device_class: timestamp
+        availability: "{{ value_json is defined and value_json is mapping and value_json.session is mapping and value_json.session.resets_at is string }}"
+        value_template: "{{ value_json.session.resets_at }}"
+      - name: "Claude Usage Weekly"               # → sensor.claude_usage_weekly; the 7-day window across all models, % used;
+        unique_id: "claudecode_usage_weekly"      #   attribute `breakdown` = {claude_code, chats, cowork, other}: each surface's
+                                                  #   SHARE of this week's usage in % (sums to 100; not % of the cap)
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: "mdi:calendar-week"
+        availability: "{{ value_json is defined and value_json is mapping and value_json.weekly is mapping and value_json.weekly.used_percent is number }}"
+        value_template: "{{ value_json.weekly.used_percent }}"
+        json_attributes_path: "$.weekly"
+        json_attributes:
+          - resets_at
+          - severity
+          - is_active
+          - breakdown
+          - breakdown_rows
+          - breakdown_as_of
+          - breakdown_window_started_at
+      - name: "Claude Usage Weekly Reset"         # → sensor.claude_usage_weekly_reset
+        unique_id: "claudecode_usage_weekly_reset"
+        device_class: timestamp
+        availability: "{{ value_json is defined and value_json is mapping and value_json.weekly is mapping and value_json.weekly.resets_at is string }}"
+        value_template: "{{ value_json.weekly.resets_at }}"
+      - name: "Claude Usage Weekly Model"         # → sensor.claude_usage_weekly_model; the per-model weekly cap (attribute
+        unique_id: "claudecode_usage_weekly_model" #  `model` names it); can run ahead of the all-model weekly figure
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: "mdi:brain"
+        availability: "{{ value_json is defined and value_json is mapping and value_json.weekly_scoped is mapping and value_json.weekly_scoped.used_percent is number }}"
+        value_template: "{{ value_json.weekly_scoped.used_percent }}"
+        json_attributes_path: "$.weekly_scoped"
+        json_attributes:
+          - model
+          - resets_at
+          - severity
+          - is_active
+      - name: "Claude Usage Weekly Model Reset"   # → sensor.claude_usage_weekly_model_reset
+        unique_id: "claudecode_usage_weekly_model_reset"
+        device_class: timestamp
+        availability: "{{ value_json is defined and value_json is mapping and value_json.weekly_scoped is mapping and value_json.weekly_scoped.resets_at is string }}"
+        value_template: "{{ value_json.weekly_scoped.resets_at }}"
+      - name: "Claude Usage Extra Used"           # → sensor.claude_usage_extra_used; extra (pay-as-you-go) usage, % of its monthly limit
+        unique_id: "claudecode_usage_extra_used"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: "mdi:cash-plus"
+        availability: "{{ value_json is defined and value_json is mapping and value_json.extra_usage is mapping and value_json.extra_usage.utilization is number }}"
+        value_template: "{{ value_json.extra_usage.utilization }}"
+        json_attributes_path: "$.extra_usage"
+        json_attributes:
+          - is_enabled
+          - monthly_limit
+          - used_credits
+          - currency
+          - disabled_reason
+      - name: "Claude Usage Extra Spend"          # → sensor.claude_usage_extra_spend; extra usage spent this month in major units
+        unique_id: "claudecode_usage_extra_spend" #   (the add-on converts the API's minor units; `currency` sits on Extra Used)
+        device_class: monetary
+        state_class: total
+        unit_of_measurement: "USD"
+        availability: "{{ value_json is defined and value_json is mapping and value_json.extra_usage is mapping and value_json.extra_usage.used_credits is number }}"
+        value_template: "{{ value_json.extra_usage.used_credits }}"
+  # __USAGE_END__
+
 template:
   - sensor:
       - name: "Claude Jobs Monthly Cost"        # → sensor.claude_jobs_monthly_cost
@@ -89,6 +207,39 @@ template:
         availability: "{{ state_attr('sensor.claude_jobs_attention', 'cost_month_usd') | is_number }}"
         state: "{{ state_attr('sensor.claude_jobs_attention', 'cost_month_usd') | float(0) | round(2) }}"
         last_reset: "{{ state_attr('sensor.claude_jobs_attention', 'cost_month_start') }}"
+  # __USAGE_BEGIN__ — the weekly breakdown by surface as plain % sensors: each surface's SHARE of this week's usage
+  # (they sum to 100; "Claude Code 96 %" is 96 % of what was used, not of the limit). Each is `unavailable` while the
+  # API reports no row of that name; the raw rows stay on sensor.claude_usage_weekly's `breakdown_rows` attribute.
+  - sensor:
+      - name: "Claude Usage Weekly Claude Code"   # → sensor.claude_usage_weekly_claude_code
+        unique_id: "claudecode_usage_weekly_claude_code"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: "mdi:console"
+        availability: "{{ (state_attr('sensor.claude_usage_weekly', 'breakdown') or {}).get('claude_code') is number }}"
+        state: "{{ (state_attr('sensor.claude_usage_weekly', 'breakdown') or {}).get('claude_code') }}"
+      - name: "Claude Usage Weekly Chats"         # → sensor.claude_usage_weekly_chats
+        unique_id: "claudecode_usage_weekly_chats"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: "mdi:chat-outline"
+        availability: "{{ (state_attr('sensor.claude_usage_weekly', 'breakdown') or {}).get('chats') is number }}"
+        state: "{{ (state_attr('sensor.claude_usage_weekly', 'breakdown') or {}).get('chats') }}"
+      - name: "Claude Usage Weekly Cowork"        # → sensor.claude_usage_weekly_cowork
+        unique_id: "claudecode_usage_weekly_cowork"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: "mdi:account-group-outline"
+        availability: "{{ (state_attr('sensor.claude_usage_weekly', 'breakdown') or {}).get('cowork') is number }}"
+        state: "{{ (state_attr('sensor.claude_usage_weekly', 'breakdown') or {}).get('cowork') }}"
+      - name: "Claude Usage Weekly Other"         # → sensor.claude_usage_weekly_other
+        unique_id: "claudecode_usage_weekly_other"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: "mdi:dots-horizontal-circle-outline"
+        availability: "{{ (state_attr('sensor.claude_usage_weekly', 'breakdown') or {}).get('other') is number }}"
+        state: "{{ (state_attr('sensor.claude_usage_weekly', 'breakdown') or {}).get('other') }}"
+  # __USAGE_END__
 
 automation:
   - id: claudecode_jobs_republish_on_start

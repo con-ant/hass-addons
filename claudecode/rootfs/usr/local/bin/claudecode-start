@@ -338,11 +338,14 @@ read_options() {
   EXTRA_PKGS=$(opt '.extra_npm_packages // [] | join(" ")')
   JOB_DEFAULT_MODEL=$(opt '.job_default_model // "opus"')
   ENABLE_JOBS=$(opt '.enable_job_endpoint // false')
+  ENABLE_USAGE=$(opt 'if .enable_usage_sensors == null then true else .enable_usage_sensors end')
+  USAGE_INTERVAL=$(opt '.usage_poll_interval // 300')
+  USAGE_KEEPALIVE=$(opt '.usage_keepalive_job // ""')
   # Sane fallbacks if options.json itself was unreadable.
   : "${FONT_SIZE:=14}" "${THEME:=dark}" "${SESSION_PERSIST:=true}" "${ENABLE_MCP:=true}"
   : "${ENABLE_PLAYWRIGHT:=false}" "${AUTO_UPDATE:=false}" "${DEFAULT_MODE:=auto}"
   : "${ENABLE_RC:=false}" "${RC_PREFIX:=HomeAssistant}" "${AUTO_LAUNCH:=continue}"
-  : "${JOB_DEFAULT_MODEL:=opus}" "${ENABLE_JOBS:=false}"
+  : "${JOB_DEFAULT_MODEL:=opus}" "${ENABLE_JOBS:=false}" "${ENABLE_USAGE:=true}" "${USAGE_INTERVAL:=300}"
 }
 
 scrub_legacy_token() {
@@ -507,12 +510,13 @@ setup_job_dirs() {
   local fresh=""
   [ -d "$JOBS_DIR" ] || fresh=1
   if mkdir -p "$JOBS_DIR/logs" "$JOBS_DIR/state/inbox" "$JOBS_DIR/state/disabled" "$JOBS_DIR/state/actions"; then
-    # Seed the two shipped example jobs once, when the directory is first
+    # Seed the shipped example jobs once, when the directory is first
     # created - never again, so a job the user deleted stays deleted. Pristine
-    # copies remain in /usr/share/claudecode/jobs/.
+    # copies remain in /usr/share/claudecode/jobs/ (copy one by hand to add it
+    # to an existing install, e.g. usage-keepalive.md).
     if [ -n "$fresh" ]; then
       cp /usr/share/claudecode/jobs/*.md "$JOBS_DIR/" 2>/dev/null \
-        && info "Seeded example jobs into $JOBS_DIR (health-check, energy-report)"
+        && info "Seeded example jobs into $JOBS_DIR (health-check, energy-report, usage-keepalive)"
     fi
     [ -e /usr/share/claudecode/notify.example.yaml ] \
       && cp /usr/share/claudecode/notify.example.yaml "$JOBS_DIR/_notify.example.yaml" 2>/dev/null
@@ -668,6 +672,11 @@ start_job_endpoint() {
   ) &
   JOB_LOOP_PID=$!
   info "Job endpoint started on port $JOB_ENDPOINT_PORT (supervised; pid $JOB_LOOP_PID)"
+  if [ "$ENABLE_USAGE" = "true" ]; then
+    info "Claude subscription usage sensors on: polling every ${USAGE_INTERVAL}s (GET /usage)${USAGE_KEEPALIVE:+; keepalive job: $USAGE_KEEPALIVE}"
+  else
+    info "Claude subscription usage sensors off (enable_usage_sensors: false)"
+  fi
 }
 
 build_shell_cmd() {

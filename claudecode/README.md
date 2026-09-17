@@ -112,6 +112,9 @@ claude --continue
 | `extra_npm_packages` | List of npm package specs to install at every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). Bin dir is on `PATH`. Use to add custom MCP servers without forking the Dockerfile. | `[]` |
 | `job_default_model` | Model alias used by scheduled jobs (`~/.claude/jobs/*.md`) that do not set `model:` themselves: `fable`, `opus`, `sonnet` or `haiku`. `fable` is the most capable and the most expensive; a job can pin a cheaper model in its own frontmatter. See [Scheduled jobs](#scheduled-jobs-claude-jobs) | opus |
 | `enable_job_endpoint` | Start the job trigger endpoint (port 7682, add-on network only, bearer token), generate its token on first start, and write the `claudecode_jobs.yaml` package into your config directory on every start. Off = jobs can still be run from the terminal with `claude-job`, but Home Assistant cannot trigger or watch them | false |
+| `enable_usage_sensors` | With `enable_job_endpoint` on, poll your **Claude subscription usage** (5-hour session, weekly, weekly per-model, extra usage, weekly breakdown by surface) and expose it as `sensor.claude_usage_*` in the generated package. Whole-account figures. The login token is only read, never refreshed — see [Claude subscription usage](#claude-subscription-usage) | true |
+| `usage_poll_interval` | Seconds between polls of `api.anthropic.com` for the usage figures (and Home Assistant's polls of the add-on for them): 60–3600 | 300 |
+| `usage_keepalive_job` | Optional: the name of a job (the shipped `usage-keepalive`) the endpoint runs at most once an hour while the claude.ai access token has *expired*, so the CLI itself renews it and the usage sensors stay fresh on an idle install. One small haiku call per run. Empty = off | "" |
 | `debug_logging` | Trace every startup command into the add-on log (`bash -x`, timestamped). Turn on when the add-on fails to boot and the log doesn't say why; the boot log also always shows a `step:` marker per startup step, so the last one printed names where it stopped. Turn off afterwards — very verbose | false |
 
 ### Playwright MCP setup
@@ -219,6 +222,53 @@ The full reference — writing jobs, the `claude-job` command, what "read-only"
 means, result states, notifications, triggering from Home Assistant, cost —
 is in [`docs/JOBS.md`](docs/JOBS.md); the design and its security argument are
 in [`docs/DESIGN-claude-jobs.md`](docs/DESIGN-claude-jobs.md).
+
+## Claude subscription usage
+
+With `enable_job_endpoint: true` (and `enable_usage_sensors` left on) the add-on also polls
+the same usage figures the Claude Code `/usage` screen shows — your **whole claude.ai
+subscription**, every surface that shares it (Claude Code here and elsewhere, chats, Cowork,
+…) — every `usage_poll_interval` seconds, and the generated `claudecode_jobs.yaml` package
+turns them into registry entities:
+
+| Entity | What it is |
+|---|---|
+| `sensor.claude_usage_session` | 5-hour window used, % (attributes `resets_at`, `severity`, `is_active`) |
+| `sensor.claude_usage_weekly` | 7-day window used, % (all models); attribute `breakdown` = `{claude_code, chats, cowork, other}` — each surface's **share of this week's usage** (they sum to 100, not % of the cap), plus `breakdown_rows` as the API reports them |
+| `sensor.claude_usage_weekly_model` | the per-model 7-day cap (attribute `model`, currently "Fable"); it can run ahead of the all-model figure |
+| `sensor.claude_usage_session_reset` · `_weekly_reset` · `_weekly_model_reset` | when each window resets (`device_class: timestamp`) |
+| `sensor.claude_usage_weekly_claude_code` · `_chats` · `_cowork` · `_other` | the weekly breakdown by surface as plain sensors: each surface's share of this week's usage in % ("Claude Code 96 %" means 96 % of what was used this week, not 96 % of the limit); each `unavailable` while the API reports no row of that name |
+| `sensor.claude_usage_extra_used` · `sensor.claude_usage_extra_spend` | extra (pay-as-you-go) usage: % of the monthly limit, and the amount spent this month in major units (the API reports cents; 241 → 2.41). Attributes `is_enabled`, `monthly_limit`, `currency`, `disabled_reason` |
+| `sensor.claude_usage_last_success` | when the figures were last fetched; attributes `stale`, `last_error`, `last_error_detail`, `age_s`, `credential_expires_at`, `subscription_type` |
+| `binary_sensor.claude_usage_stale` | **on** when the numbers above are not fresh: the last poll failed and the last good values are being shown, or nothing has been fetched yet |
+
+Percent sensors are `state_class: measurement`, so history graphs and statistics work. The
+poll is gentle (one request per interval, single flight, 10 s timeout, never on the job
+tick's own thread) and failures are logged once per kind, not every tick.
+
+**How the login token is handled — read this once.** The poll authenticates with the
+claude.ai access token the Claude Code CLI keeps in its credential store. The add-on only
+*reads* it — it never refreshes it, because the refresh token rotates and a second
+refresher would race the CLI and could log the add-on out. The CLI renews the token only
+when it makes a model call, and an access token lives about eight hours; on an install where
+the terminal session sits idle, the token therefore expires, `api.anthropic.com` answers 401,
+and the add-on keeps serving the **last good values** with `binary_sensor.claude_usage_stale`
+on and `last_error: unauthorized` (the values never drop to zero). Anything that makes the CLI
+call the model heals it: typing in the terminal, or any scheduled job. If you want the sensors
+fresh on an otherwise idle install, use the shipped `usage-keepalive` job — one haiku turn,
+no tools, ~nothing per run — either on a schedule (the "Claude Job · run on a schedule"
+blueprint, every 6 hours is plenty) or automatically via `usage_keepalive_job:
+usage-keepalive`, which runs it at most hourly and only while the token has actually
+expired (a 401 on an unexpired token means the login was revoked: run `/login` in the
+terminal). Existing installs get the job file with `cp
+/usr/share/claudecode/jobs/usage-keepalive.md ~/.claude/jobs/`. The token itself never
+reaches Home Assistant, the package file, or the add-on log; only the derived numbers do.
+
+Turn the feature off with `enable_usage_sensors: false`: the next start renders the package
+without the usage block (delete the orphaned entities under Settings → Devices & services
+→ Entities). The endpoint answers `GET /usage` with `404 usage_disabled`. The upstream
+endpoint is undocumented and its shape may change; unknown fields are ignored and a body
+without any usage window is treated like a failed poll (last good values, stale).
 
 ## Session Persistence
 

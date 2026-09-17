@@ -12,6 +12,9 @@ It writes two files into the Home Assistant config directory (which must already
   * `/homeassistant/claudecode_jobs.yaml` (0600) — the package, rendered from
     `templates/claudecode_jobs.yaml.tmpl` with the add-on hostname, endpoint port and the endpoint
     bearer token substituted. Regenerated every boot so token rotation and hostname changes self-heal.
+    The Claude subscription usage sensors (the template's `__USAGE_BEGIN__`/`__USAGE_END__` regions)
+    are included only while the add-on option `enable_usage_sensors` is on, polling at
+    `usage_poll_interval`; the token they carry is the same endpoint token, never the OAuth one.
   * `/homeassistant/blueprints/automation/claudecode/schedule.yaml` (0644) — the static schedule
     blueprint, written only when absent or different.
 
@@ -36,6 +39,7 @@ _LIB = os.environ.get("CLAUDE_JOB_LIB_DIR") or str(pathlib.Path(__file__).resolv
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 import jobcommon as jc  # noqa: E402
+import usage  # noqa: E402
 
 TAG = "[claude-job-package]"
 PACKAGE_FILE = "claudecode_jobs.yaml"
@@ -46,6 +50,7 @@ EXCLUDE_LINE = "/" + PACKAGE_FILE
 TOKEN_RE = re.compile(r"^[0-9a-f]{%d}$" % jc.TOKEN_HEX_CHARS)
 HOSTNAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 PLACEHOLDER_RE = re.compile(r"__[A-Z_]+__")
+USAGE_BEGIN, USAGE_END = "__USAGE_BEGIN__", "__USAGE_END__"     # comment-line markers around optional regions
 GENERATED_MARKER = "GENERATED"          # the one header line carrying the timestamp contains this word
 GIT_TIMEOUT_S = 10
 RELOAD_TIMEOUT_S = 10
@@ -116,15 +121,42 @@ def discover_hostname(log: Log) -> str:
 
 
 # ---- rendering -------------------------------------------------------------------------------
+def select_regions(template: str, *, usage_enabled: bool) -> str:
+    """Resolve the `# __USAGE_BEGIN__` … `# __USAGE_END__` regions: keep their content (marker lines
+    dropped) when the usage sensors are on, drop the whole region when off. An unbalanced marker
+    is a template bug and raises."""
+    out, inside = [], False
+    for line in template.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("#") and USAGE_BEGIN in stripped:
+            if inside:
+                raise ValueError("nested __USAGE_BEGIN__ in the package template")
+            inside = True
+            continue
+        if stripped.startswith("#") and USAGE_END in stripped:
+            if not inside:
+                raise ValueError("__USAGE_END__ without __USAGE_BEGIN__ in the package template")
+            inside = False
+            continue
+        if inside and not usage_enabled:
+            continue
+        out.append(line)
+    if inside:
+        raise ValueError("unterminated __USAGE_BEGIN__ in the package template")
+    return "".join(out)
+
+
 def render(template: str, *, host: str, port: int, token: str, scan_interval: int,
-           version: str, generated_at: str) -> str:
+           version: str, generated_at: str, usage_enabled: bool = True,
+           usage_scan_interval: int | None = None) -> str:
     """Plain str.replace — the template is full of Jinja braces and `$`, so no format()/Template."""
-    out = template
+    out = select_regions(template, usage_enabled=usage_enabled)
     for placeholder, value in (
         ("__CLAUDECODE_HOST__", host),
         ("__CLAUDECODE_PORT__", str(int(port))),
         ("__CLAUDECODE_TOKEN__", token),
         ("__SCAN_INTERVAL__", str(int(scan_interval))),
+        ("__USAGE_SCAN_INTERVAL__", str(int(usage_scan_interval or jc.USAGE_POLL_INTERVAL_S))),
         ("__ADDON_VERSION__", version),
         ("__GENERATED_AT__", generated_at),
     ):
@@ -263,6 +295,12 @@ def parse_args(argv):
     p.add_argument("--port", type=int, default=jc.JOB_ENDPOINT_PORT)
     p.add_argument("--scan-interval", type=int, default=jc.JOB_ANCHOR_SCAN_INTERVAL_S,
                    help="seconds between GET /jobs polls of the anchor sensor")
+    options = jc.addon_options()
+    p.add_argument("--usage", dest="usage", action="store_true", default=usage.option_enabled(options),
+                   help="include the Claude subscription usage sensors (default: add-on option enable_usage_sensors)")
+    p.add_argument("--no-usage", dest="usage", action="store_false", help="leave the usage sensors out")
+    p.add_argument("--usage-scan-interval", type=int, default=usage.option_interval(options),
+                   help="seconds between GET /usage polls (default: add-on option usage_poll_interval)")
     p.add_argument("--out", type=pathlib.Path, default=ha_config / PACKAGE_FILE)
     p.add_argument("--blueprint-out", type=pathlib.Path, default=ha_config / BLUEPRINT_REL_PATH)
     p.add_argument("--no-git-guard", action="store_true")
@@ -278,8 +316,8 @@ def main(argv=None) -> int:
     token = read_token(args.token_file, log)
     if token is None:
         return EXIT_NOTHING
-    if not 1 <= args.port <= 65535 or args.scan_interval < 1:
-        log.error("--port must be 1..65535 and --scan-interval a positive number of seconds")
+    if not 1 <= args.port <= 65535 or args.scan_interval < 1 or args.usage_scan_interval < 1:
+        log.error("--port must be 1..65535 and --scan-interval/--usage-scan-interval positive numbers of seconds")
         return EXIT_NOTHING
     host = args.hostname if args.hostname else discover_hostname(log)
     if not HOSTNAME_RE.match(host or ""):
@@ -292,8 +330,13 @@ def main(argv=None) -> int:
     except OSError as exc:
         log.error(f"cannot read package template: {exc}")
         return EXIT_NOTHING
-    rendered = render(template, host=host, port=args.port, token=token, scan_interval=args.scan_interval,
-                      version=jc.addon_version(), generated_at=jc.now_iso())
+    try:
+        rendered = render(template, host=host, port=args.port, token=token, scan_interval=args.scan_interval,
+                          version=jc.addon_version(), generated_at=jc.now_iso(), usage_enabled=args.usage,
+                          usage_scan_interval=args.usage_scan_interval)
+    except ValueError as exc:
+        log.error(f"internal error: {exc}; nothing written")
+        return EXIT_NOTHING
     leftover = PLACEHOLDER_RE.search(rendered)
     if leftover:
         log.error(f"internal error: placeholder {leftover.group(0)} left in the rendered package; nothing written")
@@ -314,7 +357,8 @@ def main(argv=None) -> int:
     except OSError as exc:
         log.error(f"cannot write {args.out}: {exc}")
         return EXIT_NOTHING
-    log.info(f"wrote {args.out} (host {host}, port {args.port}, "
+    log.info(f"wrote {args.out} (host {host}, port {args.port}, usage sensors "
+             f"{'every %ds' % args.usage_scan_interval if args.usage else 'off'}, "
              f"{'content changed' if changed else 'unchanged apart from the timestamp'})")
 
     try:
