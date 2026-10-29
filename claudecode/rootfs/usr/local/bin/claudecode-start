@@ -1037,6 +1037,25 @@ start_update_watcher() {
 # the server otherwise stops to ask "Spawn mode for this project: [1/2]", and
 # with no terminal it waits there for good. same-dir is what it did before it
 # asked: sessions share the working directory, no worktrees.
+# RC_FILTER, the log filter above as an awk program, also keeps each session's
+# title (con.33): the status screen lists an attached session as
+# "https://claude.ai/code/session_<ID>?from=cli <title>" once the links are
+# flattened, or with a status word in place of the title ("Attached"). A title
+# that changes is written to $RUN_DIR/rc-titles/<ID> (only on a change), which
+# rc_sessions.py hands to the sessions sensor and the terminal's badge.
+# <ID> is letters and digits only, so it is safe as a file name.
+RC_FILTER='
+NF {
+  if (match($0, /session_[A-Za-z0-9]+(\?from=cli)?[ \t]+/)) {
+    seg = substr($0, RSTART, RLENGTH); rest = substr($0, RSTART + RLENGTH)
+    match(seg, /^session_[A-Za-z0-9]+/); id = substr(seg, 9, RLENGTH - 8)
+    gsub(/^[ \t]+|[ \t]+$/, "", rest)
+    if (id != "" && rest != "" && rest !~ /^(Attached|Detached|Connecting|Connected|Reconnecting|Disconnected|Starting|Working|Idle|Running|Waiting|Closed|Ended|Failed|Error)$/ && title[id] != rest) {
+      title[id] = rest; f = titles "/" id; print substr(rest, 1, 200) > f; close(f)
+    }
+  }
+  t = systime(); if (!($0 in seen) || t - seen[$0] > 30) { print "[rc-server] " $0; fflush() }; seen[$0] = t
+}'
 start_rc_server() {
   [ "$RC_SERVER" = "true" ] || return 0
   if [ "$CLAUDE_OK" != "true" ]; then
@@ -1047,11 +1066,12 @@ start_rc_server() {
   (
     trap - INT QUIT
     rm -f "$RUN_DIR/rc-restart"   # left by a watcher that was stopped mid-restart
+    rm -rf "$RUN_DIR/rc-titles"; mkdir -p "$RUN_DIR/rc-titles"   # the titles of this boot's sessions (RC_FILTER)
     while [ ! -e "$RUN_DIR/stopping" ]; do
       claude remote-control --permission-mode "$DEFAULT_MODE" --name "$RC_PREFIX" --spawn same-dir \
           --remote-control-session-name-prefix "$RC_PREFIX" < /dev/null \
           > >(sed -u 's/\x1b\]8;;\([^\x1b\x07]*\)\(\x1b\\\|\x07\)/\1 /g; s/\x1b\[[0-9;?]*[A-Za-z]//g' \
-               | awk 'NF { t = systime(); if (!($0 in seen) || t - seen[$0] > 30) { print "[rc-server] " $0; fflush() }; seen[$0] = t }') 2>&1 &
+               | awk -v titles="$RUN_DIR/rc-titles" "$RC_FILTER") 2>&1 &
       pid=$!
       echo "$pid" > "$RUN_DIR/rc-server.pid"
       wait "$pid"

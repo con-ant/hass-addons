@@ -3,8 +3,9 @@ remote_control_server on, sessions started from claude.ai/code or the Claude
 app run headless beside the terminal session: the terminal cannot show them,
 and they are switched to in the app. This badge, left of the settings gear,
 says they exist: "2 app sessions", with a pulsing dot while one is mid-turn.
-Clicking it lists them, each linking to its page on claude.ai/code. The session the server
-creates at start counts only once someone has used it.
+Clicking it lists them, each linking to its page on claude.ai/code, by the title claude.ai
+shows (con.33; "Session N" until it has one). The session the server creates at start is listed
+as the server's own and counts only once someone has used it.
 
 It reads sensor.claude_remote_control_sessions (the generated package's REST
 sensor over the job endpoint's GET /sessions) from the Home Assistant window
@@ -27,6 +28,7 @@ the package not included) and while no session runs. -->
   #ha-rc-list a { display: flex; justify-content: space-between; gap: 14px; padding: 7px 8px; border-radius: 6px;
     color: inherit; text-decoration: none; }
   #ha-rc-list a:hover, #ha-rc-list a:focus-visible { background: #313244; }
+  #ha-rc-list a b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }   /* a long title */
   #ha-rc-list span { color: #a6adc8; white-space: nowrap; }
   #ha-rc-list .busy span { color: #a6e3a1; }
 </style>
@@ -63,8 +65,8 @@ the package not included) and while no session runs. -->
       a.href = id ? 'https://claude.ai/code/session_' + id.slice(4) : 'https://claude.ai/code';
       a.target = '_blank'; a.rel = 'noopener';
       a.className = s.state === 'busy' ? 'busy' : '';
-      name.textContent = 'Session ' + (i + 1);
-      name.title = id || 'pid ' + s.pid;
+      name.textContent = s.server_session ? 'Server\u2019s own session' : s.title || 'Session ' + (i + 1);
+      name.title = [s.server_session ? s.title : null, id || 'pid ' + s.pid].filter(Boolean).join(' \u00b7 ');
       var last = Math.max(s.last_stop || 0, s.last_prompt || 0, s.started || 0);
       state.textContent = s.state === 'busy' ? 'working' : last ? 'idle, last active ' + ago(now - last) : 'idle';
       a.appendChild(name); a.appendChild(state); list.appendChild(a);
@@ -72,8 +74,8 @@ the package not included) and while no session runs. -->
   }
   function update() {
     sessions = read();
-    var n = sessions.length, busy = sessions.some(function (s) { return s.state === 'busy'; });
-    badge.hidden = n === 0;
+    var n = sessions.filter(function (s) { return !s.server_session || s.last_prompt; }).length, busy = sessions.some(function (s) { return s.state === 'busy'; });
+    badge.hidden = n === 0;      // the server's own, unused, does not make the badge appear
     badge.classList.toggle('busy', busy);
     badge.lastChild.textContent = n + (n === 1 ? ' app session' : ' app sessions');
     badge.title = busy ? 'A session started from the app is working' : 'Sessions started from claude.ai/code or the Claude app';

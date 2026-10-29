@@ -10,17 +10,20 @@ import fcntl
 import http.client
 import json
 import os
+import pathlib
+import re
 import shutil
 import signal
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
 from testlib import ScratchRoot, run_cli, wait_for, ENDPOINT, HEALTH_CHECK_FM, MINIMAL_FM, \
-    SUPERVISOR_TOKEN, ADDON_VERSION, BUILT_CLI_VERSION, TESTS_DIR
+    SUPERVISOR_TOKEN, ADDON_VERSION, BUILT_CLI_VERSION, TESTS_DIR, ADDON
 from fakes.fake_supervisor import FakeSupervisor
 import jobcommon as jc
 import jobdef
@@ -494,6 +497,67 @@ class TestHTTP(EndpointCase):
             self.assertEqual((status, body), (200, {"republished": 0, "failed": n_states + 1}))
         finally:
             self.sup.unroute("POST", "/core/api/states/")
+
+    def test_sessions_route_titles_and_the_servers_own_session(self):
+        """With the server's bridge-pointer.json the server's own session is known exactly: listed as
+        server_session and not counted until prompted, while an app session counts before its first
+        prompt; titles come from RUN_DIR/rc-titles/<ID> (the log filter's)."""
+        opts = json.loads(self.s.options_file.read_text())
+        procs, titles = self.s.run_dir / "procs", self.s.run_dir / "rc-titles"
+        key = re.sub(r"[^A-Za-z0-9-]", "-", os.getcwd())      # this test process plays the server: its cwd keys the pointer
+        pointer = self.s.home / ".claude" / "projects" / key / "bridge-pointer.json"
+        kids = []
+        try:
+            self.s.options_file.write_text(json.dumps(dict(opts, remote_control_server=True)))
+            (self.s.run_dir / "rc-server.pid").write_text(f"{os.getpid()}\n")
+            for sid in ("cse_01own", "cse_01new", "cse_01titled"):
+                kids.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                                              "--print", "--session-id", sid]))
+            now = int(time.time())
+            for kid in kids:
+                (procs / str(kid.pid)).mkdir(parents=True)
+            (procs / str(kids[2].pid) / "last-prompt").write_text(f"{now - 50}\n")
+            (procs / str(kids[2].pid) / "last-stop").write_text(f"{now - 40}\n")
+            titles.mkdir(parents=True, exist_ok=True)
+            (titles / "01titled").write_text("Game addition to leoarcade\n")
+            time.sleep(0.2)
+            # no pointer: the unprompted ones may be the server's own, so only the prompted one is listed
+            snap = self.get("/sessions")[1]
+            self.assertEqual(([x["id"] for x in snap["sessions"]], snap["count"]), (["cse_01titled"], 1))
+            self.assertEqual((snap["sessions"][0]["title"], snap["sessions"][0]["server_session"]), ("Game addition to leoarcade", False))
+            pointer.parent.mkdir(parents=True)
+            pointer.write_text(json.dumps({"sessionId": "session_01own", "environmentId": "env_01x", "source": "standalone"}))
+            snap = self.get("/sessions")[1]
+            by_id = {x["id"]: x for x in snap["sessions"]}
+            self.assertEqual(sorted(by_id), ["cse_01new", "cse_01own", "cse_01titled"])
+            self.assertEqual((by_id["cse_01own"]["server_session"], by_id["cse_01new"]["server_session"]), (True, False))
+            self.assertEqual((by_id["cse_01new"]["title"], by_id["cse_01new"]["last_prompt"]), (None, None))
+            self.assertEqual(snap["count"], 2, "the app's new session counts before its first prompt; the server's own does not")
+            (procs / str(kids[0].pid) / "last-prompt").write_text(f"{now}\n")
+            self.assertEqual(self.get("/sessions")[1]["count"], 3, "the server's own counts once someone uses it")
+        finally:
+            for kid in kids:
+                kid.kill()
+                kid.wait()
+            self.s.options_file.write_text(json.dumps(opts))
+            shutil.rmtree(procs, ignore_errors=True)
+            shutil.rmtree(titles, ignore_errors=True)
+            shutil.rmtree(self.s.home / ".claude" / "projects", ignore_errors=True)
+
+    def test_rc_server_filter_records_titles_not_status_words(self):
+        """claudecode-start's RC_FILTER: a session's title goes to rc-titles/<ID> when it changes; status
+        words are not titles; lines are still logged with the [rc-server] prefix."""
+        start = (ADDON / "rootfs" / "usr" / "local" / "bin" / "claudecode-start").read_text()
+        prog = re.search(r"^RC_FILTER='(.*?)^}'", start, re.S | re.M).group(1) + "}"
+        lines = ["    https://claude.ai/code/session_01AbC?from=cli Game addition to leoarcade",
+                 "    https://claude.ai/code/session_01AbC?from=cli Attached",
+                 "    https://claude.ai/code/session_02XyZ?from=cli   iris-lucky-orbit  ",
+                 "Capacity: 1/32", "    https://claude.ai/code/session_03Q?from=cli Connecting"]
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(["awk", "-v", f"titles={d}", prog], input="\n".join(lines) + "\n", capture_output=True, text=True, check=True)
+            got = {f: (pathlib.Path(d) / f).read_text().strip() for f in sorted(os.listdir(d))}
+        self.assertEqual(got, {"01AbC": "Game addition to leoarcade", "02XyZ": "iris-lucky-orbit"})
+        self.assertEqual(r.stdout.splitlines()[3], "[rc-server] Capacity: 1/32")
 
     def test_sessions_route_lists_the_remote_control_servers_live_children(self):
         """remote_control_server off -> "off"; on without a live server pid -> "stopped"; on with one
