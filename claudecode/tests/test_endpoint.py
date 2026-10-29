@@ -511,8 +511,8 @@ class TestHTTP(EndpointCase):
             for sid in ("cse_busy", "cse_idle"):
                 kids.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
                                               "--print", "--session-id", sid]))
-            # a session one process further down (an intermediate parent), and a session that has
-            # never taken a prompt (the server pre-created one of those before con.31)
+            # a session one process further down (an intermediate parent), and the server's pre-created
+            # session, which has never taken a prompt
             gc_file = self.s.run_dir / "grandchild.pid"
             kids.append(subprocess.Popen([sys.executable, "-c",
                                           "import subprocess, sys, time; k = subprocess.Popen([sys.executable, '-c', "

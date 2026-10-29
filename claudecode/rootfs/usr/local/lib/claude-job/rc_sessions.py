@@ -9,10 +9,9 @@ and Home Assistant can say they exist and whether one is working.
 claude-session-hook keeps per Claude process outside tmux: RUN_DIR/procs/<pid>/ (created at
 SessionStart; last-prompt / last-stop epochs per turn). A pid counts while it is alive, descends from
 the server's pid (RUN_DIR/rc-server.pid; any depth, like the update watcher's server_idle(), so a release
-that spawns sessions through an intermediate process still counts them) and has taken a prompt: a
-session nobody has used yet is not one anyone is working in (the server ran with a pre-created
-session until con.31, which would have made the sensor read 1 on every box with the server on).
-Without apply_claude_updates the hooks are not
+that spawns sessions through an intermediate process still counts them) and has taken a prompt: the
+server pre-creates one session at start, which nobody may ever open, and counting it would make the
+sensor read 1 on every box with the server on. Without apply_claude_updates the hooks are not
 installed and the list stays empty while the server itself still reports as running.
 """
 import os
@@ -106,7 +105,7 @@ def snapshot(run_dir, enabled, proc="/proc", now=None):
             continue
         lp = _read_int(f"{run_dir}/procs/{pid}/last-prompt")
         if not lp:
-            continue                                  # never prompted: nobody is working in it yet
+            continue                                  # never prompted: the server's pre-created session
         ls = _read_int(f"{run_dir}/procs/{pid}/last-stop")
         started = boot + start_ticks // hz if boot else None
         busy = lp > ls and now - lp < STALE_TURN_S

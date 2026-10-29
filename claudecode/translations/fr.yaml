@@ -104,8 +104,9 @@ configuration:
       Préfixe des noms de session de Contrôle à Distance générés automatiquement,
       visibles sur claude.ai/code et dans l'application mobile Claude. La valeur
       par défaut est « HomeAssistant », produisant des noms comme
-      « HomeAssistant-graceful-unicorn ». S'applique lorsque le Contrôle à
-      Distance ou le serveur Remote Control est activé.
+      « HomeAssistant-graceful-unicorn ». Avec le serveur Remote Control activé,
+      c'est aussi le titre de la session propre au serveur. S'applique lorsque
+      le Contrôle à Distance ou le serveur Remote Control est activé.
 
   remote_control_server:
     name: Serveur Remote Control

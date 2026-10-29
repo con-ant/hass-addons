@@ -1021,10 +1021,22 @@ start_update_watcher() {
 # the log, while a session that detaches and comes back, or an error that
 # recurs, is logged again. (Dropping only consecutive repeats would not help:
 # the repaint is a block of lines, so no line ever follows itself.)
-# --no-create-session-in-dir: by default the server pre-creates one session in
-# the working directory at start, which nobody may ever open; without it the
-# session list at claude.ai/code only holds sessions someone started. The
-# prefix flag names those on-demand sessions (prefix-adjective-noun).
+# --name gives the session the server pre-creates at start the configured
+# prefix as its title, so it is recognisable in the session list and keeps
+# that title (an unnamed session is retitled from its first prompt). The
+# subcommand has no positional name; the prefix flag still names the sessions
+# started on demand (prefix-adjective-noun).
+# The pre-created session is also what keeps the server's environment across
+# restarts: the server records it (environment and session ids) in
+# ~/.claude/projects/<cwd>/bridge-pointer.json, says "Environment preserved"
+# when stopped, and the next start rejoins the same env_, so sessions started
+# from the app reattach after an add-on restart or update. With
+# --no-create-session-in-dir (con.31) no pointer is written and every start
+# registers a new environment (seen on 2.1.308 in claude-code-remote-container).
+# --spawn same-dir: in a git working directory (/homeassistant usually is one)
+# the server otherwise stops to ask "Spawn mode for this project: [1/2]", and
+# with no terminal it waits there for good. same-dir is what it did before it
+# asked: sessions share the working directory, no worktrees.
 start_rc_server() {
   [ "$RC_SERVER" = "true" ] || return 0
   if [ "$CLAUDE_OK" != "true" ]; then
@@ -1036,7 +1048,7 @@ start_rc_server() {
     trap - INT QUIT
     rm -f "$RUN_DIR/rc-restart"   # left by a watcher that was stopped mid-restart
     while [ ! -e "$RUN_DIR/stopping" ]; do
-      claude remote-control --permission-mode "$DEFAULT_MODE" --no-create-session-in-dir \
+      claude remote-control --permission-mode "$DEFAULT_MODE" --name "$RC_PREFIX" --spawn same-dir \
           --remote-control-session-name-prefix "$RC_PREFIX" < /dev/null \
           > >(sed -u 's/\x1b\]8;;\([^\x1b\x07]*\)\(\x1b\\\|\x07\)/\1 /g; s/\x1b\[[0-9;?]*[A-Za-z]//g' \
                | awk 'NF { t = systime(); if (!($0 in seen) || t - seen[$0] > 30) { print "[rc-server] " $0; fflush() }; seen[$0] = t }') 2>&1 &

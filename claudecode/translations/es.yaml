@@ -98,7 +98,9 @@ configuration:
       Prefijo para los nombres de sesión de Control Remoto generados automáticamente,
       visibles en claude.ai/code y la app móvil de Claude. El predeterminado es
       "HomeAssistant", produciendo nombres como "HomeAssistant-graceful-unicorn".
-      Aplica cuando Control Remoto o el servidor de Control Remoto está habilitado.
+      Con el servidor de Control Remoto activado, también es el título de la
+      sesión propia del servidor. Aplica cuando Control Remoto o el servidor de
+      Control Remoto está habilitado.
 
   remote_control_server:
     name: Servidor de Remote Control

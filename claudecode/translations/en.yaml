@@ -91,8 +91,9 @@ configuration:
     description: >-
       Prefix for auto-generated Remote Control session names visible in claude.ai/code
       and the Claude mobile app. Defaults to "HomeAssistant", producing names like
-      "HomeAssistant-graceful-unicorn". Applies when Enable Remote Control or the
-      Remote Control server is on.
+      "HomeAssistant-graceful-unicorn". With the Remote Control server on, it is
+      also the title of the server's own session. Applies when Enable Remote
+      Control or the Remote Control server is on.
 
   remote_control_server:
     name: Remote Control server

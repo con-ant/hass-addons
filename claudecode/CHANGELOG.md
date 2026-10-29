@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.32] - 2026-10-28
+
+### Fixed
+- **Sessions started from the app reattach after a restart again.** con.31 ran
+  the Remote Control server with `--no-create-session-in-dir`, and without the
+  session it pre-creates the server keeps no record of its environment
+  (`bridge-pointer.json`): every start registered a new one, so sessions
+  started from claude.ai/code or the app were not reattached after an add-on
+  restart or update. The server pre-creates its session again, titled with
+  `remote_control_session_prefix` (`--name`, as in con.30); the sessions
+  sensor and badge still count it only once someone has prompted it. Found on
+  claude-code-remote-container by Constantinos Michael (Claude Code 2.1.308:
+  two starts with the flag, two environments; without it, the same one).
+- **The server no longer waits on a question in a git working directory.**
+  `claude remote-control` asks "Spawn mode for this project" when the working
+  directory is a git repository (`/homeassistant` often is), and with no
+  terminal it waits for good. It now runs with `--spawn same-dir`, what it did
+  before it asked.
+
 ## [1.2.65-con.31] - 2026-10-28
 
 ### Changed

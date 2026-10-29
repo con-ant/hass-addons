@@ -98,8 +98,9 @@ configuration:
       Prefixo para os nomes de sessão de Controle Remoto gerados automaticamente,
       visíveis em claude.ai/code e no app móvel do Claude. O padrão é
       "HomeAssistant", produzindo nomes como "HomeAssistant-graceful-unicorn".
-      Aplica-se quando o Controle Remoto ou o servidor de Controle Remoto está
-      habilitado.
+      Com o servidor de Controle Remoto ativado, é também o título da sessão
+      própria do servidor. Aplica-se quando o Controle Remoto ou o servidor de
+      Controle Remoto está habilitado.
 
   remote_control_server:
     name: Servidor de Remote Control
