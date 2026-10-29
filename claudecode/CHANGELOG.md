@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- GitHub Actions workflow `.github/workflows/tests.yml`: `make test` on every pull
+  request and on `main` (Python 3.13 as in the base image, plus gawk for the
+  Remote Control log filter's `systime()`). Read-only permissions. No add-on
+  changes, no version bump. Proposed by Constantinos Michael on #58.
+
+### Fixed
+- `test_short_body_times_out_with_408_not_500` read the 408 reply with a single
+  `recv`, which on the GitHub runner returned the headers without the body (the
+  endpoint writes them separately); it now reads until the server closes, as
+  `raw_exchange` does. Test only.
+
 ## [1.2.65-con.32] - 2026-10-28
 
 ### Fixed
