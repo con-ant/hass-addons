@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- GitHub Actions workflow `.github/workflows/tests.yml`: `make test` on every pull
+  request and on `main` (Python 3.13 as in the base image, plus gawk for the
+  Remote Control log filter's `systime()`). Read-only permissions. No add-on
+  changes, no version bump. Proposed by Constantinos Michael on #58.
+
 ## [1.2.65-con.32] - 2026-10-28
 
 ### Fixed
