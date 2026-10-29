@@ -313,7 +313,16 @@ class TestHTTP(EndpointCase):
         with socket.create_connection(("127.0.0.1", self.ep.port), timeout=10) as sock:
             sock.sendall(b"POST /jobs/framing/run HTTP/1.1\r\nHost: x\r\n" + auth + b"Content-Length: 100\r\n\r\n{")
             sock.shutdown(socket.SHUT_WR)          # body ends 99 bytes short
-            reply = sock.recv(65536)
+            chunks = []                            # headers and body are separate writes: read until the close
+            while True:
+                try:
+                    b = sock.recv(65536)
+                except (ConnectionResetError, socket.timeout):
+                    break
+                if not b:
+                    break
+                chunks.append(b)
+            reply = b"".join(chunks)
         self.assertIn(b" 408 ", reply.split(b"\r\n", 1)[0])
         self.assertIn(b'{"error":"request_timeout"}', reply)
 
