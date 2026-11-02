@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.34] - 2026-11-02
+
+### Changed
+- **App sessions show their titles.** The Remote Control server's status
+  screen lists each attached session with the title claude.ai and the app
+  show it by; the server's log filter now records each title when it changes
+  (`$RUN_DIR/rc-titles/<ID>`; "Attached", printed for a session with no title,
+  is left out), and the sessions sensor (`title`) and the terminal's badge use
+  it instead of "Session N", which stays as the fallback. The title is exactly
+  the status line's link text, cut to 35 characters by the server; the activity
+  summary a working session shows after it is left out, so the title is not
+  rewritten on every tool call.
+- **The server's own session is known exactly.** The server records its
+  session in `bridge-pointer.json` under its working directory's project
+  folder (as `session_<ID>` or `cse_<ID>`; a pointer from an earlier server run
+  is ignored); the sensor marks that session `server_session` and the badge lists
+  it as the server's own. It counts once someone has prompted it, as before,
+  and every other session now counts from the start, so a session opened from
+  the app shows before its first prompt. Without the pointer, unprompted
+  sessions are still left out. Both from claude-code-remote-container
+  (Constantinos Michael), which does the same.
+
 ## [1.2.65-con.33] - 2026-11-01
 
 Takes the two fixes from upstream v1.2.66 that this fork was missing and
