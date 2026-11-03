@@ -29,6 +29,7 @@ set -eu
 SPEC="${CLAUDE_CODE_VERSION:-stable}"
 MANIFEST="${CLAUDE_CODE_MANIFEST:-/tmp/claude-code-manifest.json}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-30}"
+VERSION_FILE="${CLAUDE_CODE_VERSION_FILE:-/etc/claude-code-version}"   # tests point this elsewhere
 VERSIONS=/tmp/claude-versions
 
 smoke() { timeout "$SMOKE_TIMEOUT" claude --version < /dev/null > /dev/null 2>&1; }
@@ -46,7 +47,7 @@ fi
 
 # Fast path: the channel's release runs here. Take it and skip the search.
 if try "$target"; then
-  echo "$target" > /etc/claude-code-version
+  echo "$target" > "$VERSION_FILE"
   echo "[install] claude-code $target ($SPEC, verified)"
   exit 0
 fi
@@ -82,5 +83,5 @@ done
 
 npm i -g --no-fund --no-audit "@anthropic-ai/claude-code@$best" > /dev/null 2>&1
 smoke || { echo "[install] $best passed during search but fails now"; exit 1; }
-echo "$best" > /etc/claude-code-version
+echo "$best" > "$VERSION_FILE"
 echo "[install] claude-code $best (newest working; $target from $SPEC does not run here)"

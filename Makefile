@@ -1,4 +1,4 @@
-# Repo conveniences. `make test` is the one-command way to run the Claude Jobs
+# Repo conveniences. `make test` is the one-command way to run the add-on's
 # test-suite: it installs the test dependencies and runs unittest discovery from
 # the right directory (the suite must run from claudecode/ so testlib is
 # importable; dotted module names like `python3 -m unittest tests.test_jobdef`

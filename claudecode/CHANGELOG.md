@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.36] - 2026-11-03
+
+Tests for the scripts the add-on shares with upstream, written so the same
+modules can go upstream first (Robson asked for the test-suite before any
+feature, upstream issue #59). The Claude Jobs suite tests code upstream does not
+have; these test code both trees have.
+
+### Added
+- `tests/test_login_url.py`: `claude-login-url` against a real tmux on a private
+  socket: a URL wrapped over several rows comes out whole, the file is mode 600,
+  the newest URL wins, and the two error paths. One case runs the helper from a
+  second window as the README says to; it fails on upstream's version of the
+  script and passes on the fixed one from con.35
+- `tests/test_stdin_runner.py`: `stdin-runner.sh` through a pipe, with a fake
+  `claude` and a local server standing in for the Supervisor: the ready event
+  and its token, a task's two events and transcript, option defaults and task
+  overrides, `prompt_file`, a missing prompt, a failing run, busy rejection,
+  abort, non-JSON lines, and exit when stdin closes
+- `tests/test_install_claude.py`: `install-claude.sh` with a fake `npm` and a
+  fake `claude` that hangs above a given release, the way a Bun-compiled release
+  does without AVX: manifest, tag and exact-version resolution, the fallback
+  search (never ahead of the channel, 2.x stable releases only), no working
+  release, an unknown tag. The script's version file takes a
+  `CLAUDE_CODE_VERSION_FILE` override for this; default unchanged
+- `tests/test_shell_syntax.py`: `bash -n` (or `sh -n`) on every shell script in
+  the add-on and on `.bashrc`
+- `tests/test_dockerfile_cmd.py`: the Dockerfile's CMD names a shipped script
+  that parses, or (upstream's shape) is a `bash -c` string rebuilt the way
+  Docker folds continuation lines and parsed with `bash -n -c`
+- `tests.yml` installs tmux for the login-url tests
+
 ## [1.2.65-con.35] - 2026-11-03
 
 Takes the two files upstream `main` (v1.2.76) has and this fork lacked, so the
