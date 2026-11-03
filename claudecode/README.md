@@ -290,7 +290,8 @@ read-only runs that report back as entities, see
   `default_task_allowed_tools` add-on options. Headless runs cannot answer
   permission prompts, so the allow-list defines what the agent may do.
 - `run_id` names the transcript, so it is kept to letters, digits, `_`, `.`
-  and `-` (anything else becomes `_`).
+  and `-` (anything else becomes `_`, and an id starting with a dot gets `task`
+  in front).
 - Runs are serialized (one at a time) and killed after
   `task_max_runtime_minutes`.
 - The add-on fires Home Assistant events your automations can react to:
