@@ -30,7 +30,7 @@ SPEC="${CLAUDE_CODE_VERSION:-stable}"
 MANIFEST="${CLAUDE_CODE_MANIFEST:-/tmp/claude-code-manifest.json}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-30}"
 VERSION_FILE="${CLAUDE_CODE_VERSION_FILE:-/etc/claude-code-version}"   # tests point this elsewhere
-VERSIONS=/tmp/claude-versions
+VERSIONS="${TMPDIR:-/tmp}/claude-versions"
 
 smoke() { timeout "$SMOKE_TIMEOUT" claude --version < /dev/null > /dev/null 2>&1; }
 try() { npm i -g --no-fund --no-audit "@anthropic-ai/claude-code@$1" > /dev/null 2>&1 && smoke; }
@@ -58,7 +58,7 @@ echo "[install] claude-code $target ($SPEC) fails its smoke test; searching for 
 # list, which no dist-tag should cause, search all of them.)
 npm view @anthropic-ai/claude-code versions --json \
   | jq -r '.[]' \
-  | grep -E '^2\.[0-9]+\.[0-9]+$' > "$VERSIONS"
+  | grep -E '^2\.[0-9]+\.[0-9]+$' > "$VERSIONS" || true   # no match is not an error here: the count below reports it
 if grep -qxF "$target" "$VERSIONS"; then
   sed -i "/^$(printf '%s' "$target" | sed 's/\./\\./g')\$/q" "$VERSIONS"
 fi

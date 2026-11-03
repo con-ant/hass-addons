@@ -33,6 +33,13 @@ have; these test code both trees have.
   Docker folds continuation lines and parsed with `bash -n -c`
 - `tests.yml` installs tmux for the login-url tests
 
+### Fixed
+- `install-claude.sh`: when the registry lists no stable 2.x release, the
+  candidate filter's empty `grep` ended the script under `set -e` before its
+  "no candidate versions found" message; the guard is live now, with a test.
+  The candidate list honours `TMPDIR`, so test runs no longer share
+  `/tmp/claude-versions` (the image build is unchanged: `TMPDIR` is unset there)
+
 ## [1.2.65-con.35] - 2026-11-03
 
 Takes the two files upstream `main` (v1.2.76) has and this fork lacked, so the

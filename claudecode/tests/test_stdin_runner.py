@@ -14,10 +14,9 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from testlib import BIN_DIR, wait_for
+from testlib import BIN_DIR, SUPERVISOR_TOKEN as TOKEN, wait_for
 
 RUNNER = BIN_DIR / "stdin-runner.sh"
-TOKEN = "test-supervisor-token"
 
 FAKE_CLAUDE = """#!/bin/bash
 # Records its argv, then acts on the prompt text (the argument after -p).
@@ -66,7 +65,8 @@ class Events:
         return [e["json"] for e in self.items if e["path"] == f"/core/api/events/{name}"]
 
     def wait(self, name, n=1, timeout=15):
-        self.assertion = wait_for(lambda: len(self.of(name)) >= n, timeout)
+        if not wait_for(lambda: len(self.of(name)) >= n, timeout):
+            raise AssertionError(f"event {name} (x{n}) not seen within {timeout}s; got {self.items}")
         return self.of(name)
 
 
@@ -113,18 +113,25 @@ class TestStdinRunner(unittest.TestCase):
     def stop(self):
         if self.proc is None:
             return
-        try:
-            with open(os.path.join(self.run_dir, "pgid"), encoding="utf-8") as f:
-                os.killpg(int(f.read().strip()), signal.SIGKILL)   # a fake claude left sleeping
-        except (OSError, ValueError):
-            pass
+        # The runner and its watcher subshell share the session start() gave them; a run's
+        # `claude` sits in its own setsid group, named by the pgid file. That file outlives
+        # the run, so only use it while a run is still active (started but not finished).
         if self.proc.poll() is None:
-            self.proc.kill()
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        if len(self.of_started()) > len(self.events.of("claudecode_run_finished")):
+            try:
+                with open(os.path.join(self.run_dir, "pgid"), encoding="utf-8") as f:
+                    os.killpg(int(f.read().strip()), signal.SIGKILL)   # a fake claude left sleeping
+            except (OSError, ValueError):
+                pass
         self.proc.wait(timeout=10)
         for pipe in (self.proc.stdin, self.proc.stdout):
             if pipe and not pipe.closed:
                 pipe.close()
         self.proc = None
+
+    def of_started(self):
+        return self.events.of("claudecode_run_started")
 
     def send(self, obj):
         line = obj if isinstance(obj, str) else json.dumps(obj)

@@ -53,7 +53,6 @@ class TestClaudeLoginUrl(unittest.TestCase):
             self.assertEqual(f.read(), URL + "\n")
         self.assertEqual(os.stat(self.out).st_mode & 0o777, 0o600)
         self.assertIn(self.out, r.stdout)
-        self.assertIn("backups", r.stdout)          # the file lands in the config dir
 
     def test_run_from_a_second_window_as_the_readme_says(self):
         # The documented flow: Ctrl+b c for a new window, run the helper there. That

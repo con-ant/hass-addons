@@ -6,6 +6,7 @@ string: Docker joins the continuation lines (a trailing backslash) before readin
 JSON array, so rebuild it the same way and parse the string with `bash -n -c`.
 """
 import json
+import re
 import subprocess
 import unittest
 
@@ -16,18 +17,23 @@ ROOTFS = ADDON / "rootfs"
 
 
 def instruction(name):
-    """The joined text of the first `name` instruction, continuation lines folded like Docker folds them."""
+    """The joined text of the last `name` instruction (the one Docker honours), continuation
+    lines folded and comment lines inside a continued instruction skipped, like Docker does."""
+    found = []
     out = []
     for line in DOCKERFILE.read_text(encoding="utf-8").splitlines():
-        if out or line.startswith(name + " ") or line.startswith(name + "\t"):
+        if out and line.lstrip().startswith("#"):
+            continue
+        if out or re.match(name + r"[ \t]", line, re.IGNORECASE):
             if line.rstrip().endswith("\\"):
                 out.append(line.rstrip()[:-1])
             else:
                 out.append(line)
-                break
-    if not out:
+                found.append("".join(out)[len(name):].strip())
+                out = []
+    if not found:
         raise AssertionError(f"no {name} instruction in {DOCKERFILE}")
-    return "".join(out)[len(name):].strip()
+    return found[-1]
 
 
 class TestDockerfileCmd(unittest.TestCase):

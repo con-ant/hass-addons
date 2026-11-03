@@ -2,7 +2,7 @@
 
 Fake `npm` and `claude` on PATH: npm "installs" by recording a version, and the fake
 claude answers `--version` only up to FAKE_CLAUDE_MAX_OK, hanging above it the way a
-Bun-compiled release hangs on a CPU without AVX. SMOKE_TIMEOUT=1 keeps each hang short.
+Bun-compiled release hangs on a CPU without AVX. SMOKE_TIMEOUT=0.5 keeps each hang short.
 """
 import json
 import os
@@ -61,7 +61,7 @@ class TestInstallClaude(unittest.TestCase):
             "FAKE_NPM_INSTALLED": self.installed, "FAKE_NPM_LOG": self.npm_log,
             "FAKE_CLAUDE_MAX_OK": "9.9.9",
             "CLAUDE_CODE_MANIFEST": self.manifest, "CLAUDE_CODE_VERSION_FILE": self.version_file,
-            "SMOKE_TIMEOUT": "1",
+            "SMOKE_TIMEOUT": "0.5", "TMPDIR": self.tmp,      # the script's candidate list goes under TMPDIR
         })
 
     def run_install(self, **env):
@@ -116,6 +116,15 @@ class TestInstallClaude(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("no working claude-code version found", out)
         self.assertFalse(os.path.exists(self.version_file))
+
+    def test_no_stable_2x_release_listed(self):
+        # The candidate filter matches nothing: say so instead of dying in the pipeline.
+        with open(self.versions, "w", encoding="utf-8") as f:
+            json.dump(["1.0.80", "2.2.0-beta.1"], f)
+        rc, out, _ = self.run_install(CLAUDE_CODE_VERSION="2.2.0-beta.1", FAKE_CLAUDE_MAX_OK="0.0.1")
+        self.assertEqual(rc, 1)
+        self.assertIn("no candidate versions found", out)
+        self.assertEqual(self.installs(), ["2.2.0-beta.1"])   # only the channel's own release was tried
 
     def test_unresolvable_tag(self):
         rc, out, _ = self.run_install(CLAUDE_CODE_VERSION="nope")
