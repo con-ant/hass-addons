@@ -1,4 +1,8 @@
 configuration:
+  enable_stdin_runner:
+    name: Habilitar execucoes headless (hassio.addon_stdin)
+    description: >-
+      Executa o runner de tarefas por stdin, para que automacoes possam enviar um prompt ao Claude com a acao hassio.addon_stdin. Desligado por padrao: essa execucao roda como root com as ferramentas que tiver permitidas. Para execucoes agendadas protegidas e somente leitura, use Claude Jobs.
   default_task_model:
     name: Modelo padrao da tarefa
     description: >-

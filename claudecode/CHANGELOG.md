@@ -16,13 +16,22 @@ offered upstream as one piece (upstream issue #59).
   `task_max_runtime_minutes`, writes the transcript to the add-on config
   directory and fires `claudecode_run_started`, `claudecode_run_finished`,
   `claudecode_run_rejected` and `claudecode_runner_ready` events; `{"abort":
-  true}` kills the active run. New options `default_task_model`,
-  `default_task_allowed_tools` and `task_max_runtime_minutes`, translated in
-  all four languages; `stdin: true` keeps the container's stdin open. The runner
-  starts after the Remote Control server and is stopped first on the way down.
-  Its paths and the Supervisor address take `STDIN_RUNNER_*` overrides so it can
-  be tested without a Supervisor; defaults unchanged. Claude Jobs are untouched:
-  the two coexist, and the README says which to use for what
+  true}` kills the active run. **Off by default in this fork**, behind the new
+  `enable_stdin_runner` option: such a run executes as root with whatever tools
+  it is allowed, and Claude Jobs are the guarded path. Options
+  `default_task_model`, `default_task_allowed_tools` and
+  `task_max_runtime_minutes` as upstream, all translated in four languages;
+  `stdin: true` keeps the container's stdin open. The runner starts after the
+  Remote Control server and is stopped first on the way down. Three fixes over
+  upstream's script, from this PR's review: the run gets `--permission-mode
+  dontAsk`, so the allow-list is the only gate as the docs claim and the
+  terminal's `default_permission_mode` (auto here) cannot leak into an
+  unattended run; `run_id` is reduced to one path component before it names
+  the transcript (an id with `/` or `..` could write outside the log
+  directory); `timeout -k 30` kills a run that ignores TERM instead of leaving
+  the runner busy forever. Its paths and the Supervisor address take
+  `STDIN_RUNNER_*` overrides so it can be tested without a Supervisor;
+  defaults unchanged
 - `claude-login-url` (robsonfelix/robsonfelix-hass-addons#38 by raketemensch,
   v1.2.73): writes the OAuth
   login URL from the tmux scrollback to `/homeassistant/claude-login-url.txt`
@@ -37,7 +46,7 @@ offered upstream as one piece (upstream issue #59).
 
 ### Changed
 - `tests.yml` checks out with `actions/checkout@v7`, as upstream does
-- auto-monocle: upstream's 0.1.12 (es and pt-BR translations for `stream_quality`, config tidy), which the new options check requires
+- auto-monocle: upstream's 0.1.12 (es and pt-BR translations for `stream_quality`, config tidy), which the new options check requires; the image labels and the README support link keep pointing at this repository
 - `init: true` dropped from `config.yaml` (and `boot: auto`, `ingress: false` from the Pomerium add-on's): the add-on linter rejects keys that restate the Supervisor's defaults. No behaviour change; the container still runs under tini
 
 ## [1.2.65-con.34] - 2026-11-02

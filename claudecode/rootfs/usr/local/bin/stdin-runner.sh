@@ -73,6 +73,10 @@ while IFS= read -r line; do
 
     # ---- task ------------------------------------------------------------
     RUN_ID=$(jq -r '.run_id // "task"' <<< "$line")
+    # The id names the log file, so keep it to one path component: anything
+    # else becomes "_", and an empty or dot-only id falls back to "task".
+    RUN_ID=$(printf '%s' "$RUN_ID" | tr -c 'A-Za-z0-9_.-' '_')
+    case "$RUN_ID" in ""|.|..|.*) RUN_ID="task${RUN_ID}" ;; esac
     if run_active; then
         echo "[WARN] task runner: busy - rejecting '$RUN_ID'"
         fire_event claudecode_run_rejected \
@@ -109,6 +113,11 @@ while IFS= read -r line; do
 
     (
         START=$(date +%s)
+        # dontAsk: a headless run cannot answer a permission prompt, so only the
+        # allow-list (task, option, or settings.json) grants a tool; the terminal
+        # default permission mode (auto, bypassPermissions) must not leak in.
+        # timeout -k: a claude that ignores TERM is killed 30s later, or the
+        # runner would stay busy forever.
         setsid bash -c '
             echo $$ > '"$RUN_DIR"'/pgid
             ARGS=(-p "$(cat '"$RUN_DIR"'/prompt)")
@@ -117,7 +126,7 @@ while IFS= read -r line; do
             while IFS= read -r tool; do
                 ARGS+=(--allowedTools "$tool")
             done < <(jq -r ".[]" '"$RUN_DIR"'/tools)
-            exec timeout '"$((MAX_MINUTES * 60))"' claude "${ARGS[@]}"
+            exec timeout -k 30 '"$((MAX_MINUTES * 60))"' claude --permission-mode dontAsk "${ARGS[@]}"
         ' > "$LOG_FILE" 2>&1
         CODE=$?
         DURATION=$(( $(date +%s) - START ))

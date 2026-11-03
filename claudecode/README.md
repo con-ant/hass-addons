@@ -100,6 +100,7 @@ Options are on the add-on's **Configuration** tab: **Settings → Apps → Claud
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `enable_stdin_runner` | Run the stdin task runner so automations can send prompts with `hassio.addon_stdin`. Off by default: such a run executes as root with whatever tools it is allowed, with no cost cap and no read-only guarantee. See [Headless runs](#headless-runs-from-automations) and, for the guarded path, [Scheduled jobs](#scheduled-jobs-claude-jobs) | false |
 | `default_task_model` | Model for headless runs started with `hassio.addon_stdin` when the task names none; empty = Claude Code's default. See [Headless runs](#headless-runs-from-automations) | "" |
 | `default_task_allowed_tools` | Tools a headless run may use when the task brings no list of its own. Headless runs cannot answer permission prompts, so anything not allowed here (or in the task) is denied | `[]` |
 | `task_max_runtime_minutes` | A headless run is killed after this many minutes (1-240) | 30 |
@@ -258,12 +259,15 @@ in [`docs/DESIGN-claude-jobs.md`](docs/DESIGN-claude-jobs.md).
 
 ## Headless runs from automations
 
-Any Home Assistant automation can start a headless Claude Code session and
-pass the entire task as data, using the built-in `hassio.addon_stdin`
-service. (For recurring, read-only runs that report back as entities, see
-[Scheduled jobs](#scheduled-jobs-claude-jobs); the two coexist, and a task sent
-this way runs with whatever tools it is allowed, so keep `default_task_allowed_tools`
-tight.)
+With `enable_stdin_runner: true` (off by default), any Home Assistant automation
+can start a headless Claude Code session and pass the entire task as data, using
+the built-in `hassio.addon_stdin` service. The run executes as root in
+`/homeassistant` in `dontAsk` permission mode: only tools on the allow-list (the
+task's, `default_task_allowed_tools`, or `settings.json`) are granted, everything
+else is denied without asking, whatever `default_permission_mode` says for the
+terminal. There is no cost cap and no read-only guarantee; for recurring,
+read-only runs that report back as entities, see
+[Scheduled jobs](#scheduled-jobs-claude-jobs). The two coexist.
 
 ```yaml
 - action: hassio.addon_stdin
@@ -285,6 +289,8 @@ tight.)
 - `model` and `allowed_tools` fall back to the `default_task_model` /
   `default_task_allowed_tools` add-on options. Headless runs cannot answer
   permission prompts, so the allow-list defines what the agent may do.
+- `run_id` names the transcript, so it is kept to letters, digits, `_`, `.`
+  and `-` (anything else becomes `_`).
 - Runs are serialized (one at a time) and killed after
   `task_max_runtime_minutes`.
 - The add-on fires Home Assistant events your automations can react to:

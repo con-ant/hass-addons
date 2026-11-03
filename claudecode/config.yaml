@@ -46,6 +46,7 @@ backup_exclude:
   - "npm-cache"
   - "npm-cache/*"
 options:
+  enable_stdin_runner: false
   default_task_model: ""
   default_task_allowed_tools: []
   task_max_runtime_minutes: 30
@@ -72,6 +73,7 @@ options:
   usage_keepalive_job: ""
   debug_logging: false
 schema:
+  enable_stdin_runner: bool
   default_task_model: str?
   default_task_allowed_tools:
     - str
