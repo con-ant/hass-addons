@@ -100,6 +100,9 @@ Options are on the add-on's **Configuration** tab: **Settings → Apps → Claud
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `default_task_model` | Model for headless runs started with `hassio.addon_stdin` when the task names none; empty = Claude Code's default. See [Headless runs](#headless-runs-from-automations) | "" |
+| `default_task_allowed_tools` | Tools a headless run may use when the task brings no list of its own. Headless runs cannot answer permission prompts, so anything not allowed here (or in the task) is denied | `[]` |
+| `task_max_runtime_minutes` | A headless run is killed after this many minutes (1-240) | 30 |
 | `enable_mcp` | Enable HA integration via hass-mcp | true |
 | `enable_playwright_mcp` | Enable Playwright MCP (requires the [Playwright Browser](../playwright-browser/) add-on) | false |
 | `playwright_cdp_host` | Override Playwright Browser hostname (auto-detected from Supervisor when blank) | "" |
@@ -253,6 +256,73 @@ means, result states, notifications, triggering from Home Assistant, cost —
 is in [`docs/JOBS.md`](docs/JOBS.md); the design and its security argument are
 in [`docs/DESIGN-claude-jobs.md`](docs/DESIGN-claude-jobs.md).
 
+## Headless runs from automations
+
+Any Home Assistant automation can start a headless Claude Code session and
+pass the entire task as data, using the built-in `hassio.addon_stdin`
+service. (For recurring, read-only runs that report back as entities, see
+[Scheduled jobs](#scheduled-jobs-claude-jobs); the two coexist, and a task sent
+this way runs with whatever tools it is allowed, so keep `default_task_allowed_tools`
+tight.)
+
+```yaml
+- action: hassio.addon_stdin
+  data:
+    addon: XXXXXXXX_claudecode   # your installed slug
+    input:
+      run_id: morning-report
+      prompt: >-
+        Read the temperatures of all climate entities and send a summary
+        to notify.mobile_app_phone.
+      model: sonnet
+      allowed_tools:
+        - mcp__homeassistant__*
+        - Bash
+```
+
+- One of `prompt` (inline text) or `prompt_file` (a path visible inside the
+  add-on, e.g. `/share/task.md`) is required; everything else is optional.
+- `model` and `allowed_tools` fall back to the `default_task_model` /
+  `default_task_allowed_tools` add-on options. Headless runs cannot answer
+  permission prompts, so the allow-list defines what the agent may do.
+- Runs are serialized (one at a time) and killed after
+  `task_max_runtime_minutes`.
+- The add-on fires Home Assistant events your automations can react to:
+  `claudecode_run_started` (`run_id`, `log_path`) and
+  `claudecode_run_finished` (`run_id`, `success`, `exit_code`,
+  `duration_seconds`, `log_path`, `output_tail`).
+- Transcripts are written to the add-on config directory
+  (`task-logs/<run_id>-<timestamp>.log`).
+- Authentication reuses the login you completed in the web terminal.
+- Send `{"abort": true}` on the same channel to hard-kill the active
+  run (finish event carries `aborted: true`); a task sent while another
+  is running is rejected with a `claudecode_run_rejected` event.
+
+### Give it a friendlier name
+
+`hassio.addon_stdin` is generic plumbing. Wrap it once in a script with
+typed fields and every automation gets a readable, first-class action:
+
+```yaml
+script:
+  claude_agent:
+    alias: Claude agent
+    fields:
+      prompt: {selector: {text: {multiline: true}}}
+      run_id: {default: task, selector: {text: {}}}
+      model: {selector: {text: {}}}
+    sequence:
+      - action: hassio.addon_stdin
+        data:
+          addon: XXXXXXXX_claudecode
+          input:
+            run_id: "{{ run_id | default('task') }}"
+            prompt: "{{ prompt | default('') }}"
+            model: "{{ model | default('') }}"
+```
+
+Then: `action: script.claude_agent` with `prompt:` / `run_id:` data.
+
 ## Claude subscription usage
 
 With `enable_job_endpoint: true` (and `enable_usage_sensors` left on) the add-on also polls
@@ -379,6 +449,8 @@ If you access Home Assistant over **HTTPS** (or localhost), the CLI's own **pres
 Avoid selecting the login URL with `Shift`/`Option`-drag: the login screen paints each row as a separate line, so the selection stitches the fragments together with line breaks. If you really need the URL as text, **zoom out** your browser (`Ctrl + -` or `Cmd + -`) until it fits on a single line first.
 
 Either way: complete authentication in the browser, **copy the auth code**, click back on the terminal, and **paste** it with `Shift+Insert` or `Ctrl+Shift+V`.
+
+If you would rather have the URL as plain text — to open it on another machine, or if your browser blocks the click — run `claude-login-url` in a second tmux window (`Ctrl+b c`). It reassembles the full URL from the scrollback even when wrapped and writes it to `/homeassistant/claude-login-url.txt` (mode 600). Delete that file when you are done: it lives in your config directory, which is included in HA backups. The helper needs `session_persistence: true`; without tmux, native browser copy works directly.
 
 ### Scrolling and Session Persistence Trade-offs
 

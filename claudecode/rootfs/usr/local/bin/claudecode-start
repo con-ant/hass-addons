@@ -260,6 +260,7 @@ on_stop() {
   trap - EXIT TERM INT HUP
   remember_claude_release  # one jq read: the release to reinstall at the next boot
   stop_update_watcher # no update restart may start while we stop
+  [ -n "${STDIN_RUNNER_PID:-}" ] && kill -TERM "$STDIN_RUNNER_PID" 2>/dev/null  # no new headless run; an active one ends with the container
   stop_job_spawners   # nothing new can spawn
   signal_job_runs     # TERM lands early ...
   stop_sessions       # ... so runners drain while the interactive session tears down
@@ -1110,7 +1111,20 @@ run_step "build terminal command" build_shell_cmd
 run_step "pre-start Claude session" prestart_session
 run_step "start job endpoint" start_job_endpoint
 run_step "start update watcher" start_update_watcher
+start_stdin_runner() {
+  # Headless runs from automations (hassio.addon_stdin): the runner reads the
+  # container's stdin, which config.yaml's `stdin: true` keeps open. It inherits
+  # our fd 0 explicitly because bash gives background jobs /dev/null otherwise.
+  if [ "$CLAUDE_OK" != "true" ]; then
+    warn "claude CLI does not run here; headless runs (hassio.addon_stdin) are off this boot"
+    return 0
+  fi
+  /usr/local/bin/stdin-runner.sh <&0 &
+  STDIN_RUNNER_PID=$!
+}
+
 run_step "start Remote Control server" start_rc_server
+run_step "start stdin task runner" start_stdin_runner
 
 trap - EXIT
 CURRENT_STEP="web terminal (ttyd)"

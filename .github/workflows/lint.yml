@@ -1,0 +1,62 @@
+name: Lint
+
+# Runs on every PR and push to main. Deliberately fast (~1 min): the point is
+# to give a signal before anyone spends time on a multi-architecture build.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  addon:
+    name: Add-on config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint claudecode
+        uses: frenck/action-addon-linter@v2
+        with:
+          path: ./claudecode
+
+      - name: Lint playwright-browser
+        uses: frenck/action-addon-linter@v2
+        with:
+          path: ./playwright-browser
+
+      - name: Lint auto-monocle
+        uses: frenck/action-addon-linter@v2
+        with:
+          path: ./auto-monocle
+
+      - name: Lint pomerium
+        uses: frenck/action-addon-linter@v2
+        with:
+          path: ./pomerium
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      # Custom check: options x schema x translations. It exists because a PR
+      # shipped three options translated for English only, and fr.yaml had been
+      # missing four keys for months - the options rendered unnamed in the UI.
+      - name: Check options, schema and translations
+        run: python3 .github/scripts/check-addon-options.py claudecode playwright-browser auto-monocle pomerium
+
+  dockerfile:
+    name: Dockerfile (${{ matrix.addon }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        addon: [claudecode, playwright-browser, auto-monocle, pomerium]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: ${{ matrix.addon }}/Dockerfile
+          # DL3018: apk without a pinned version. The add-on deliberately
+          # follows the Alpine of the Home Assistant base image; pinning here
+          # would break bumping that.
+          ignore: DL3018
+          failure-threshold: error

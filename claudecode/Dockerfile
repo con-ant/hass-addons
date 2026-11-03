@@ -197,6 +197,7 @@ COPY CLAUDE.addon.md /usr/share/claudecode/CLAUDE.addon.md
 COPY rootfs/ /
 RUN chmod +x /usr/local/bin/playwright-mcp-launch /usr/local/bin/claude-auto-launch /usr/local/bin/claudecode-start \
     /usr/local/bin/claude-session-hook /usr/local/bin/claude-update-watcher \
+    /usr/local/bin/claude-login-url /usr/local/bin/stdin-runner.sh \
     /usr/local/bin/claude-job /usr/local/bin/claude-job-notify /usr/local/bin/claude-job-endpoint /usr/local/bin/ha-ws \
     /usr/local/share/claudecode/git-hooks/pre-commit \
     /usr/local/lib/claude-job/ha_broker.py /usr/local/lib/claude-job/bin/ha \

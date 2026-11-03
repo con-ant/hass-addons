@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.35] - 2026-11-03
+
+Takes the two files upstream `main` (v1.2.76) has and this fork lacked, so the
+fork's tree is a superset of upstream again and the startup script can be
+offered upstream as one piece (upstream issue #59).
+
+### Added
+- Headless runs from automations (upstream #47 by David Anthoff, v1.2.75):
+  `hassio.addon_stdin` sends a JSON task to `stdin-runner.sh`, which runs
+  `claude -p` with the stored login, one run at a time, kills it after
+  `task_max_runtime_minutes`, writes the transcript to the add-on config
+  directory and fires `claudecode_run_started`, `claudecode_run_finished`,
+  `claudecode_run_rejected` and `claudecode_runner_ready` events; `{"abort":
+  true}` kills the active run. New options `default_task_model`,
+  `default_task_allowed_tools` and `task_max_runtime_minutes`, translated in
+  all four languages; `stdin: true` keeps the container's stdin open. The runner
+  starts after the Remote Control server and is stopped first on the way down.
+  Its paths and the Supervisor address take `STDIN_RUNNER_*` overrides so it can
+  be tested without a Supervisor; defaults unchanged. Claude Jobs are untouched:
+  the two coexist, and the README says which to use for what
+- `claude-login-url` (upstream #38 by raketemensch, v1.2.73): writes the OAuth
+  login URL from the tmux scrollback to `/homeassistant/claude-login-url.txt`
+  (mode 600) as the plain-text fallback to the clickable link. Ported with the
+  fix for the bug found in this fork's #15 review: it now scans every pane of
+  the session instead of the current window's active pane, so running it from
+  a second window (the documented flow) finds the URL
+- Lint workflow from upstream (`.github/workflows/lint.yml`): frenck's add-on
+  linter and hadolint on every add-on, plus upstream's
+  `check-addon-options.py`, which checks that every option is in the schema,
+  translated in every language and that the version has a changelog entry
+
+### Changed
+- `tests.yml` checks out with `actions/checkout@v7`, as upstream does
+- auto-monocle: upstream's 0.1.12 (es and pt-BR translations for `stream_quality`, config tidy), which the new options check requires
+
 ## [1.2.65-con.34] - 2026-11-02
 
 ### Changed
