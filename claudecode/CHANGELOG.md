@@ -38,7 +38,7 @@ offered upstream as one piece (upstream issue #59).
 ### Changed
 - `tests.yml` checks out with `actions/checkout@v7`, as upstream does
 - auto-monocle: upstream's 0.1.12 (es and pt-BR translations for `stream_quality`, config tidy), which the new options check requires
-- `init: true` dropped from `config.yaml` (and `boot: auto` from the Pomerium add-on's): the add-on linter rejects keys that restate the Supervisor's defaults. No behaviour change; the container still runs under tini
+- `init: true` dropped from `config.yaml` (and `boot: auto`, `ingress: false` from the Pomerium add-on's): the add-on linter rejects keys that restate the Supervisor's defaults. No behaviour change; the container still runs under tini
 
 ## [1.2.65-con.34] - 2026-11-02
 

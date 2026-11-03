@@ -8,7 +8,6 @@ arch:
   - aarch64
 startup: services
 init: false
-ingress: false
 panel_icon: mdi:shield-lock
 panel_title: Pomerium
 map:
