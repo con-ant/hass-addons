@@ -15,6 +15,9 @@ arch:
 # from the slug. The AppArmor profile grants no sys_admin, so a process in this
 # container cannot call sethostname() (the add-on's Docker socket and
 # full_access reach the host anyway, as the README's security note says).
+# Docker still writes the container id, not the host's name, into /etc/hosts,
+# so `homeassistant` keeps resolving through the Supervisor's DNS to HA Core
+# (checked on a live install, 2026-11-03).
 host_uts: true
 # Seconds the Supervisor waits after SIGTERM before killing the container.
 # claudecode-start signals in-flight job runs first, hands a running Claude a
