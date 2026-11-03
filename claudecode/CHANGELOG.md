@@ -9,7 +9,8 @@ fork's tree is a superset of upstream again and the startup script can be
 offered upstream as one piece (upstream issue #59).
 
 ### Added
-- Headless runs from automations (upstream #47 by David Anthoff, v1.2.75):
+- Headless runs from automations (robsonfelix/robsonfelix-hass-addons#47 by David
+  Anthoff, v1.2.75):
   `hassio.addon_stdin` sends a JSON task to `stdin-runner.sh`, which runs
   `claude -p` with the stored login, one run at a time, kills it after
   `task_max_runtime_minutes`, writes the transcript to the add-on config
@@ -22,7 +23,8 @@ offered upstream as one piece (upstream issue #59).
   Its paths and the Supervisor address take `STDIN_RUNNER_*` overrides so it can
   be tested without a Supervisor; defaults unchanged. Claude Jobs are untouched:
   the two coexist, and the README says which to use for what
-- `claude-login-url` (upstream #38 by raketemensch, v1.2.73): writes the OAuth
+- `claude-login-url` (robsonfelix/robsonfelix-hass-addons#38 by raketemensch,
+  v1.2.73): writes the OAuth
   login URL from the tmux scrollback to `/homeassistant/claude-login-url.txt`
   (mode 600) as the plain-text fallback to the clickable link. Ported with the
   fix for the bug found in this fork's #15 review: it now scans every pane of
