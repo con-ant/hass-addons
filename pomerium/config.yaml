@@ -7,7 +7,6 @@ arch:
   - amd64
   - aarch64
 startup: services
-boot: auto
 init: false
 ingress: false
 panel_icon: mdi:shield-lock

@@ -44,4 +44,4 @@ When making changes that require a new release:
 - Rebuild button only rebuilds from cached config
 - To pick up config.yaml changes: uninstall/reinstall or bump version and update
 - Base images use s6-overlay v3 - be careful with init configuration
-- `init: true` uses Docker's tini, `init: false` uses s6-overlay's /init
+- The Supervisor's default `init: true` runs the container under Docker's tini; `init: false` would use s6-overlay's /init. The add-on linter rejects stating the default, so the key is absent
