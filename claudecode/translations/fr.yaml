@@ -1,4 +1,24 @@
 configuration:
+  enable_stdin_runner:
+    name: Activer les executions headless (hassio.addon_stdin)
+    description: >-
+      Lance le runner de taches par stdin, pour que les automatisations puissent envoyer un prompt a Claude avec l'action hassio.addon_stdin. Desactive par defaut : une telle execution tourne en root avec les outils qui lui sont permis. Pour des executions planifiees protegees et en lecture seule, utilisez Claude Jobs.
+  default_task_model:
+    name: Modele par defaut des taches
+    description: >-
+      Modele utilise par les executions headless declenchees par des
+      automatisations lorsque la tache n'en precise pas. Laisser vide pour
+      utiliser la valeur par defaut de Claude Code.
+  default_task_allowed_tools:
+    name: Outils autorises par defaut pour les taches
+    description: >-
+      Permissions d'outils accordees aux executions headless lorsque la tache
+      ne fournit pas sa propre liste. Les executions headless ne peuvent pas
+      repondre aux demandes de permission, donc tout ce qui n'est pas autorise
+      ici (ou dans la tache) est refuse.
+  task_max_runtime_minutes:
+    name: Duree maximale d'execution (minutes)
+    description: Les executions headless sont arretees apres ce nombre de minutes.
   enable_mcp:
     name: Activer Home Assistant MCP
     description: >-

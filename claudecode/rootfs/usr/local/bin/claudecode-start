@@ -260,6 +260,7 @@ on_stop() {
   trap - EXIT TERM INT HUP
   remember_claude_release  # one jq read: the release to reinstall at the next boot
   stop_update_watcher # no update restart may start while we stop
+  [ -n "${STDIN_RUNNER_PID:-}" ] && kill -TERM "$STDIN_RUNNER_PID" 2>/dev/null  # no new headless run; an active one ends with the container
   stop_job_spawners   # nothing new can spawn
   signal_job_runs     # TERM lands early ...
   stop_sessions       # ... so runners drain while the interactive session tears down
@@ -381,6 +382,7 @@ read_options() {
   EXTRA_PKGS=$(opt '.extra_npm_packages // [] | join(" ")')
   JOB_DEFAULT_MODEL=$(opt '.job_default_model // "opus"')
   ENABLE_JOBS=$(opt '.enable_job_endpoint // false')
+  ENABLE_STDIN_RUNNER=$(opt '.enable_stdin_runner // false')
   ENABLE_USAGE=$(opt 'if .enable_usage_sensors == null then true else .enable_usage_sensors end')
   USAGE_INTERVAL=$(opt '.usage_poll_interval // 300')
   USAGE_KEEPALIVE=$(opt '.usage_keepalive_job // ""')
@@ -389,6 +391,7 @@ read_options() {
   : "${ENABLE_PLAYWRIGHT:=false}" "${AUTO_UPDATE:=false}" "${APPLY_UPDATES:=true}" "${DEFAULT_MODE:=auto}"
   : "${ENABLE_RC:=false}" "${RC_PREFIX:=HomeAssistant}" "${RC_SERVER:=false}" "${AUTO_LAUNCH:=continue}"
   : "${JOB_DEFAULT_MODEL:=opus}" "${ENABLE_JOBS:=false}" "${ENABLE_USAGE:=true}" "${USAGE_INTERVAL:=300}"
+  : "${ENABLE_STDIN_RUNNER:=false}"
 }
 
 scrub_legacy_token() {
@@ -1110,7 +1113,26 @@ run_step "build terminal command" build_shell_cmd
 run_step "pre-start Claude session" prestart_session
 run_step "start job endpoint" start_job_endpoint
 run_step "start update watcher" start_update_watcher
+start_stdin_runner() {
+  # Headless runs from automations (hassio.addon_stdin): the runner reads the
+  # container's stdin, which config.yaml's `stdin: true` keeps open. Off by
+  # default here (upstream runs it always): a task sent this way runs as root
+  # with whatever tools it is allowed, and Claude Jobs are the guarded path.
+  [ "$ENABLE_STDIN_RUNNER" = "true" ] || return 0
+  if [ "$CLAUDE_OK" != "true" ]; then
+    warn "enable_stdin_runner is on but the claude CLI does not run here; headless runs are off this boot"
+    return 0
+  fi
+  # fd 0 is passed explicitly because bash gives background jobs /dev/null; the
+  # trap reset undoes bash's SIG_IGN on INT/QUIT for background jobs, which
+  # every tool a task runs would otherwise inherit (same as the other services).
+  ( trap - INT QUIT; exec /usr/local/bin/stdin-runner.sh ) <&0 &
+  STDIN_RUNNER_PID=$!
+  info "stdin task runner started: automations can send tasks with hassio.addon_stdin"
+}
+
 run_step "start Remote Control server" start_rc_server
+run_step "start stdin task runner" start_stdin_runner
 
 trap - EXIT
 CURRENT_STEP="web terminal (ttyd)"

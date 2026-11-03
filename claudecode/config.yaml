@@ -1,12 +1,11 @@
 name: Claude Code
 description: Run Claude Code AI assistant inside Home Assistant to create automations, debug issues, and manage your smart home configuration
-version: "1.2.65-con.34"
+version: "1.2.65-con.35"
 slug: claudecode
 url: https://github.com/con-ant/hass-addons
 arch:
   - amd64
   - aarch64
-init: true
 # Share the host's UTS namespace so the container's hostname is the Home
 # Assistant host's (e.g. "homeassistant") rather than the add-on slug
 # ("d7e97e69-claudecode"): Claude Code reports the machine's hostname to
@@ -22,6 +21,8 @@ host_uts: true
 # (JOB_STOP_GRACE_SECS, 5), then tears down tmux and ttyd: <= 27 s worst case
 # (docs/DESIGN-claude-jobs.md Appendix A.1). The default 10 is too tight.
 timeout: 30
+# Keep stdin open: stdin-runner.sh reads hassio.addon_stdin tasks from it.
+stdin: true
 ingress: true
 ingress_port: 7681
 ingress_stream: true
@@ -45,6 +46,10 @@ backup_exclude:
   - "npm-cache"
   - "npm-cache/*"
 options:
+  enable_stdin_runner: false
+  default_task_model: ""
+  default_task_allowed_tools: []
+  task_max_runtime_minutes: 30
   enable_mcp: true
   enable_playwright_mcp: false
   playwright_cdp_host: ""
@@ -68,6 +73,11 @@ options:
   usage_keepalive_job: ""
   debug_logging: false
 schema:
+  enable_stdin_runner: bool
+  default_task_model: str?
+  default_task_allowed_tools:
+    - str
+  task_max_runtime_minutes: int(1,240)
   enable_mcp: bool
   enable_playwright_mcp: bool
   playwright_cdp_host: str?
