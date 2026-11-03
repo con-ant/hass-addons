@@ -29,7 +29,8 @@ set -eu
 SPEC="${CLAUDE_CODE_VERSION:-stable}"
 MANIFEST="${CLAUDE_CODE_MANIFEST:-/tmp/claude-code-manifest.json}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-30}"
-VERSIONS=/tmp/claude-versions
+VERSION_FILE="${CLAUDE_CODE_VERSION_FILE:-/etc/claude-code-version}"   # tests point this elsewhere
+VERSIONS="${TMPDIR:-/tmp}/claude-versions"
 
 smoke() { timeout "$SMOKE_TIMEOUT" claude --version < /dev/null > /dev/null 2>&1; }
 try() { npm i -g --no-fund --no-audit "@anthropic-ai/claude-code@$1" > /dev/null 2>&1 && smoke; }
@@ -46,7 +47,7 @@ fi
 
 # Fast path: the channel's release runs here. Take it and skip the search.
 if try "$target"; then
-  echo "$target" > /etc/claude-code-version
+  echo "$target" > "$VERSION_FILE"
   echo "[install] claude-code $target ($SPEC, verified)"
   exit 0
 fi
@@ -57,7 +58,7 @@ echo "[install] claude-code $target ($SPEC) fails its smoke test; searching for 
 # list, which no dist-tag should cause, search all of them.)
 npm view @anthropic-ai/claude-code versions --json \
   | jq -r '.[]' \
-  | grep -E '^2\.[0-9]+\.[0-9]+$' > "$VERSIONS"
+  | grep -E '^2\.[0-9]+\.[0-9]+$' > "$VERSIONS" || true   # no match is not an error here: the count below reports it
 if grep -qxF "$target" "$VERSIONS"; then
   sed -i "/^$(printf '%s' "$target" | sed 's/\./\\./g')\$/q" "$VERSIONS"
 fi
@@ -82,5 +83,5 @@ done
 
 npm i -g --no-fund --no-audit "@anthropic-ai/claude-code@$best" > /dev/null 2>&1
 smoke || { echo "[install] $best passed during search but fails now"; exit 1; }
-echo "$best" > /etc/claude-code-version
+echo "$best" > "$VERSION_FILE"
 echo "[install] claude-code $best (newest working; $target from $SPEC does not run here)"
