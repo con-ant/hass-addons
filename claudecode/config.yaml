@@ -19,6 +19,10 @@ arch:
 # name, into /etc/hosts, so `homeassistant` keeps resolving through the
 # Supervisor's DNS to HA Core (checked on a live install, 2026-11-03).
 host_uts: true
+# Seconds the Supervisor waits after SIGTERM before it kills the container.
+# The startup script gives a running Claude up to 10 s to exit, then tears
+# down tmux and ttyd; the default 10 is too tight for that.
+timeout: 30
 stdin: true
 ingress: true
 ingress_port: 7681
@@ -56,6 +60,7 @@ options:
   extra_npm_packages: []
   remote_control_server: false
   remote_control_permission_mode: default
+  debug_logging: false
 schema:
   default_task_model: str?
   default_task_allowed_tools:
@@ -76,5 +81,6 @@ schema:
     - str?
   remote_control_server: bool
   remote_control_permission_mode: list(default|acceptEdits|auto|plan|dontAsk)
+  debug_logging: bool
 environment:
   TERM: xterm-256color

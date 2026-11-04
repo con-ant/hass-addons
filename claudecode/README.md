@@ -187,6 +187,7 @@ Then: `action: script.claude_agent` with `prompt:` / `run_id:` data.
 | `extra_npm_packages` | List of npm package specs to install at every container start under `/homeassistant/.claudecode/npm-global` (persistent across add-on rebuilds). Bin dir is on `PATH`. Use to add custom MCP servers without forking the Dockerfile. | `[]` |
 | `remote_control_server` | Run a Remote Control server at boot so you can start new sessions from claude.ai/code or the Claude mobile app. Requires `enable_remote_control` | false |
 | `remote_control_permission_mode` | Permission mode for sessions started through the server: `default`, `acceptEdits`, `auto`, `plan` or `dontAsk` | default |
+| `debug_logging` | Trace every startup command into the add-on log (`bash -x`, timestamped). Turn on when the add-on fails to boot and the log doesn't say why; the boot log always shows a `step:` marker per startup step, so the last one printed names where it stopped. Turn off afterwards: very verbose | false |
 
 ### Remote Control
 
@@ -384,6 +385,12 @@ What helps:
   noticeably more on equivalent work; `/model` switches it per session.
 - For recurring tasks, consider the headless runs described above with a narrow
   `allowed_tools` list, rather than an interactive session with full file access.
+
+### Reading the startup log
+
+Every boot starts with a `Claude Code add-on <version> starting` line and then a `[INFO] step: ...` marker per startup step (persistent config dir, options, update check, MCP setup, ...), ending in `Startup finished in Ns`. If the log stops after a marker, that step hung; if it ends with `Startup aborted ... during step '...'`, that step crashed and the add-on started a bare terminal so you can look around from inside. Set `debug_logging: true` to trace every command of the startup script, and turn it off again once the problem is found.
+
+Stopping or restarting the add-on sends a running Claude SIGTERM and gives it up to 10 seconds to exit before the terminal and tmux are torn down, so a session in the middle of a tool call is not killed outright.
 
 ### Terminal not loading
 

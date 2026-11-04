@@ -45,7 +45,36 @@ All notable changes to this project will be documented in this file.
   for the test, which runs it against a fake WebSocket server. With the
   AppArmor line Python's C extensions need (`/usr/local/lib/python3*/** mr`)
 
+- `debug_logging` option: traces every command of the startup script into the
+  add-on log (`bash -x`, timestamped) for boots that fail without saying why
+- `tests/test_claudecode_start.py` boots the startup script against a scratch
+  directory with a fake `claude`, `ttyd`, `npm` and stdin runner: the
+  persistent dir and settings.json it leaves behind, the MCP registrations and
+  ttyd command line, an unresponsive `claude`, the update-then-rollback path,
+  and the stop path (SIGTERM reaches Claude under tmux, exit 143)
+
 ### Changed
+- Startup moved out of the Dockerfile's 170-line `CMD` string into
+  `rootfs/usr/local/bin/claudecode-start`, step by step with the same
+  behaviour. What changed on the way: every step logs a timestamped `step:`
+  marker, so a boot that hangs or dies names the step in the add-on log; a
+  step that fails warns and moves on, and if the script still dies the
+  terminal starts anyway (`Startup aborted ... during step`) so the problem
+  can be looked at from inside; settings.json is written atomically (a temp
+  file beside it, then rename) and a settings.json that no longer parses is
+  moved aside instead of breaking every `jq` write after it; a stop or
+  restart now reaches Claude: ttyd is no longer `exec`'d, so the script gets
+  the Supervisor's SIGTERM, passes it to the Claude processes under tmux and
+  ttyd, waits up to 10 s, then tears down tmux and ttyd and exits 143
+  (config.yaml `timeout: 30` gives it the room; the default 10 did not); a
+  `claude --version` failure says why (hang vs SIGILL vs not found); and the
+  `extra_npm_packages` install is bounded by a 300 s timeout like the update
+  is. The script takes `CLAUDECODE_START_*` overrides for its paths so the
+  tests can boot it in a scratch directory; the defaults are the add-on's. The
+  baked-CLI smoke test that re-runs `install-claude.sh` on a host where the
+  prebuilt image's Claude Code does not run is a step of its own (`baked Claude
+  Code smoke test`), before the update check, and takes
+  `CLAUDECODE_START_INSTALL_CLAUDE` for the test
 - The container reports the Home Assistant host's hostname: `host_uts: true`
   shares the host's UTS namespace, so `hostname` inside the add-on, and the
   machine name Claude Code reports to claude.ai for Remote Control, is the HA

@@ -108,5 +108,13 @@ configuration:
   task_max_runtime_minutes:
     name: Tempo maximo de execucao (minutos)
     description: Execucoes headless sao encerradas apos esse numero de minutos.
+  debug_logging:
+    name: Log de depuracao da inicializacao
+    description: >-
+      Registra cada comando do script de inicializacao do add-on no log do
+      add-on (bash -x) com carimbos de hora. Ative quando o add-on falha ao
+      iniciar e o log nao diz o porque, e desative depois - o log fica muito
+      verboso.
+
 network:
   7681/tcp: Terminal Web (ttyd)

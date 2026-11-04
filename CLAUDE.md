@@ -27,6 +27,7 @@ directory. A single module: `make test P=test_login_url.py`. Dotted module names
 - `claudecode/` - Claude Code add-on
   - `config.yaml` - Add-on configuration (bump version here)
   - `Dockerfile` - Container build instructions
+  - `rootfs/usr/local/bin/claudecode-start` - Startup script (the container's CMD): options, persistent config dir, Claude Code update, MCP setup, then ttyd
   - `build.yaml` - Multi-architecture build settings
   - `README.md` - User documentation (shown as the add-on's Documentation tab)
   - `tests/` - Test-suite (`make test`)
