@@ -1,0 +1,514 @@
+#!/bin/bash
+# Add-on startup: read options, wire up the persistent config dir, configure
+# Claude Code, then hand off to ttyd. This used to be the Dockerfile's CMD.
+#
+# Every step here is best-effort. Whatever goes wrong - a settings.json that
+# no longer parses, an npm registry that never answers, a volume that refuses
+# writes - the web terminal must still come up, because it is the only way to
+# diagnose the problem from inside the add-on. That guarantee lives in one
+# place: the script never sets -e (a failing step warns and moves on), and the
+# EXIT trap below starts a bare ttyd if anything still ends the script before
+# the normal hand-off at the bottom.
+
+# Paths can be overridden for the tests (tests/test_claudecode_start.py boots
+# the script against a scratch directory and fake claude/ttyd/npm); the
+# defaults are the add-on's.
+OPTS=${CLAUDECODE_START_OPTIONS:-/data/options.json}
+WORK_DIR=${CLAUDECODE_START_WORK_DIR:-/homeassistant}
+HOME_DIR=${CLAUDECODE_START_HOME:-/root}
+ADDON_MD=${CLAUDECODE_START_ADDON_MD:-/usr/share/claudecode/CLAUDE.addon.md}
+AUTO_LAUNCH_BIN=${CLAUDECODE_START_AUTO_LAUNCH:-/usr/local/bin/claude-auto-launch}
+STDIN_RUNNER=${CLAUDECODE_START_STDIN_RUNNER:-/usr/local/bin/stdin-runner.sh}
+PERSIST_DIR=$WORK_DIR/.claudecode
+SETTINGS_FILE=$HOME_DIR/.claude/settings.json
+
+# ---------------------------------------------------------------------------
+# Logging. Everything echoed here is the container's stdout, i.e. the add-on
+# Log tab in Home Assistant - often the only view a user has into a failed
+# boot. So: log a banner before anything can fail, timestamp every line, and
+# mark each startup step so a hang or crash names itself in the log.
+# ---------------------------------------------------------------------------
+info() { echo "[$(date +%H:%M:%S)] [INFO] $*"; }
+warn() { echo "[$(date +%H:%M:%S)] [WARN] $*"; }
+err()  { echo "[$(date +%H:%M:%S)] [ERROR] $*"; }
+opt()  { jq -r "$1" "$OPTS" 2>/dev/null; }
+
+# First output of the boot. If even this line is missing from the add-on log,
+# the container died before this script ran (image/arch problem, AppArmor,
+# OOM) - look in `ha supervisor logs` / `dmesg`, not here.
+info "Claude Code add-on $(cat /etc/claudecode-addon-version 2>/dev/null || echo '?') starting on $(uname -m) (Claude Code $(cat /etc/claude-code-version 2>/dev/null || echo '?') at build time)"
+
+# debug_logging: trace every command in this script into the add-on log.
+# Read directly from options.json - read_options runs later than the first
+# things that can go wrong. ${SECONDS}s since boot + line number, no forks.
+if [ "$(opt '.debug_logging // false')" = "true" ]; then
+  info "debug_logging is on: tracing startup commands below (turn it off once the problem is found - this is verbose)"
+  PS4='+ [${SECONDS}s claudecode-start:${LINENO}] '
+  TRACE_ON=true
+  set -x
+fi
+
+# Secrets must never land in the trace: bracket any code that puts one in a
+# shell variable with trace_off/trace_on (both no-ops unless debug_logging).
+trace_off() { { set +x; } 2>/dev/null; }
+trace_on()  { if [ "${TRACE_ON:-}" = true ]; then set -x; fi; }
+
+# Each top-level startup step goes through run_step: the log then shows where
+# boot is (a step that prints nothing else still leaves its marker), and
+# on_abort can say which step was running when the script died.
+CURRENT_STEP="early init"
+run_step() {  # run_step "<label>" <command...>
+  CURRENT_STEP=$1; shift
+  info "step: $CURRENT_STEP"
+  "$@"
+}
+
+# ---------------------------------------------------------------------------
+# The guarantee: always end in ttyd.
+# ---------------------------------------------------------------------------
+# Seconds a running Claude gets to exit after SIGTERM before the tmux server
+# is killed. Must fit inside config.yaml's `timeout:` (30) together with the
+# ttyd teardown below.
+STOP_GRACE_SECS=10
+# ttyd parses a -t value as JSON when it can; the theme has to be an object,
+# since the client merges it with Object.assign.
+DARK_THEME='{"background":"#1e1e2e","foreground":"#cdd6f4","cursor":"#f5e0dc"}'
+LIGHT_THEME='{"background":"#eff1f5","foreground":"#4c4f69","cursor":"#dc8a78"}'
+TTYD_PID=""
+STDIN_RUNNER_PID=""
+
+cd_work() { cd "$WORK_DIR" 2>/dev/null || cd /; }
+
+# ttyd is not exec'd: this script stays PID 1's child so a Supervisor stop
+# reaches it (see on_stop) and can wind Claude down before the container is
+# torn down. It still exits with ttyd's status, so ttyd dying ends the
+# container exactly as before. The subshell resets INT/QUIT, which bash
+# ignores in background jobs; ttyd's ptys would otherwise inherit that.
+start_ttyd() {
+  cd_work
+  info "Starting web terminal (ttyd) on port 7681"
+  # shellcheck disable=SC2086  # SHELL_CMD is intentionally word-split
+  ( trap - INT QUIT; exec ttyd --port 7681 --writable --ping-interval 30 --max-clients 5 \
+    --index /usr/share/ttyd/index.html \
+    -t "fontSize=${FONT_SIZE:-14}" \
+    -t fontFamily=Monaco,Consolas,monospace \
+    -t scrollback=20000 \
+    -t "theme=${COLORS:-$DARK_THEME}" \
+    ${SHELL_CMD:-bash --login} ) &
+  TTYD_PID=$!
+  wait "$TTYD_PID"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    info "ttyd exited cleanly; stopping the add-on"
+  else
+    err "ttyd exited with status $rc; stopping the add-on (if this repeats, the boot loop starts here)"
+  fi
+  exit $rc
+}
+on_abort() {
+  err "Startup aborted with exit $1 during step '$CURRENT_STEP'; starting a bare terminal so you can debug from inside the add-on"
+  trap - EXIT
+  start_ttyd
+}
+
+# Stop: only this process gets the Supervisor's SIGTERM. A Claude running
+# under tmux (the Remote Control server, or a session opened from the
+# terminal) or directly under ttyd would otherwise be SIGKILLed when the
+# container is torn down - mid tool call, with its Remote Control session
+# left dangling.
+#
+# Every terminal - a tmux pane or a ttyd pty - is rooted at claude-auto-launch
+# (or a shell); claude and anything it spawned are that root's descendants.
+# Signal the descendants, never the root: killing the root closes the pty and
+# SIGHUPs claude the instant after its SIGTERM. The wrapper sees claude exit
+# and drops to a login shell, which tmux kill-server / ttyd's own teardown
+# clean up.
+descendants() {  # $1 = pid -> all descendant pids, depth first
+  local kid
+  for kid in $(pgrep -P "$1" 2>/dev/null); do
+    echo "$kid"
+    descendants "$kid"
+  done
+}
+stop_sessions() {
+  local root pids="" pid alive i
+  for root in $(tmux list-panes -a -F '#{pane_pid}' 2>/dev/null) \
+              $([ -n "$TTYD_PID" ] && pgrep -P "$TTYD_PID" 2>/dev/null); do
+    pids="$pids $(descendants "$root")"
+  done
+  for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
+  # A browser (re)connecting now would spawn a fresh Claude that we then kill:
+  # stop ttyd first when tmux holds the sessions (its ttyd children are only
+  # tmux clients). Without tmux the pty IS the session, so ttyd waits.
+  local tmux_mode=""
+  if tmux has-session 2>/dev/null; then tmux_mode=1; stop_ttyd; fi
+  for ((i = 0; i < STOP_GRACE_SECS * 2; i++)); do
+    alive=""
+    for pid in $pids; do kill -0 "$pid" 2>/dev/null && alive=1; done
+    [ -n "$alive" ] || break
+    sleep 0.5
+  done
+  [ -n "$alive" ] && warn "Claude did not exit within ${STOP_GRACE_SECS}s; stopping anyway"
+  [ -n "$tmux_mode" ] && tmux kill-server 2>/dev/null
+  return 0
+}
+stop_ttyd() {
+  [ -n "$TTYD_PID" ] || return 0
+  kill -TERM "$TTYD_PID" 2>/dev/null
+  local i
+  for ((i = 0; i < 10; i++)); do
+    kill -0 "$TTYD_PID" 2>/dev/null || break
+    sleep 0.5
+  done
+  kill -KILL "$TTYD_PID" 2>/dev/null
+  wait "$TTYD_PID" 2>/dev/null
+  TTYD_PID=""
+}
+on_stop() {
+  trap - EXIT TERM INT HUP
+  info "Stop requested; winding down Claude sessions (up to ${STOP_GRACE_SECS}s)"
+  [ -n "$STDIN_RUNNER_PID" ] && kill -TERM "$STDIN_RUNNER_PID" 2>/dev/null  # no new headless run
+  stop_sessions
+  stop_ttyd
+  exit 143
+}
+# A Supervisor stop/restart must end the container, not start a terminal:
+# bash runs the EXIT trap on an untrapped SIGTERM, so on_stop clears it first.
+# (A SIGTERM that lands while a startup step is in the foreground is acted on
+# when that step returns; the steps are individually bounded by `timeout`.)
+trap on_stop TERM INT HUP
+trap 'on_abort $?' EXIT
+
+# ---------------------------------------------------------------------------
+# settings.json: one guarded, atomic writer.
+# ---------------------------------------------------------------------------
+settings_init() {
+  if [ ! -d "$(dirname "$SETTINGS_FILE")" ]; then
+    warn "$(dirname "$SETTINGS_FILE") does not exist; settings.json will not be applied this boot"
+    return 0
+  fi
+  if [ ! -e "$SETTINGS_FILE" ]; then
+    echo '{}' > "$SETTINGS_FILE" || warn "Could not create settings.json"
+    return 0
+  fi
+  # Must be an object, and .permissions (which every write below indexes into)
+  # must be an object or absent.
+  if jq -e 'type == "object" and ((.permissions // {}) | type == "object")' "$SETTINGS_FILE" > /dev/null 2>&1; then
+    return 0
+  fi
+  local quarantine
+  quarantine="$SETTINGS_FILE.corrupt.$(date +%s)"
+  if mv "$SETTINGS_FILE" "$quarantine" 2>/dev/null; then
+    warn "settings.json is not usable; the old file was saved as $quarantine"
+    echo '{}' > "$SETTINGS_FILE" || warn "Could not create a fresh settings.json"
+  else
+    # Never overwrite the only copy: leave it and let each write warn.
+    warn "settings.json is not usable and could not be moved aside; leaving it in place"
+  fi
+}
+
+# settings_set [jq options...] '<filter>'
+# The temp file sits beside the target so the final mv is a same-filesystem
+# rename: an interrupted write can never leave a truncated settings.json.
+settings_set() {
+  local tmp="$SETTINGS_FILE.tmp"
+  if jq "$@" "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+trace_off  # the Supervisor token must not appear in the debug trace
+export HA_TOKEN="$SUPERVISOR_TOKEN"
+export HA_URL="http://supervisor/core"
+trace_on
+
+setup_persist_dir() {
+  if ! mkdir -p "$PERSIST_DIR/config" "$HOME_DIR/.config"; then
+    warn "Could not create $PERSIST_DIR - is the Home Assistant config volume mounted and writable?"
+    warn "Skipping persistent config setup; nothing will persist across restarts"
+    return 0
+  fi
+  cp "$ADDON_MD" "$PERSIST_DIR/CLAUDE.md" || warn "Could not refresh CLAUDE.md in the config dir"
+  touch "$PERSIST_DIR/CLAUDE.user.md" || warn "Could not create CLAUDE.user.md"
+
+  # Everything Claude Code keeps under $HOME lives on the HA volume.
+  if [ ! -L "$HOME_DIR/.claude" ]; then
+    rm -rf "$HOME_DIR/.claude"
+    ln -s "$PERSIST_DIR" "$HOME_DIR/.claude" || warn "Could not link $HOME_DIR/.claude"
+  fi
+  if [ ! -L "$HOME_DIR/.config/claude-code" ]; then
+    rm -rf "$HOME_DIR/.config/claude-code"
+    ln -s "$PERSIST_DIR/config" "$HOME_DIR/.config/claude-code" || warn "Could not link $HOME_DIR/.config/claude-code"
+  fi
+  if [ ! -L "$HOME_DIR/.claude.json" ]; then
+    touch "$PERSIST_DIR/.claude.json" || warn "Could not create .claude.json"
+    rm -f "$HOME_DIR/.claude.json"
+    ln -s "$PERSIST_DIR/.claude.json" "$HOME_DIR/.claude.json" || warn "Could not link $HOME_DIR/.claude.json"
+  fi
+}
+
+read_options() {
+  FONT_SIZE=$(opt '.terminal_font_size // 14')
+  THEME=$(opt '.terminal_theme // "dark"')
+  SESSION_PERSIST=$(opt 'if .session_persistence == null then true else .session_persistence end')
+  ENABLE_MCP=$(opt 'if .enable_mcp == null then true else .enable_mcp end')
+  ENABLE_PLAYWRIGHT=$(opt '.enable_playwright_mcp // false')
+  PLAYWRIGHT_HOST=$(opt '.playwright_cdp_host // ""')
+  AUTO_UPDATE=$(opt '.auto_update_claude // false')
+  REMOTE_CONTROL=$(opt '.enable_remote_control // false')
+  RC_SESSION_PREFIX=$(opt '.remote_control_session_prefix // "HomeAssistant"')
+  RC_SERVER=$(opt '.remote_control_server // false')
+  RC_PERMISSION_MODE=$(opt '.remote_control_permission_mode // "default"')
+  AUTO_LAUNCH=$(opt '.auto_launch_claude // "off"')
+  EXTRA_PKGS=$(opt '.extra_npm_packages // [] | join(" ")')
+  # Sane fallbacks if options.json itself was unreadable.
+  : "${FONT_SIZE:=14}" "${THEME:=dark}" "${SESSION_PERSIST:=true}" "${ENABLE_MCP:=true}"
+  : "${ENABLE_PLAYWRIGHT:=false}" "${AUTO_UPDATE:=false}" "${REMOTE_CONTROL:=false}"
+  : "${RC_SESSION_PREFIX:=HomeAssistant}" "${RC_SERVER:=false}" "${RC_PERMISSION_MODE:=default}"
+  : "${AUTO_LAUNCH:=off}"
+}
+
+scrub_legacy_token() {
+  # Versions before 1.2.65 persisted $SUPERVISOR_TOKEN into settings.json.
+  jq -e '.mcpServers.homeassistant.env.HASS_TOKEN' "$SETTINGS_FILE" > /dev/null 2>&1 || return 0
+  if settings_set 'del(.mcpServers.homeassistant.env.HASS_TOKEN)'; then
+    info "Removed a Supervisor token that older versions persisted into settings.json"
+    info "That file lives in your HA config dir and is included in backups"
+  else
+    warn "Could not strip the persisted Supervisor token from settings.json - it is still there"
+  fi
+}
+
+check_avx() {
+  # AVX is an x86 feature: ARM builds of Claude Code don't need it, and ARM
+  # /proc/cpuinfo never lists it, so the warning would fire on every ARM board.
+  HAS_AVX=true
+  case "$(uname -m)" in x86_64|amd64|i?86) ;; *) return 0 ;; esac
+  grep -qw avx /proc/cpuinfo 2>/dev/null && return 0
+  HAS_AVX=false
+  warn "This CPU does not expose AVX. Claude Code 2.1.113+ is a Bun-compiled"
+  warn "binary that requires it, so this add-on is running an older release."
+  warn 'On Proxmox set the VM CPU type to "host" (or x86-64-v3), then fully'
+  warn "stop and start the VM. Verify with: grep -o -m1 avx2 /proc/cpuinfo"
+}
+
+# Probe the claude CLI once, keeping the evidence: the output and exit code
+# land in CLAUDE_PROBE_OUT/RC so check_claude can say WHY it failed (a SIGILL
+# from a missing CPU feature and a 30s hang look identical when both are sent
+# to /dev/null, and that difference is the whole diagnosis on AVX-less hosts).
+claude_responds() {
+  CLAUDE_PROBE_OUT=$(timeout 30 claude --version < /dev/null 2>&1)
+  CLAUDE_PROBE_RC=$?
+  [ "$CLAUDE_PROBE_RC" -eq 0 ]
+}
+
+maybe_update_claude() {
+  local built installed latest
+  built=$(cat /etc/claude-code-version 2>/dev/null || echo unknown)
+  installed=""
+  # Without AVX the probe would hang for 30s and tell us nothing.
+  if [ "$HAS_AVX" = "true" ] && claude_responds; then
+    installed=${CLAUDE_PROBE_OUT%% *}
+  fi
+  [ -n "$installed" ] || installed=$built
+  if [ "$AUTO_UPDATE" != "true" ]; then
+    info "Claude Code $installed"
+    return 0
+  fi
+  if [ "$HAS_AVX" = "false" ]; then
+    warn "auto_update_claude is on, but this CPU lacks AVX; skipping the update"
+    info "Claude Code $installed"
+    return 0
+  fi
+  latest=$(timeout 60 npm view @anthropic-ai/claude-code version 2>/dev/null || echo '')
+  if [ -z "$latest" ]; then
+    warn "npm registry unreachable; keeping Claude Code $installed"
+  elif [ "$latest" = "$installed" ]; then
+    info "Claude Code $installed (already current)"
+  else
+    info "Updating Claude Code $installed -> $latest"
+    timeout 300 npm install -g "@anthropic-ai/claude-code@$latest" || warn "Update failed; keeping the installed version"
+    if ! timeout 30 claude --version < /dev/null > /dev/null 2>&1; then
+      err "Claude Code $latest does not run here; rolling back to $installed"
+      timeout 300 npm install -g "@anthropic-ai/claude-code@$installed" || err "Rollback failed"
+    fi
+  fi
+}
+
+install_extra_npm_packages() {
+  [ -n "$EXTRA_PKGS" ] || return 0
+  local prefix=$PERSIST_DIR/npm-global log=/tmp/npm-extra.log rc
+  if ! mkdir -p "$prefix"; then
+    warn "Could not create $prefix; skipping extra_npm_packages"
+    return 0
+  fi
+  info "Installing extra_npm_packages: $EXTRA_PKGS"
+  # shellcheck disable=SC2086  # EXTRA_PKGS is a space-separated list
+  timeout 300 npm install -g --prefix="$prefix" $EXTRA_PKGS > "$log" 2>&1
+  rc=$?
+  tail -5 "$log" 2>/dev/null
+  case $rc in
+    0)   ;;
+    124) warn "extra_npm_packages install timed out after 300s (registry unreachable or slow); continuing without them" ;;
+    *)   warn "Some extra_npm_packages failed to install (npm exit $rc); continuing without them" ;;
+  esac
+}
+
+check_claude() {
+  if claude_responds; then
+    CLAUDE_OK=true
+    info "claude CLI responds: ${CLAUDE_PROBE_OUT:-version unknown}"
+  else
+    CLAUDE_OK=false
+    case "$CLAUDE_PROBE_RC" in
+      124) err "claude CLI hung and was killed after 30s (exit 124) - on hosts without AVX the Claude binary can deadlock instead of crashing (see the CPU warning above, if any)" ;;
+      132) err "claude CLI crashed with SIGILL (exit 132): the binary uses CPU instructions this host does not expose - this is the AVX problem (see the CPU warning above)" ;;
+      139) err "claude CLI crashed with SIGSEGV (exit 139)" ;;
+      127) err "claude CLI not found on PATH (exit 127)" ;;
+      *)   err "claude CLI failed (exit $CLAUDE_PROBE_RC)" ;;
+    esac
+    [ -n "$CLAUDE_PROBE_OUT" ] && err "claude --version said: $(printf '%s' "$CLAUDE_PROBE_OUT" | tail -3 | tr '\n' ' ')"
+    err "Skipping MCP setup and auto-launch; the terminal will still start so you can debug from inside the add-on"
+  fi
+}
+
+configure_mcp() {
+  if [ "$CLAUDE_OK" = "true" ]; then
+    timeout 30 claude mcp remove homeassistant -s user > /dev/null 2>&1 || true
+    timeout 30 claude mcp remove playwright -s user > /dev/null 2>&1 || true
+  fi
+
+  if [ "$CLAUDE_OK" = "true" ] && [ "$ENABLE_MCP" = "true" ]; then
+    if timeout 30 claude mcp add-json homeassistant '{"command":"hass-mcp"}' -s user; then
+      info "MCP configured with Home Assistant integration"
+      local allowed='["mcp__homeassistant__get_version","mcp__homeassistant__get_entity","mcp__homeassistant__list_entities","mcp__homeassistant__search_entities_tool","mcp__homeassistant__domain_summary_tool","mcp__homeassistant__list_automations","mcp__homeassistant__get_history","mcp__homeassistant__get_error_log","Read(/homeassistant/**)","Read(/config/**)","Read(/share/**)","Read(/media/**)","Glob(/homeassistant/**)","Glob(/config/**)","Grep(/homeassistant/**)","Grep(/config/**)"]'
+      # shellcheck disable=SC2016  # $tools is a jq variable
+      if settings_set --argjson tools "$allowed" '.permissions.allow = ($tools + (.permissions.allow // []) | unique)'; then
+        info "Pre-authorized read-only MCP tools"
+      else
+        warn "Could not pre-authorize MCP tools in settings.json"
+      fi
+    else
+      warn "claude mcp add-json failed; Home Assistant MCP not configured"
+    fi
+  elif [ "$ENABLE_MCP" = "true" ]; then
+    warn "MCP is enabled but was skipped: the claude CLI is not responding"
+  else
+    info "MCP disabled"
+  fi
+
+  if [ "$CLAUDE_OK" = "true" ] && [ "$ENABLE_PLAYWRIGHT" = "true" ]; then
+    local pw_json
+    pw_json=$(jq -nc --arg host "$PLAYWRIGHT_HOST" '{command:"/usr/local/bin/playwright-mcp-launch", env:{PLAYWRIGHT_CDP_HOST:$host}}')
+    if timeout 30 claude mcp add-json playwright "$pw_json" -s user; then
+      if [ -n "$PLAYWRIGHT_HOST" ]; then
+        info "Playwright MCP enabled (host override: $PLAYWRIGHT_HOST)"
+      else
+        info "Playwright MCP enabled (hostname auto-detected each time the MCP server starts)"
+      fi
+    else
+      warn "claude mcp add-json failed; Playwright MCP not configured"
+    fi
+  elif [ "$ENABLE_PLAYWRIGHT" = "true" ]; then
+    warn "Playwright MCP is enabled but was skipped: the claude CLI is not responding"
+  else
+    info "Playwright MCP disabled"
+  fi
+}
+
+apply_settings() {
+  if [ "$REMOTE_CONTROL" = "true" ]; then
+    if settings_set '.remoteControlAtStartup = true'; then
+      info "Remote Control enabled - Claude Code will auto-start with remote control"
+    else
+      warn "Could not enable remoteControlAtStartup in settings.json"
+    fi
+    export CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX="$RC_SESSION_PREFIX"
+  else
+    settings_set 'del(.remoteControlAtStartup)' || warn "Could not clear remoteControlAtStartup in settings.json"
+    info "Remote Control auto-start disabled"
+  fi
+}
+
+build_shell_cmd() {
+  if [ "$THEME" = "dark" ]; then
+    COLORS=$DARK_THEME
+  else
+    COLORS=$LIGHT_THEME
+  fi
+
+  [ "$CLAUDE_OK" = "true" ] || AUTO_LAUNCH=off
+  CLAUDE_FLAGS=""
+  [ "$REMOTE_CONTROL" = "true" ] && CLAUDE_FLAGS="--remote-control"
+  case "$AUTO_LAUNCH" in
+    continue) AUTO_LAUNCH_ARGS="--continue $CLAUDE_FLAGS" ;;
+    new)      AUTO_LAUNCH_ARGS="$CLAUDE_FLAGS" ;;
+    *)        AUTO_LAUNCH_ARGS="" ;;
+  esac
+  export CLAUDE_FLAGS AUTO_LAUNCH_ARGS
+  info "Auto-launch: $AUTO_LAUNCH"
+
+  # What each terminal runs; under tmux it is the pane command.
+  local pane_cmd=""
+  [ "$AUTO_LAUNCH" != "off" ] && pane_cmd=$AUTO_LAUNCH_BIN
+  if [ "$SESSION_PERSIST" = "true" ]; then
+    SHELL_CMD="tmux new-session -A -s claude${pane_cmd:+ $pane_cmd}"
+  else
+    SHELL_CMD="${pane_cmd:-bash --login}"
+  fi
+}
+
+# `claude remote-control` in its own tmux session, restarted when it exits.
+# This is the first tmux command of the boot when it runs, so the tmux server
+# takes its environment (HA_TOKEN, CLAUDE_FLAGS, the Remote Control prefix)
+# from this process; later panes inherit the server's.
+start_rc_server() {
+  if [ "$RC_SERVER" != "true" ]; then
+    return 0
+  elif [ "$REMOTE_CONTROL" != "true" ]; then
+    warn "remote_control_server requires enable_remote_control - server not started"
+  elif [ "$CLAUDE_OK" != "true" ]; then
+    warn "Remote Control server is enabled but was skipped: the claude CLI is not responding"
+  elif tmux new-session -d -s rc -c "$WORK_DIR" "while true; do claude remote-control --permission-mode $RC_PERMISSION_MODE; echo '[rc] claude remote-control exited, restarting in 30s'; sleep 30; done"; then
+    info "Remote Control server started (permission mode: $RC_PERMISSION_MODE) - view it with: tmux attach -t rc"
+  else
+    warn "Failed to start the Remote Control server"
+  fi
+}
+
+start_stdin_runner() {
+  # Headless runs from automations (hassio.addon_stdin): the runner reads the
+  # container's stdin, which config.yaml's `stdin: true` keeps open. fd 0 is
+  # passed explicitly because bash gives background jobs /dev/null; the trap
+  # reset undoes bash's SIG_IGN on INT/QUIT for background jobs, which every
+  # tool a task runs would otherwise inherit.
+  ( trap - INT QUIT; exec "$STDIN_RUNNER" ) <&0 &
+  STDIN_RUNNER_PID=$!
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+run_step "set up persistent config dir" setup_persist_dir
+run_step "read add-on options" read_options
+run_step "init settings.json" settings_init
+run_step "scrub legacy token" scrub_legacy_token
+run_step "CPU feature check" check_avx
+run_step "Claude Code update check" maybe_update_claude
+run_step "install extra npm packages" install_extra_npm_packages
+run_step "probe claude CLI" check_claude
+run_step "configure MCP servers" configure_mcp
+run_step "apply settings.json options" apply_settings
+run_step "build terminal command" build_shell_cmd
+run_step "start Remote Control server" start_rc_server
+run_step "start stdin task runner" start_stdin_runner
+
+trap - EXIT
+CURRENT_STEP="web terminal (ttyd)"
+info "Startup finished in ${SECONDS}s"
+start_ttyd

@@ -109,5 +109,13 @@ configuration:
       approuve les modifications de fichiers ; "auto" laisse Claude decider des
       actions sures ; "plan" se limite a planifier ; "dontAsk" refuse tout ce
       qui n'est pas pre-approuve. Ne s'applique que si le serveur est actif.
+  debug_logging:
+    name: Journalisation de debogage au demarrage
+    description: >-
+      Trace chaque commande du script de demarrage de l'add-on dans le journal
+      de l'add-on (bash -x) avec horodatage. A activer quand l'add-on ne demarre
+      pas sans que le journal en donne la raison, puis a desactiver - le journal
+      devient tres verbeux.
+
 network:
   7681/tcp: Terminal Web (ttyd)

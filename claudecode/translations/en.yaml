@@ -103,6 +103,13 @@ configuration:
       edits; "auto" lets Claude decide which actions are safe to run; "plan" only
       plans; "dontAsk" denies anything not pre-approved. Only applies when Remote
       Control Server is on.
+  debug_logging:
+    name: Debug startup logging
+    description: >-
+      Trace every command of the add-on's startup script into the add-on log
+      (bash -x) with timestamps. Turn this on when the add-on fails to boot and
+      the log does not say why, then turn it off again - the log gets very
+      verbose.
 
 network:
   7681/tcp: Web Terminal (ttyd)
