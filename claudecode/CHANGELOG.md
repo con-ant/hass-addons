@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.2.65-con.38] - 2026-11-11
+## [1.2.65-con.37] - 2026-11-11
 
 Claude Jobs on Fable fall back to Opus when the Fable usage limit is reached.
 The 2026-11-11 health check stopped sixteen turns in with "You've reached your
