@@ -1,0 +1,19 @@
+# Copy to /etc/nut/upsmon.conf, mode 640, root:nut.
+# This is the config for the HOST RUNNING THE DRIVER (the Raspberry Pi).
+# Clients use `secondary` and their own upssched -- see README.
+MONITOR east@localhost 1 upsmon CHANGE-ME primary
+MINSUPPLIES 1
+POLLFREQ 5
+POLLFREQALERT 5
+DEADTIME 15
+
+# DELIBERATELY A NO-OP. This host is the cluster quorum device AND the NUT
+# server: if it halts first, every client loses the UPS signal exactly when it
+# matters, and the cluster loses its quorum arbitrator. Shutdown of the real
+# loads belongs to upssched on the clients. See "The Pi policy" in the README
+# before changing this.
+SHUTDOWNCMD "/usr/bin/logger -t upsmon SHUTDOWNCMD-disparado-noop"
+NOTIFYCMD "/usr/bin/logger -t upsmon"
+NOTIFYFLAG ONBATT SYSLOG+EXEC
+NOTIFYFLAG ONLINE SYSLOG+EXEC
+NOTIFYFLAG LOWBATT SYSLOG+EXEC

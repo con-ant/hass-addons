@@ -1,0 +1,29 @@
+[Unit]
+Description=EAST EA900 G4 Modbus to NUT bridge
+Documentation=https://networkupstools.org/docs/man/dummy-ups.html
+After=network.target
+Before=nut-driver.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/east2nut.conf
+ExecStart=/usr/local/sbin/east2nut.py
+Restart=always
+RestartSec=5
+
+# The state file is rewritten every 10s. The host boots from an SD card, so it
+# lives on tmpfs: systemd creates /run/east2nut and Preserve keeps it across a
+# daemon restart so the dummy-ups driver never loses its file.
+RuntimeDirectory=east2nut
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# Hardening: it needs the serial port and nothing else writable.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+DeviceAllow=/dev/ttyUSB0 rw
+
+[Install]
+WantedBy=multi-user.target

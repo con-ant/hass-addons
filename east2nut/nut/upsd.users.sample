@@ -1,0 +1,5 @@
+# Copy to /etc/nut/upsd.users, mode 640, root:nut.
+# Reads are anonymous in NUT; this login exists for upsmon only.
+[upsmon]
+    password = CHANGE-ME
+    upsmon primary
