@@ -63,6 +63,8 @@ description: Daily health check; reports anything a human should look at.
 model: opus
   # optional · default: the add-on option job_default_model (ships "opus").
   # Must be one of: fable, opus, sonnet, haiku (aliases only).
+  # A fable job that hits the Fable usage limit is re-run once on opus, and the
+  # entity's model_fallback attribute says so.
 
 timeout: 600
   # optional · seconds · default 600 · 30..3600. Wall clock for the Claude process;
@@ -71,7 +73,8 @@ timeout: 600
 max_cost_usd: 1.50
   # optional · default 1.00 · 0.01..5.00. A HARD mid-run stop: the run ends as
   # `error` "stopped at budget cap". On opus even a trivial run costs ~$0.08
-  # (~$0.15 on fable), so values below that fail immediately.
+  # (~$0.15 on fable), so values below that fail immediately. Applies per attempt:
+  # a fable run re-run on opus after the Fable limit can spend up to twice this.
 
 max_turns: 50
   # optional · default 50 · 2..200 (submitting the result itself uses a turn).
@@ -997,6 +1000,7 @@ judgment row, envelope, cost); the run transcript under
 | `sensor.claude_jobs_attention` does not exist at all | the `packages:` include is missing, HA was not restarted after adding it, or HA rejected the package — Settings → System → Logs, search `claudecode_jobs` (a duplicate `rest_command` name from the interim setup is the usual cause) |
 | job entity `error`, headline `runner died without reporting` (`reason: lost`) | the run's process disappeared without writing a result — container killed, host reboot, out of memory. Demoted by the tick; the next run heals it. Check the add-on log around `started_at` |
 | `error` · `claude.ai login expired — run /login in the terminal` | the OAuth login is gone (one automatic retry already happened). Open the terminal, start `claude`, run `/login` |
+| `error` · `run failed: You've reached your Opus limit…` after a `model_fallback` | the job's Fable run hit the Fable limit and its Opus re-run hit the Opus limit too. Wait for the limit to reset, or set a cheaper `model:` |
 | `error` · `stopped at budget cap $1.00` (`reason: max_budget`) | the run hit `max_cost_usd` mid-flight. Raise it (≤ 5.00), narrow the prompt, or use a cheaper `model:` |
 | `error` · `hit max turns (50) before finishing` | raise `max_turns` (≤ 200) or narrow the job; keep `timeout ≥ max_turns × 10 s` |
 | `error` · `timed out after 600s` | no result at all was produced. Raise `timeout` (≤ 3600) or find the slow tool call in the transcript |

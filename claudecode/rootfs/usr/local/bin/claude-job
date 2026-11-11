@@ -62,6 +62,8 @@ NESTING_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOI
 ABORT_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)                        # A14 (+ HUP: closed terminal)
 AUTH_RE = re.compile(r"(oauth|authentication|unauthorized|401|token.*(expired|invalid|revoked)|please.*(log ?in|/login))", re.I)  # A.8
 LOGIN_EXPIRED_HEADLINE = "claude.ai login expired — run /login in the terminal"
+MODEL_LIMIT_ERROR = "model_requires_usage_credits"                                    # A.8b: envelope api_error
+MODEL_LIMIT_RE = re.compile(r"reached your (fable|opus|sonnet|haiku) limit", re.I)    # A.8b: envelope result text
 POLL_S = 0.1                     # every wait is a polling loop this fine (R3)
 BROKER_READY_WAIT_S = 5.0        # 2i: one ready line within 5 s
 PUBLISH_TIMEOUT_S = 5.0          # terminal publish; the abort path uses jc.JOB_TERM_PUBLISH_TIMEOUT_S (1.5 s, A.2)
@@ -142,6 +144,8 @@ class Run:
     spawn_t: float = 0.0
     attempts: int = 0
     retried_auth: bool = False
+    model_fallback: Optional[str] = None   # A.8b: the model the retry ran on after the job's own hit its limit
+    prior_cost_usd: float = 0.0       # cost of earlier attempts this run; added to the final attempt's
     exit_code: Optional[int] = None
     elapsed: float = 0.0
     envelope: Optional[dict] = None
@@ -637,7 +641,8 @@ def write_pgid_file(run: Run) -> None:
 def spawn_claude(run: Run) -> None:
     """The exact §4.4 invocation. stdout/stderr go to files, not pipes, so waiting is pure polling (R3)."""
     if run.argv is None:
-        run.argv = jobdef.claude_argv(run.job, prompt=jobdef.assemble_prompt(run.job, run.input), schema=run.schema,
+        job = dataclasses.replace(run.job, model=run.model_fallback) if run.model_fallback else run.job
+        run.argv = jobdef.claude_argv(job, prompt=jobdef.assemble_prompt(run.job, run.input), schema=run.schema,
                                      settings_path=run.settings_path, mcp_path=run.mcp_path,
                                      contract=jobdef.load_contract(), broker_port=run.broker_port,
                                      nonce=run.nonce, tz=run.tz, extra_env=jobdef.network_env_passthrough())
@@ -671,6 +676,14 @@ def wait_and_judge(run: Run) -> Verdict:
         spawn_claude(run)
         run.retried_auth = True
         verdict = run_attempt(run, auth_retried=True)
+    own = jc.MODEL_ALIASES.get(run.job.model, run.job.model)
+    fallback = jc.MODEL_LIMIT_FALLBACK.get(own)
+    if verdict.extra.get("model_limited") and fallback and run.model_fallback is None:
+        model_fallback_restart(run, own, fallback, verdict)
+        verdict = run_attempt(run, auth_retried=run.retried_auth)
+        note = f"Ran on {fallback}: the {own} usage limit was reached."
+        detail = str(verdict.extra.get("detail") or "")     # error rows carry none: no leading separator then
+        verdict.extra["detail"] = f"{detail}\n\n---\n{note}" if detail else note
     return verdict
 
 
@@ -697,6 +710,25 @@ def run_attempt(run: Run, *, auth_retried: bool) -> Verdict:
                     auth_retried=auth_retried)
     run.envelope = verdict.extra.pop("envelope", None)   # judge() hands the parsed envelope back for the log
     return verdict
+
+
+def model_fallback_restart(run: Run, own: str, model: str, verdict: Verdict) -> None:
+    """A.8b: the job's model (`own`, canonical) hit its own usage limit; start over on `model` with a fresh
+    timeout window and a fresh max_cost_usd (the run total can reach twice the cap; documented)."""
+    log(f"{own} usage limit reached; re-running on {model}")
+    jc.append_jsonl(run.log_path, {"ts": jc.now_iso(), "event": "model_fallback", "job": run.name,
+                                   "run_id": run.run_id, "from": own, "to": model,
+                                   "headline": verdict.headline, "cost_usd": verdict.extra.get("cost_usd")})
+    run.prior_cost_usd += float(verdict.extra.get("cost_usd") or 0.0)
+    run.model_fallback, run.argv, run.claude = model, None, None
+    run.deadline = iso_plus(jc.now_iso(), run.job.timeout + float(jc.JOB_KILL_GRACE_S))
+    state = read_state(run)
+    if isinstance(state.get("run"), dict):
+        state["run"].update({"deadline": run.deadline, "attempt": run.attempts + 1, "model_fallback": model})
+        write_state(run, state)
+    write_pgid_file(run)
+    check_abort(run)
+    spawn_claude(run)
 
 
 def auth_retry_pause(run: Run) -> None:
@@ -747,6 +779,8 @@ def judge(*, exit_code: int, elapsed: float, timeout_s: int, stdout: str, stderr
         errors = envelope.get("errors") if isinstance(envelope.get("errors"), list) else []
         text = str(errors[0]) if errors else str(envelope.get("result") or subtype or "unknown error")
         facts["auth_shaped"] = bool(AUTH_RE.search(" ".join(map(str, errors)) + " " + str(envelope.get("result") or "")))
+        facts["model_limited"] = (envelope.get("api_error") == MODEL_LIMIT_ERROR or
+                                  bool(MODEL_LIMIT_RE.search(str(envelope.get("result") or ""))))
         if facts["auth_shaped"] and auth_retried:
             return Verdict("error", LOGIN_EXPIRED_HEADLINE, reason="login_expired", row=8, extra=facts)
         return Verdict("error", cap(f"run failed: {text[:120]}"), reason="run_failed", row=8, extra=facts)
@@ -922,8 +956,10 @@ def build_result(run: Run, v: Verdict) -> dict:
         "exit_code": run.exit_code, "hard_killed": bool(x.get("hard_killed", False)),
         "started_at": run.started_at or ended_at, "ended_at": ended_at,
         "duration_s": round(time.monotonic() - run.t0, 1) if run.t0 else 0.0,
-        "cost_usd": round(float(x.get("cost_usd") or 0.0), 4), "over_budget": bool(x.get("over_budget", False)),
+        "cost_usd": round(float(x.get("cost_usd") or 0.0) + run.prior_cost_usd, 4),
+        "over_budget": bool(x.get("over_budget", False)),
         "model": run.job.model if run.job else None, "model_resolved": x.get("model_resolved"),
+        "model_fallback": run.model_fallback,
         "trigger": run.trigger, "attempts": run.attempts, "retried_auth": run.retried_auth,
         "claude_version": (run.preflight or {}).get("claude_version"), "num_turns": x.get("num_turns"),
         "permission_denials": x.get("permission_denials") or [], "validation_errors": x.get("validation_errors") or [],
@@ -958,7 +994,8 @@ def append_run_record(run: Run, v: Verdict, state: dict) -> None:
         "ts": jc.now_iso(), "event": "run", "job": run.name, "run_id": run.run_id, "session_id": result["session_id"],
         "trigger": run.trigger, "claude_version": result["claude_version"], "argv": elide_argv(run.argv),
         "exit": run.exit_code, "elapsed_s": round(run.elapsed, 1), "timeout_s": run.job.timeout if run.job else None,
-        "attempts": run.attempts, "retried_auth": run.retried_auth, "envelope": envelope_for_log(run.envelope),
+        "attempts": run.attempts, "retried_auth": run.retried_auth, "model_fallback": run.model_fallback,
+        "envelope": envelope_for_log(run.envelope),
         "judgment_row": v.row, "state": v.status, "headline": v.headline, "reason": v.reason,
         "cost_usd": result["cost_usd"], "hard_killed": result["hard_killed"],
         "validation_errors": result["validation_errors"], "denials": len(result["permission_denials"]),

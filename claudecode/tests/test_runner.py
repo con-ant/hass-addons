@@ -268,6 +268,50 @@ class TestJudgmentRows(RunnerCase):
         self.assertEqual(events, ["auth_retry", "run"])
         self.assertEqual(self.s.read_json(self.s.state / "_cost.json")["runs"], 1)
 
+    def test_row8_fable_limit_falls_back_to_opus(self):
+        self.s.write_job(JOB, dict(HEALTH_CHECK_FM, model="fable"), "Check the house.\n")
+        self.scenario("model_limit", FAKE_CLAUDE_COST="0.30")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 0, "ok", None, 13)
+        self.assertEqual([c["parsed"]["model"] for c in self.s.fake_claude_calls()], ["fable", "opus"])
+        res = self.result()
+        self.assertEqual((res["model"], res["model_fallback"], res["model_resolved"], res["attempts"]),
+                         ("fable", "opus", "claude-opus-5", 2))
+        self.assertEqual(res["cost_usd"], 0.6)                        # the Fable attempt's spend is not lost
+        self.assertEqual(self.s.read_json(self.s.state / "_cost.json")["runs"], 1)
+        self.assertTrue(res["detail"].endswith("Ran on opus: the fable usage limit was reached."), res["detail"])
+        log = self.s.job_log(JOB)
+        self.assertEqual([ln["event"] for ln in log], ["model_fallback", "run"])
+        self.assertEqual((log[0]["from"], log[0]["to"], log[1]["model_fallback"]), ("fable", "opus", "opus"))
+        self.assertIn("--model opus", " ".join(log[1]["argv"]))
+        self.assertEqual(self.last_post()["attributes"]["model_fallback"], "opus")
+
+    def test_row8_fallback_costs_add_up_and_a_second_limit_is_reported(self):
+        self.s.write_job(JOB, dict(HEALTH_CHECK_FM, model="fable"), "Check the house.\n")
+        self.scenario("model_limit:fable,opus", FAKE_CLAUDE_COST="0.25")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 1, "error", "run_failed", 8)
+        self.assertEqual(len(self.s.fake_claude_calls()), 2)          # exactly one fallback, never a chain
+        self.assertTrue(self.result()["headline"].startswith("run failed: You've reached your Opus limit"))
+        self.assertEqual((self.result()["model_fallback"], self.result()["cost_usd"]), ("opus", 0.5))
+        self.assertEqual(self.result()["detail"], "Ran on opus: the fable usage limit was reached.")
+
+    def test_row8_fallback_for_a_full_fable_id_names_the_alias(self):
+        self.s.write_job(JOB, dict(HEALTH_CHECK_FM, model="claude-fable-5"), "Check the house.\n")
+        self.scenario("model_limit:claude-fable-5")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 0, "ok", None, 13)
+        self.assertEqual([c["parsed"]["model"] for c in self.s.fake_claude_calls()], ["claude-fable-5", "opus"])
+        self.assertEqual(self.s.job_log(JOB)[0]["from"], "fable")
+        self.assertTrue(self.result()["detail"].endswith("Ran on opus: the fable usage limit was reached."))
+
+    def test_row8_limit_on_a_model_without_fallback_is_not_retried(self):
+        self.scenario("model_limit:opus")                              # the default test job runs on opus
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 1, "error", "run_failed", 8)
+        self.assertEqual(len(self.s.fake_claude_calls()), 1)
+        self.assertEqual((self.result()["attempts"], self.result()["model_fallback"]), (1, None))
+
     def test_row7_budget_cap(self):
         self.scenario("budget")
         rc, _, _ = self.run_job()
@@ -888,6 +932,16 @@ class TestJudgePure(unittest.TestCase):
         second = self.judge(exit_code=1, stdout=env, auth_retried=True)
         self.assertEqual((second.row, second.reason, second.headline),
                          (8, "login_expired", "claude.ai login expired — run /login in the terminal"))
+
+    def test_model_limit_detection(self):
+        limit = self.env(is_error=True, api_error="model_requires_usage_credits",
+                         result="You've reached your Fable limit. Switch to another model.")
+        v = self.judge(exit_code=1, stdout=limit)
+        self.assertEqual((v.row, v.reason, v.extra["model_limited"], v.extra["auth_shaped"]), (8, "run_failed", True, False))
+        text_only = self.env(is_error=True, result="You've reached your Fable limit.")
+        self.assertTrue(self.judge(exit_code=1, stdout=text_only).extra["model_limited"])
+        account = self.env(is_error=True, api_error="rate_limit_error", result="You've reached your usage limit.")
+        self.assertFalse(self.judge(exit_code=1, stdout=account).extra["model_limited"])
 
     def test_exit_codes_only_matter_without_envelope(self):
         self.assertEqual(self.judge(exit_code=124, stdout=self.env()).row, 13)      # envelope wins

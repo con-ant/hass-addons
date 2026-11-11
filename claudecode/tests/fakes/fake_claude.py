@@ -24,6 +24,9 @@ Modes
   is_error           error_during_execution, errors ["boom"], exit 1
   auth_error         error_during_execution "OAuth token has expired..." the
                      FIRST time (marker file $FAKE_CLAUDE_AUTH_ONCE), then success
+  model_limit[:m,..] the job hit its model's usage limit (429 model_requires_usage_credits,
+                     "You've reached your Fable limit") when --model is one of m (default
+                     fable); any other model succeeds
   garbage            prints "not json", exit 1
   sleep:<s>          sleep s seconds, then success
   ignore_term:<s>    ignore SIGTERM, sleep s seconds, then success
@@ -273,6 +276,16 @@ def run_print_mode(argv: list) -> int:
                 f.write("1\n")
             return emit(error_envelope(parsed, "error_during_execution",
                                        ["OAuth token has expired. Please run /login"], "completed"), 1)
+        return emit(success_envelope(parsed, "ok"), 0)
+    if name == "model_limit":
+        model = parsed.get("model") or "fable"
+        if model in (arg or "fable").split(","):
+            env = base_envelope(parsed, float(os.environ.get("FAKE_CLAUDE_COST", "0.12")), 1)
+            env.update({"is_error": True, "terminal_reason": "api_error", "api_error_status": 429,
+                        "api_error_origin": "first_party", "api_error": "model_requires_usage_credits",
+                        "result": f"You've reached your {model.capitalize()} limit. Switch to another model, or "
+                                  "manage usage credits at https://claude.ai/settings/usage, to continue."})
+            return emit(env, 1)
         return emit(success_envelope(parsed, "ok"), 0)
     if name == "garbage":
         sys.stdout.write("not json\n")
