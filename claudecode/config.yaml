@@ -1,6 +1,6 @@
 name: Claude Code
 description: Run Claude Code AI assistant inside Home Assistant to create automations, debug issues, and manage your smart home configuration
-version: "1.2.65-con.36"
+version: "1.2.65-con.37"
 slug: claudecode
 url: https://github.com/con-ant/hass-addons
 arch:
@@ -12,8 +12,12 @@ arch:
 # claude.ai for Remote Control, and `hostname` in the terminal matches the
 # box. Scripts never rely on the container hostname: the job package asks the
 # Supervisor for the add-on's resolvable name, Playwright derives its target
-# from the slug. The AppArmor profile grants no sys_admin, so sethostname()
-# stays impossible and the host's name cannot be changed from here.
+# from the slug. The AppArmor profile grants no sys_admin, so a process in this
+# container cannot call sethostname() (the add-on's Docker socket and
+# full_access reach the host anyway, as the README's security note says).
+# Docker still writes the container id, not the host's name, into /etc/hosts,
+# so `homeassistant` keeps resolving through the Supervisor's DNS to HA Core
+# (checked on a live install, 2026-11-03).
 host_uts: true
 # Seconds the Supervisor waits after SIGTERM before killing the container.
 # claudecode-start signals in-flight job runs first, hands a running Claude a

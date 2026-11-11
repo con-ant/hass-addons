@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.37] - 2026-11-03
+
+From the review of the `ha-ws` + `host_uts` port being offered upstream (PR 2 of
+upstream issue #59); the fork takes the fixes first.
+
+### Fixed
+- `ha-ws`: `--timeout 0`, a negative value or `inf` is refused in one line
+  (`inf` used to crash with a traceback and exit 1, 0 timed out before the
+  first read); the socket timeout is reset to the full deadline before each
+  command is sent, so a large payload sent right after a slow reply no longer
+  fails with a stray `TimeoutError`; a close frame from Home Assistant is
+  reported with its code and reason (e.g. `code 1009: Message size exceeds
+  limit`) instead of a bare "connection closed"
+- `ha-ws --help` says that subscriptions and `render_template` print only
+  their acknowledgement, not the events that follow
+
+### Changed
+- `ha-ws` reads `HA_WS_HOST` and `HA_WS_PORT` (defaults `supervisor`, 80), so the
+  test runs the shipped file instead of a text-edited copy of its source. The
+  test's fake server now accepts any number of connections, closes each on the
+  server thread, and covers the three new error paths
+- `config.yaml`: the `host_uts` comment no longer claims the host's name cannot
+  be changed from the add-on; the profile stops `sethostname()` from this
+  container, while the Docker socket reaches the host regardless
+
 ## [1.2.65-con.36] - 2026-11-03
 
 Tests for the scripts the add-on shares with upstream, written so the same
