@@ -676,12 +676,14 @@ def wait_and_judge(run: Run) -> Verdict:
         spawn_claude(run)
         run.retried_auth = True
         verdict = run_attempt(run, auth_retried=True)
-    fallback = jc.MODEL_LIMIT_FALLBACK.get(jc.MODEL_ALIASES.get(run.job.model, run.job.model))
+    own = jc.MODEL_ALIASES.get(run.job.model, run.job.model)
+    fallback = jc.MODEL_LIMIT_FALLBACK.get(own)
     if verdict.extra.get("model_limited") and fallback and run.model_fallback is None:
-        model_fallback_restart(run, fallback, verdict)
+        model_fallback_restart(run, own, fallback, verdict)
         verdict = run_attempt(run, auth_retried=run.retried_auth)
-        verdict.extra["detail"] = str(verdict.extra.get("detail") or "") + (
-            f"\n\n---\nRan on {fallback}: the {run.job.model} usage limit was reached.")
+        note = f"Ran on {fallback}: the {own} usage limit was reached."
+        detail = str(verdict.extra.get("detail") or "")     # error rows carry none: no leading separator then
+        verdict.extra["detail"] = f"{detail}\n\n---\n{note}" if detail else note
     return verdict
 
 
@@ -710,18 +712,19 @@ def run_attempt(run: Run, *, auth_retried: bool) -> Verdict:
     return verdict
 
 
-def model_fallback_restart(run: Run, model: str, verdict: Verdict) -> None:
-    """A.8b: the job's model hit its own usage limit; start over on `model` with a fresh timeout window."""
-    log(f"{run.job.model} usage limit reached; re-running on {model}")
+def model_fallback_restart(run: Run, own: str, model: str, verdict: Verdict) -> None:
+    """A.8b: the job's model (`own`, canonical) hit its own usage limit; start over on `model` with a fresh
+    timeout window and a fresh max_cost_usd (the run total can reach twice the cap; documented)."""
+    log(f"{own} usage limit reached; re-running on {model}")
     jc.append_jsonl(run.log_path, {"ts": jc.now_iso(), "event": "model_fallback", "job": run.name,
-                                   "run_id": run.run_id, "from": run.job.model, "to": model,
+                                   "run_id": run.run_id, "from": own, "to": model,
                                    "headline": verdict.headline, "cost_usd": verdict.extra.get("cost_usd")})
     run.prior_cost_usd += float(verdict.extra.get("cost_usd") or 0.0)
     run.model_fallback, run.argv, run.claude = model, None, None
     run.deadline = iso_plus(jc.now_iso(), run.job.timeout + float(jc.JOB_KILL_GRACE_S))
     state = read_state(run)
     if isinstance(state.get("run"), dict):
-        state["run"].update({"deadline": run.deadline, "attempt": run.attempts + 1, "model": model})
+        state["run"].update({"deadline": run.deadline, "attempt": run.attempts + 1, "model_fallback": model})
         write_state(run, state)
     write_pgid_file(run)
     check_abort(run)

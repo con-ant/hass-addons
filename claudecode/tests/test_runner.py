@@ -294,6 +294,16 @@ class TestJudgmentRows(RunnerCase):
         self.assertEqual(len(self.s.fake_claude_calls()), 2)          # exactly one fallback, never a chain
         self.assertTrue(self.result()["headline"].startswith("run failed: You've reached your Opus limit"))
         self.assertEqual((self.result()["model_fallback"], self.result()["cost_usd"]), ("opus", 0.5))
+        self.assertEqual(self.result()["detail"], "Ran on opus: the fable usage limit was reached.")
+
+    def test_row8_fallback_for_a_full_fable_id_names_the_alias(self):
+        self.s.write_job(JOB, dict(HEALTH_CHECK_FM, model="claude-fable-5"), "Check the house.\n")
+        self.scenario("model_limit:claude-fable-5")
+        rc, _, _ = self.run_job()
+        self.assertOutcome(rc, 0, "ok", None, 13)
+        self.assertEqual([c["parsed"]["model"] for c in self.s.fake_claude_calls()], ["claude-fable-5", "opus"])
+        self.assertEqual(self.s.job_log(JOB)[0]["from"], "fable")
+        self.assertTrue(self.result()["detail"].endswith("Ran on opus: the fable usage limit was reached."))
 
     def test_row8_limit_on_a_model_without_fallback_is_not_retried(self):
         self.scenario("model_limit:opus")                              # the default test job runs on opus

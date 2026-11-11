@@ -73,7 +73,8 @@ timeout: 600
 max_cost_usd: 1.50
   # optional · default 1.00 · 0.01..5.00. A HARD mid-run stop: the run ends as
   # `error` "stopped at budget cap". On opus even a trivial run costs ~$0.08
-  # (~$0.15 on fable), so values below that fail immediately.
+  # (~$0.15 on fable), so values below that fail immediately. Applies per attempt:
+  # a fable run re-run on opus after the Fable limit can spend up to twice this.
 
 max_turns: 50
   # optional · default 50 · 2..200 (submitting the result itself uses a turn).

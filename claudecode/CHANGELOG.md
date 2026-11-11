@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.2.65-con.37] - 2026-11-11
+## [1.2.65-con.38] - 2026-11-11
 
 Claude Jobs on Fable fall back to Opus when the Fable usage limit is reached.
 The 2026-11-11 health check stopped sixteen turns in with "You've reached your
@@ -17,10 +17,13 @@ only, so the runner does it.
   `model_fallback`, the job log a `model_fallback` event, `detail` ends with a
   line saying so, and `cost_usd` includes the limited attempt. A limit on the
   fallback model is reported as before, never chained; account-wide limits are
-  not retried (Design Appendix A.8b)
-- Tests: a `model_limit` scenario for the fake CLI, three runner tests (fallback,
-  second limit, no fallback for a non-Fable job) and a judge test for the
-  detection
+  not retried (Design Appendix A.8b). The re-run gets the job's full
+  `max_cost_usd` again, so a run that falls back can spend up to twice the cap
+- Tick: a run lost during the fallback attempt keeps `model_fallback` in its
+  `lost` result
+- Tests: a `model_limit` scenario for the fake CLI, four runner tests (fallback,
+  second limit, no fallback for a non-Fable job, a full Fable model ID) and a
+  judge test for the detection
 
 ## [1.2.65-con.36] - 2026-11-03
 

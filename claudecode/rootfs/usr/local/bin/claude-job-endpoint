@@ -964,6 +964,7 @@ class Tick(threading.Thread):
             "started_at": run.get("started_at"), "ended_at": ended,
             "duration_s": round(now - started, 1) if started is not None else None,
             "cost_usd": 0.0, "over_budget": False, "model": run.get("model"),
+            "model_fallback": run.get("model_fallback"),
             "trigger": run.get("trigger"), "attempts": run.get("attempt") or 1, "retried_auth": False,
             "claude_version": self.ep.preflight.get("claude_version"), "num_turns": None,
             "permission_denials": [], "validation_errors": [], "metrics": {}, "actions_selected": [],
