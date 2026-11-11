@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.37] - 2026-11-11
+
+Claude Jobs on Fable fall back to Opus when the Fable usage limit is reached.
+The 2026-11-11 health check stopped sixteen turns in with "You've reached your
+Fable limit" (HTTP 429, `model_requires_usage_credits`) and reported an error,
+although Opus was still available. The CLI's `--fallback-model` covers overload
+only, so the runner does it.
+
+### Added
+- Runner: a run whose envelope reports a model-specific usage limit is re-run
+  once, from the start, on the model `MODEL_LIMIT_FALLBACK` names (`fable →
+  opus`), with a fresh timeout window. The result and the run log carry
+  `model_fallback`, the job log a `model_fallback` event, `detail` ends with a
+  line saying so, and `cost_usd` includes the limited attempt. A limit on the
+  fallback model is reported as before, never chained; account-wide limits are
+  not retried (Design Appendix A.8b)
+- Tests: a `model_limit` scenario for the fake CLI, three runner tests (fallback,
+  second limit, no fallback for a non-Fable job) and a judge test for the
+  detection
+
 ## [1.2.65-con.36] - 2026-11-03
 
 Tests for the scripts the add-on shares with upstream, written so the same

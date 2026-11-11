@@ -207,6 +207,10 @@ def _configure_constants() -> None:
 
 ALLOWED_JOB_MODELS = ("fable", "opus", "sonnet", "haiku")
 MODEL_ALIASES = {"claude-fable-5": "fable"}     # full IDs treated as the same model (§4.2)
+# A.8b: a job whose model hits its own usage limit (HTTP 429 model_requires_usage_credits, "You've
+# reached your Fable limit") is re-run once on this model. Only model-specific limits: an account-wide
+# limit would stop the fallback model too.
+MODEL_LIMIT_FALLBACK = {"fable": "opus"}
 CLI_PREFLIGHT_FLAGS = ("--setting-sources", "--settings", "--tools", "--json-schema", "--strict-mcp-config")
 TOKEN_HEX_CHARS = 64
 INCLUDE_MCP_IN_TOOLS_FLAG = False               # A6: --tools lists built-ins only
@@ -816,6 +820,8 @@ def entity_payload(state: dict):
     verrs = result.get("validation_errors")
     if isinstance(verrs, list) and verrs:
         attrs["validation_errors"] = [str(v) for v in verrs[:10]]
+    if result.get("model_fallback"):                  # A.8b: only on runs that fell back, e.g. "opus"
+        attrs["model_fallback"] = result["model_fallback"]
     attrs["friendly_name"] = friendly
     attrs["icon"] = ICONS.get(status, ICONS["error"])
     return f"sensor.claude_job_{slg}", status, attrs
