@@ -116,6 +116,38 @@ The matching Mosquitto login goes in the add-on's `logins:` option. Use a
 dedicated account — never the Supervisor service account that Home Assistant's
 own mqtt entry uses.
 
+## Recording discharges
+
+Every transfer to battery is a free load test, and this host is the only one
+that can record one: a real outage takes Home Assistant down with it (it runs
+as a VM on a Dell that shuts down), and even when it survives it polls NUT
+about once a minute. On 2026-11-12 it missed a 16-second self-test entirely,
+logging 209.6 V on a dip that actually reached 187.5 V.
+
+So the daemon polls every 5 s normally and drops to **1 s while on battery**,
+appending to `/var/lib/east2nut/discharges.csv` (persistent, via
+`StateDirectory`). Each event carries three phases:
+
+- `pre` — the samples held in memory before the transfer. **This is the part
+  that makes the data usable:** without the measured float voltage immediately
+  before, the sag cannot be split into its fixed float-to-rest offset and its
+  ohmic `I*R` term, and dividing the whole drop by the current overstates the
+  internal resistance by two to four times.
+- `discharge` — one row per second while on battery.
+- `recovery` — 60 s after mains returns, for the recovery curve.
+
+Writes happen only during an event, so this is kilobytes per outage, not the
+8640-writes-a-day problem that put the state file on tmpfs.
+
+`nobreak-degracao.py` consumes it with `--fetch`. It fits the hourly Home
+Assistant statistics and the 1 s events as **separate series** — they measure
+different hardware (the bank was replaced on 2026-11-11) at very different
+quality — and reports standard errors and R² for each. That matters: the old
+bank's 20 hourly events give 70 ±44 mOhm/block with R²=0.12, a range that
+straddles the healthy band. Reported bare, that number reads like a measurement
+and is not one. The deployed copy lives at
+`/homeassistant/scripts/nobreak-degradacao.py`.
+
 ## The Pi policy (unresolved, on purpose)
 
 `upsmon` on this host runs as `primary` with a **no-op `SHUTDOWNCMD`**. That is

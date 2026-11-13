@@ -7,6 +7,10 @@ Before=nut-driver.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/east2nut.conf
+# No .pyc next to the script: the host boots from an SD card and this would be
+# rewritten on every start. It also keeps the root filesystem clean enough to
+# be mounted read-only (or overlayed) later.
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/local/sbin/east2nut.py
 Restart=always
 RestartSec=5
@@ -17,6 +21,12 @@ RestartSec=5
 RuntimeDirectory=east2nut
 RuntimeDirectoryMode=0755
 RuntimeDirectoryPreserve=yes
+
+# Persistent, unlike the state file: /var/lib/east2nut holds discharges.csv,
+# which is appended only while the UPS is on battery. A real outage takes Home
+# Assistant down with it, so this host is the only one that can record the event.
+StateDirectory=east2nut
+StateDirectoryMode=0755
 
 # Hardening: it needs the serial port and nothing else writable.
 ProtectSystem=strict

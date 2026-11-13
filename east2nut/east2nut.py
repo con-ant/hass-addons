@@ -20,6 +20,9 @@ Register map and the status-word bit layout are ported from the east_ups custom
 component (custom_components/east_ups/const.py and coordinator.py).
 """
 
+import collections
+import csv
+import datetime
 import json
 import os
 import queue
@@ -43,9 +46,30 @@ SLAVE = int(os.environ.get("EAST2NUT_SLAVE", "1"))
 # mid-write when the UPS finally dies sitting on persistent storage. systemd
 # provides the directory via RuntimeDirectory=east2nut.
 OUT = os.environ.get("EAST2NUT_OUT", "/run/east2nut/east.dev")
-INTERVAL = float(os.environ.get("EAST2NUT_INTERVAL", "10"))
-# dummy-loop re-reads the file every TIMER seconds, so keep it below INTERVAL.
-TIMER = int(os.environ.get("EAST2NUT_TIMER", "5"))
+INTERVAL = float(os.environ.get("EAST2NUT_INTERVAL", "5"))
+# While on battery, poll hard. A battery self-test lasts about 20 s and a real
+# transfer can be shorter: at 5 s that is three or four samples, which is not
+# enough to see the knee of the discharge curve.
+INTERVAL_OB = float(os.environ.get("EAST2NUT_INTERVAL_OB", "1"))
+# dummy-loop re-reads the file every TIMER seconds, so keep it at or below the
+# normal poll interval.
+TIMER = int(os.environ.get("EAST2NUT_TIMER", "2"))
+
+# Every discharge is a free load test, and the only machine that survives a real
+# outage to record one is this Pi: Home Assistant runs as a VM on a Dell that
+# shuts down, and it polls NUT every ~60 s anyway -- on 2026-11-12 it missed a
+# 16 s self-test entirely, logging 209.6 V when the bank actually sagged to
+# 187.5 V. So the event log lives here, on persistent storage (systemd
+# StateDirectory). Writes happen only during an event, so this is a handful of
+# kilobytes per outage, not the 8640-writes-a-day problem that put the state
+# file on tmpfs.
+EVENTS = os.environ.get("EAST2NUT_EVENTS", "/var/lib/east2nut/discharges.csv")
+# Samples kept in memory so an event can be written with the float voltage that
+# preceded it -- without that, the drop cannot be separated into its fixed
+# offset and its ohmic part, and the resistance estimate is meaningless.
+PRE_SAMPLES = int(os.environ.get("EAST2NUT_PRE_SAMPLES", "12"))
+# Keep logging after the return to mains, to capture the recovery curve.
+POST_SECONDS = float(os.environ.get("EAST2NUT_POST_SECONDS", "60"))
 
 # Low-battery thresholds. Deliberately generous: this bank measured 70 mOhm per
 # block and 2.02 V/cell at rest in 11/2026, and a real outage held only 2m45s,
@@ -471,6 +495,97 @@ class Publisher:
                 print("comando %s falhou: %s" % (key, err), file=sys.stderr, flush=True)
 
 
+# ============================================================================
+# Discharge recorder: every transfer to battery is a free load test.
+# ============================================================================
+
+CSV_FIELDS = [
+    "timestamp", "event", "phase", "ups_status", "battery_voltage",
+    "battery_current", "battery_charge", "battery_runtime_s",
+    "output_active_power", "rectifier_temperature", "load_percentage",
+]
+
+
+def _row(when, event_id, phase, data):
+    return {
+        "timestamp": when,
+        "event": event_id,
+        "phase": phase,
+        "ups_status": ups_status(data),
+        "battery_voltage": "%.1f" % data["battery_voltage"],
+        "battery_current": "%.1f" % data["battery_current"],
+        "battery_charge": "%.1f" % data["battery_remaining_capacity"],
+        "battery_runtime_s": "%.0f" % (data["battery_remaining_time"] * 60),
+        "output_active_power": "%.0f" % data["output_active_power"],
+        "rectifier_temperature": "%.1f" % data["rectifier_temperature"],
+        "load_percentage": "%.1f" % data["load_percentage"],
+    }
+
+
+class DischargeLog:
+    """Appends a CSV row per sample while the UPS is on battery.
+
+    Holds the preceding samples in memory so the float voltage immediately
+    before the transfer is written with the event. Without that reference the
+    total sag cannot be split into the fixed float-to-rest offset and the ohmic
+    I*R term, and dividing the whole drop by the current overstates the internal
+    resistance by two to four times -- the mistake that produced a 147 mOhm
+    reading in the first analysis of this bank.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.recent = collections.deque(maxlen=PRE_SAMPLES)
+        self.event_id = None
+        self.ended_at = None
+
+    def _append(self, rows):
+        if not rows:
+            return
+        d = os.path.dirname(self.path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, mode=0o755, exist_ok=True)
+        new = not os.path.exists(self.path)
+        with open(self.path, "a", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            if new:
+                w.writeheader()
+            for r in rows:
+                w.writerow(r)
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    def observe(self, data, now_iso, on_battery):
+        """Returns the interval the caller should sleep before the next poll."""
+        if on_battery and self.event_id is None:
+            # Transfer just started: open an event and flush the pre-samples.
+            self.event_id = now_iso.replace(":", "").replace("-", "")
+            self.ended_at = None
+            pre = [_row(t, self.event_id, "pre", d) for t, d in self.recent]
+            self._append(pre + [_row(now_iso, self.event_id, "discharge", data)])
+            print("descarga iniciada (evento %s): %.1f V, %.1f A, %.0f W"
+                  % (self.event_id, data["battery_voltage"],
+                     data["battery_current"], data["output_active_power"]),
+                  flush=True)
+        elif on_battery:
+            self._append([_row(now_iso, self.event_id, "discharge", data)])
+        elif self.event_id is not None:
+            # Mains is back. Keep sampling for a while to catch the recovery.
+            if self.ended_at is None:
+                self.ended_at = time.monotonic()
+                print("descarga encerrada (evento %s), gravando recuperacao"
+                      % self.event_id, flush=True)
+            self._append([_row(now_iso, self.event_id, "recovery", data)])
+            if time.monotonic() - self.ended_at >= POST_SECONDS:
+                print("evento %s completo em %s" % (self.event_id, self.path),
+                      flush=True)
+                self.event_id = None
+                self.ended_at = None
+
+        self.recent.append((now_iso, data))
+        return INTERVAL_OB if (on_battery or self.event_id is not None) else INTERVAL
+
+
 def write_atomic(path, text):
     d = os.path.dirname(path)
     if d and not os.path.isdir(d):
@@ -488,6 +603,8 @@ def main():
     mb = None
     pub = None
     fails = 0
+    log = DischargeLog(EVENTS)
+    nap = INTERVAL
     while True:
         started = time.monotonic()
         try:
@@ -500,6 +617,9 @@ def main():
             if pub is not None:
                 pub.drain(mb)
                 pub.publish_state(mqtt_payload(data))
+            on_battery = "OB" in ups_status(data).split()
+            nap = log.observe(data, datetime.datetime.now().isoformat(timespec="seconds"),
+                              on_battery)
             if fails:
                 print("recovered after %d failed polls" % fails, flush=True)
                 fails = 0
@@ -517,7 +637,7 @@ def main():
                     write_atomic(OUT, "ups.status: OFF\nTIMER %d\n" % TIMER)
                 except Exception:
                     pass
-        time.sleep(max(1.0, INTERVAL - (time.monotonic() - started)))
+        time.sleep(max(0.5, nap - (time.monotonic() - started)))
 
 
 if __name__ == "__main__":
