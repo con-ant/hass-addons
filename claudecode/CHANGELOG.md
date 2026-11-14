@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- An add-on update could ship a **stale Claude Code**. Nothing in the
+  `install-claude.sh` layer changed on a version-only bump, and with
+  `.dockerignore` the build context did not change either, so the layer cache
+  served the previous build's CLI. `ARG BUILD_VERSION` is now referenced inside
+  that `RUN`, which puts the add-on version in the layer's cache key. This
+  matters more since `image:` was declared: the resolving build happens once in
+  CI, so a stale layer would reach every user rather than one host.
+  Reported by @epicfailing in #54
+- `auto_update_claude` could **boot-loop the add-on**. The update runs before
+  `ttyd` binds, and the Supervisor creates a new container on every start, so an
+  `npm install -g` never persisted: each boot began from the baked version
+  again. With a 10 s health grace and three 30 s checks, Home Assistant marked
+  the add-on unhealthy after ~100 s and restarted it, and the cycle repeated
+  without ever converging. Measured on a Home Assistant Green: installs of
+  65-71 s, a restart about every 84 s, six in a row. `start-period` is now 300 s
+  so the download fits, and the `ARG BUILD_VERSION` fix above makes the case
+  rare rather than merely survivable -- a fresh release bakes the current CLI,
+  so the startup update is usually a no-op the registry pre-check skips in
+  seconds. Reported by @epicfailing in #54
+
 ### Added
 - A test-suite (`make test`, `.github/workflows/tests.yml`): `claude-login-url`
   against a real tmux, `stdin-runner.sh` through a pipe with a fake `claude` and

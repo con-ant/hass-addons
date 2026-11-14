@@ -109,7 +109,17 @@ RUN chmod +x /usr/local/bin/stdin-runner.sh
 # the npm cache and temp dirs in the SAME layer - otherwise ~100MB+ of cache
 # gets baked into the image.
 COPY install-claude.sh /usr/local/bin/install-claude.sh
+# BUILD_VERSION (passed by the Supervisor, and by the builder in CI) is
+# referenced inside the RUN so its value is part of this layer's cache key.
+# Without it nothing in this layer changes on a version-only bump -- and with
+# .dockerignore the build context does not change either -- so the layer cache
+# serves the PREVIOUS build's Claude Code and a new release ships a stale CLI.
+# Reported by @epicfailing in #54. It matters more now that config.yaml declares
+# `image:`: the resolving build happens once in CI, so one stale layer would go
+# out to everyone instead of to a single host.
+ARG BUILD_VERSION
 RUN chmod +x /usr/local/bin/install-claude.sh \
+    && echo "addon $BUILD_VERSION" > /etc/claude-code-built-for \
     && /usr/local/bin/install-claude.sh \
     && npm cache clean --force \
     && rm -rf /root/.npm /tmp/*
@@ -205,8 +215,21 @@ ENV PATH="/root/.local/bin:/homeassistant/.claudecode/npm-global/bin:${PATH}"
 # Set working directory
 WORKDIR /homeassistant
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+# Health check.
+#
+# start-period is 300s, not 10s, because the startup chain can legitimately take
+# minutes before ttyd binds: when npm's latest is ahead of the baked CLI the
+# update downloads a ~240MB native binary first. With a 10s grace and three 30s
+# checks the add-on was marked unhealthy after ~100s and restarted -- and since
+# the Supervisor builds a NEW container every start, the install never persisted
+# and the next boot began from the baked version again. Measured on a Home
+# Assistant Green: installs of 65-71s, a restart about every 84s, six in a row,
+# never converging. Reported by @epicfailing in #54.
+#
+# The ARG BUILD_VERSION above makes this rare rather than merely survivable: a
+# fresh release now bakes the current CLI, so the startup update is usually a
+# no-op that the registry pre-check skips in seconds.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
     CMD curl -sf http://localhost:7681/ || exit 1
 
 # Startup script that reads config and persists Claude auth
