@@ -2,7 +2,8 @@
 
 A fake `claude` on PATH records its arguments and behaves per the prompt text; a local
 HTTP server stands in for the Supervisor and records the events the runner fires. The
-STDIN_RUNNER_* overrides point the runner's paths at a scratch directory.
+STDIN_RUNNER_* overrides point the runner's paths at a scratch directory, and the Supervisor
+address override is honoured only together with STDIN_RUNNER_TEST=1.
 """
 import json
 import os
@@ -96,6 +97,7 @@ class TestStdinRunner(unittest.TestCase):
             "STDIN_RUNNER_LOG_DIR": self.log_dir,
             "STDIN_RUNNER_RUN_DIR": self.run_dir,
             "STDIN_RUNNER_SUPERVISOR_URL": self.events.url,
+            "STDIN_RUNNER_TEST": "1",
         })
         self.proc = None
 
@@ -103,12 +105,13 @@ class TestStdinRunner(unittest.TestCase):
         with open(self.options, "w", encoding="utf-8") as f:
             json.dump(opts, f)
 
-    def start(self):
+    def start(self, wait_ready=True):
         # Through bash: the Dockerfile sets the exec bit at build time, git does not keep it.
         self.proc = subprocess.Popen(["bash", str(RUNNER)], env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, start_new_session=True)
         self.addCleanup(self.stop)
-        self.events.wait("claudecode_runner_ready")
+        if wait_ready:
+            self.events.wait("claudecode_runner_ready")
         return self.proc
 
     def stop(self):
@@ -186,6 +189,33 @@ class TestStdinRunner(unittest.TestCase):
         fin = self.events.wait("claudecode_run_finished")[0]
         self.assertTrue(fin["success"])
         self.assertIn(r"-p from\ a\ file", self.claude_calls()[0])
+
+    def test_run_id_is_reduced_to_one_path_component(self):
+        # The id names the transcript: a traversal or a slash must not leave LOG_DIR.
+        self.start()
+        self.send({"prompt": "x", "run_id": "../../escape/me"})
+        fin = self.events.wait("claudecode_run_finished")[0]
+        self.assertEqual(fin["run_id"], "task.._.._escape_me")   # a dot-led id also gets the prefix
+        self.assertTrue(fin["log_path"].startswith(self.log_dir + "/task.._.._escape_me-"))
+        self.assertTrue(os.path.exists(fin["log_path"]))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "escape")))   # nothing landed above LOG_DIR
+        self.send({"prompt": "x", "run_id": ".."})
+        fin = self.events.wait("claudecode_run_finished", n=2)[1]
+        self.assertEqual(fin["run_id"], "task..")
+        self.send({"prompt": "x", "run_id": ""})
+        fin = self.events.wait("claudecode_run_finished", n=3)[2]
+        self.assertEqual(fin["run_id"], "task")
+
+    def test_supervisor_url_override_needs_the_test_flag(self):
+        # Without STDIN_RUNNER_TEST=1 the runner talks to http://supervisor only, so the
+        # fake Supervisor sees nothing: the variable alone cannot redirect the token.
+        del self.env["STDIN_RUNNER_TEST"]
+        self.start(wait_ready=False)
+        self.send({"prompt": "x", "run_id": "quiet"})
+        self.assertTrue(wait_for(self.claude_calls, timeout=30), "claude never ran")
+        self.proc.stdin.close()
+        self.assertEqual(self.proc.wait(timeout=60), 0)
+        self.assertEqual(self.events.items, [])
 
     def test_missing_prompt_is_reported_not_run(self):
         self.start()

@@ -17,9 +17,16 @@
 # claudecode_run_started / claudecode_run_finished (the latter carries
 # aborted: true when the run was killed by an abort message).
 
-# Paths and the Supervisor address can be overridden for tests; the defaults are the add-on's.
+# Paths can be overridden for tests; the defaults are the add-on's.
 OPTS=${STDIN_RUNNER_OPTIONS:-/data/options.json}
-SUPERVISOR_URL=${STDIN_RUNNER_SUPERVISOR_URL:-http://supervisor}
+# The Supervisor address is fixed. Events carry SUPERVISOR_TOKEN, so the address
+# is only overridable when the test-suite says so explicitly (STDIN_RUNNER_TEST=1
+# together with STDIN_RUNNER_SUPERVISOR_URL); a stray variable in the container's
+# environment cannot redirect the token elsewhere.
+SUPERVISOR_URL=http://supervisor
+if [ "${STDIN_RUNNER_TEST:-}" = "1" ] && [ -n "${STDIN_RUNNER_SUPERVISOR_URL:-}" ]; then
+    SUPERVISOR_URL=$STDIN_RUNNER_SUPERVISOR_URL
+fi
 DEFAULT_MODEL=$(jq -r '.default_task_model // ""' "$OPTS")
 DEFAULT_TOOLS=$(jq -c '.default_task_allowed_tools // []' "$OPTS")
 MAX_MINUTES=$(jq -r '.task_max_runtime_minutes // 30' "$OPTS")
@@ -73,6 +80,11 @@ while IFS= read -r line; do
 
     # ---- task ------------------------------------------------------------
     RUN_ID=$(jq -r '.run_id // "task"' <<< "$line")
+    # The id names the log file, so keep it to one path component: anything
+    # else becomes "_", and an empty or dot-led id gets the "task" prefix. A
+    # run_id of "../../x" would otherwise write the transcript outside LOG_DIR.
+    RUN_ID=$(printf '%s' "$RUN_ID" | tr -c 'A-Za-z0-9_.-' '_')
+    case "$RUN_ID" in ""|.*) RUN_ID="task${RUN_ID}" ;; esac
     if run_active; then
         echo "[WARN] task runner: busy - rejecting '$RUN_ID'"
         fire_event claudecode_run_rejected \

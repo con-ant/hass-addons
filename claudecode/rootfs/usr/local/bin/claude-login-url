@@ -23,9 +23,17 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 1
 fi
 
-url=$(tmux capture-pane -p -J -t "$SESSION" -S -500 2>/dev/null \
-    | grep -oE "https://(claude\.(com|ai)|console\.anthropic\.com|platform\.claude\.com)[^[:space:]\"'\`)<>]*" \
-    | tail -1)
+# Scan every pane of the session, not just the current window's active pane:
+# the documented flow runs this from a second window (Ctrl+b c), which is the
+# current window by then, so a bare `-t "$SESSION"` would capture the shell this
+# command was typed into and never find the URL.
+url=""
+for pane in $(tmux list-panes -s -t "$SESSION" -F '#{pane_id}' 2>/dev/null); do
+    match=$(tmux capture-pane -p -J -t "$pane" -S -500 2>/dev/null \
+        | grep -oE "https://(claude\.(com|ai)|console\.anthropic\.com|platform\.claude\.com)[^[:space:]\"'\`)<>]*" \
+        | tail -1)
+    [ -n "$match" ] && url="$match"
+done
 
 if [ -z "$url" ]; then
     echo "No login URL found in the Claude session." >&2

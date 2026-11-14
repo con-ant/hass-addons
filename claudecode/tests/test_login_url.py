@@ -55,6 +55,18 @@ class TestClaudeLoginUrl(unittest.TestCase):
         self.assertEqual(os.stat(self.out).st_mode & 0o777, 0o600)
         self.assertIn(self.out, r.stdout)
 
+    def test_run_from_a_second_window_as_the_readme_says(self):
+        # The documented flow: Ctrl+b c for a new window, run the helper there. That
+        # window is the current one by then, so the helper must look at every pane,
+        # not at the current window's active pane (where it would see only itself).
+        self.start_session(BANNER, URL)
+        r = self.tmux("new-window", "-t", "claude", "sleep 120")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.out, encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), URL)
+
     def test_newest_url_wins(self):
         self.start_session(OLDER, "...", URL)
         self.assertEqual(self.run_script().returncode, 0)

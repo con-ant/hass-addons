@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- `stdin-runner.sh` wrote the run's transcript to `${LOG_DIR}/${run_id}-<ts>.log`
+  with `run_id` taken from the JSON line as-is, so a `run_id` of `../../x` named
+  a file outside `/config/task-logs`. The id is now reduced to one path component
+  (anything but `A-Za-z0-9_.-` becomes `_`; an empty or dot-led id gets the
+  `task` prefix), and the sanitised id is what the `claudecode_run_*` events
+  report. Only reachable through `hassio.addon_stdin`, i.e. by an automation
+  or a user who can already call Supervisor services
+- `claude-login-url` run from a second tmux window, as the README says to, never
+  found the URL: `tmux capture-pane -t claude` targets the session's *current*
+  window, which by then is the shell the command was typed into. It now scans
+  every pane of the session and keeps the newest match
+- `stdin-runner.sh` honours `STDIN_RUNNER_SUPERVISOR_URL` only together with
+  `STDIN_RUNNER_TEST=1`, so the test-suite can point it at a fake Supervisor but
+  a stray variable in the container's environment cannot redirect the events,
+  and the token they carry, elsewhere. The path overrides are unchanged
 - An add-on update could ship a **stale Claude Code**. Nothing in the
   `install-claude.sh` layer changed on a version-only bump, and with
   `.dockerignore` the build context did not change either, so the layer cache
