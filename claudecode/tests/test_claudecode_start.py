@@ -5,7 +5,8 @@ the stdin runner are fakes on PATH that record what they were asked to do. tmux 
 on a private socket (TMUX_TMPDIR). Checked: the persistent dir and settings.json the boot
 leaves behind, the MCP registrations and the ttyd command line, an unresponsive `claude`,
 the update-then-rollback path, a baked claude that only install-claude.sh can replace, the EXIT trap
-that still starts a terminal when a step dies, and the stop path (SIGTERM reaches Claude under tmux, exit 143).
+that still starts a terminal when a step dies, and the stop path (SIGTERM reaches Claude under tmux and a
+headless task's process group, exit 143).
 """
 import json
 import os
@@ -30,6 +31,7 @@ case "$1" in
   --version)
     [ -e "$FAKE_DIR/claude-slow" ] && sleep 2
     [ -e "$FAKE_DIR/claude-broken" ] && exit 132
+    [ -e "$FAKE_DIR/claude-noisy" ] && echo "(node:1) Warning: something on stderr first" >&2
     echo "{VERSION} (Claude Code)" ;;
   remote-control)
     echo $$ > "$FAKE_DIR/rc.pid"
@@ -57,9 +59,16 @@ if [ -e "$FAKE_DIR/ttyd-stay" ]; then
   while :; do sleep 0.2; done
 fi
 """,
+    # Like the real runner, a "task" runs in a process group of its own (setsid) under a
+    # watcher subshell that reports once the group has exited (the real one fires
+    # claudecode_run_finished there), and the runner itself has no TERM handling to speak of.
     "stdin-runner.sh": """#!/bin/bash
 echo $$ > "$FAKE_DIR/stdin.pid"
 trap 'echo TERM > "$FAKE_DIR/stdin.signal"; exit 0' TERM
+(
+  setsid bash -c 'echo $$ > "$FAKE_DIR/task.pid"; trap "echo TERM > \\"$FAKE_DIR/task.signal\\"; exit 143" TERM; while :; do sleep 0.2; done'
+  echo "finished $?" > "$FAKE_DIR/task.done"
+) &
 while :; do sleep 0.2; done
 """,
     "claude-auto-launch": "#!/bin/bash\nexit 0\n",
@@ -154,7 +163,7 @@ class Boot:
             self.proc.stdin.close()
             self.logf.close()
         self.tmux("kill-server")
-        for pidfile in ("stdin.pid", "rc.pid"):
+        for pidfile in ("stdin.pid", "rc.pid", "task.pid"):
             try:
                 os.kill(int((self.fake / pidfile).read_text()), signal.SIGKILL)
             except (OSError, ValueError):
@@ -184,6 +193,7 @@ class TestBoot(unittest.TestCase):
                                     "mcpServers": {"homeassistant": {"env": {"HASS_TOKEN": "old-token"}}}}))
         self.assertEqual(b.run(), 0, b.output())
         out = b.output()
+        self.assertIn("Claude Code add-on ? starting on", out)   # no /etc/claude-code-built-for here
         self.assertIn("step: configure MCP servers", out)
         self.assertIn("Startup finished in", out)
         self.assertIn("Removed a Supervisor token", out)
@@ -207,6 +217,7 @@ class TestBoot(unittest.TestCase):
         self.assertFalse((b.persist / "settings.json.tmp").exists())
 
         claude = b.fake_log("claude.log")
+        self.assertEqual(claude.count("--version"), 1)   # one probe, reused until an install
         self.assertIn("mcp remove homeassistant -s user", claude)
         self.assertIn("mcp remove playwright -s user", claude)
         self.assertIn('mcp add-json homeassistant {"command":"hass-mcp"} -s user', claude)
@@ -284,31 +295,48 @@ class TestBoot(unittest.TestCase):
         ])
         out = b.output()
         self.assertIn(f"Updating Claude Code {VERSION} -> {BROKEN_VERSION}", out)
-        self.assertIn(f"does not run here; rolling back to {VERSION}", out)
+        self.assertIn(f"does not run here (exit 132); rolling back to {VERSION}", out)
         self.assertIn(f"claude CLI responds: {VERSION}", out)
 
     def test_update_already_current(self):
+        """The installed version is the first word of stdout; a warning on stderr must not pass for it
+        (it would read as a version that is never current and install the same release every boot)."""
         b = self.boot({"auto_update_claude": True}, latest=VERSION)
+        (b.fake / "claude-noisy").touch()
         self.assertEqual(b.run(), 0, b.output())
         self.assertEqual(b.fake_log("npm.log"), ["view @anthropic-ai/claude-code version"])
         self.assertIn(f"Claude Code {VERSION} (already current)", b.output())
+        self.assertIn(f"claude CLI responds: {VERSION} (Claude Code)", b.output())
+
+    def test_wrong_permissions_type_is_reset_and_the_rest_kept(self):
+        """Only .permissions is wrong: it is reset so the MCP allow-list can be written; hooks etc. survive."""
+        b = self.boot({})
+        b.seed_settings(json.dumps({"permissions": [], "hooks": {"x": 1}, "model": "opus"}))
+        self.assertEqual(b.run(), 0, b.output())
+        self.assertIn("\"permissions\" entry that is not an object; it was reset", b.output())
+        self.assertFalse(list(b.persist.glob("settings.json.corrupt.*")))
+        s = b.settings()
+        self.assertEqual((s["hooks"], s["model"]), ({"x": 1}, "opus"))
+        for tool in HA_TOOLS:
+            self.assertIn(tool, s["permissions"]["allow"])
 
     def test_step_dies_terminal_still_starts(self):
         """The EXIT trap: a fatal signal during a step (bash runs the EXIT trap on one) still ends in ttyd."""
         b = self.boot({})
         (b.fake / "claude-slow").touch()
         b.start()
-        self.assertTrue(b.logged("step: probe claude CLI"), b.output())
+        self.assertTrue(b.logged("step: baked Claude Code smoke test"), b.output())   # the first (slow) probe
         b.proc.send_signal(signal.SIGUSR1)
         b.proc.wait(timeout=20)
         out = b.output()
         self.assertIn("Startup aborted with exit", out)
-        self.assertIn("during step 'probe claude CLI'", out)
+        self.assertIn("during step 'baked Claude Code smoke test'", out)
         self.assertTrue((b.fake / "ttyd.args").exists(), out)
 
     def test_stop_reaches_claude(self):
-        """SIGTERM: the Remote Control server's claude (under tmux) and the stdin runner get TERM, tmux and ttyd
-        are torn down, the script exits 143 - instead of ttyd being the one signalled and the rest SIGKILLed."""
+        """SIGTERM: the Remote Control server's claude (under tmux), the stdin runner and its running task's
+        process group get TERM (the task's watcher lives to report the end), tmux and ttyd are torn down, the
+        script exits 143 - instead of ttyd being the one signalled and the rest SIGKILLed."""
         b = self.boot({"enable_remote_control": True, "remote_control_server": True,
                        "remote_control_permission_mode": "acceptEdits"})
         (b.fake / "ttyd-stay").touch()
@@ -316,6 +344,7 @@ class TestBoot(unittest.TestCase):
         self.assertTrue(b.logged("Starting web terminal"), b.output())
         self.assertIn("Remote Control server started (permission mode: acceptEdits)", b.output())
         self.assertTrue(wait_for(lambda: (b.fake / "rc.pid").exists()), b.output())
+        self.assertTrue(wait_for(lambda: (b.fake / "task.pid").exists()), b.output())
         self.assertIn("--permission-mode acceptEdits", "\n".join(b.fake_log("claude.log")))
         self.assertEqual(b.tmux("list-sessions", "-F", "#{session_name}").stdout.split(), ["rc"])
         t0 = time.monotonic()
@@ -324,6 +353,8 @@ class TestBoot(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 10)
         self.assertEqual(b.fake_log("rc.signal"), ["TERM"])
         self.assertEqual(b.fake_log("stdin.signal"), ["TERM"])
+        self.assertEqual(b.fake_log("task.signal"), ["TERM"])
+        self.assertTrue(wait_for(lambda: b.fake_log("task.done") == ["finished 143"]), b.fake_log("task.done"))
         self.assertNotEqual(b.tmux("has-session").returncode, 0, "tmux server still running")
         self.assertIn("Stop requested", b.output())
 

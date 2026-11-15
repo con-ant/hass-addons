@@ -37,7 +37,8 @@ opt()  { jq -r "$1" "$OPTS" 2>/dev/null; }
 # First output of the boot. If even this line is missing from the add-on log,
 # the container died before this script ran (image/arch problem, AppArmor,
 # OOM) - look in `ha supervisor logs` / `dmesg`, not here.
-info "Claude Code $(sed 's/^addon //' /etc/claude-code-built-for 2>/dev/null || echo 'add-on') starting on $(uname -m) (Claude Code $(cat /etc/claude-code-version 2>/dev/null || echo '?') baked in)"
+ADDON_VERSION=$(sed 's/^addon //' /etc/claude-code-built-for 2>/dev/null)
+info "Claude Code add-on ${ADDON_VERSION:-?} starting on $(uname -m) (Claude Code $(cat /etc/claude-code-version 2>/dev/null || echo '?') baked in)"
 
 # debug_logging: trace every command in this script into the add-on log.
 # Read directly from options.json - read_options runs later than the first
@@ -124,6 +125,13 @@ on_abort() {
 # SIGHUPs claude the instant after its SIGTERM. The wrapper sees claude exit
 # and drops to a login shell, which tmux kill-server / ttyd's own teardown
 # clean up.
+#
+# A headless task (stdin-runner.sh) is different: its claude runs in a process
+# group of its own (setsid) under a watcher subshell that reports the outcome
+# to Home Assistant once the group exits. Signal the group, never the watcher,
+# so claudecode_run_finished still fires; the runner itself goes first so that
+# no new task starts, and the watcher pids are read before it does, since its
+# children are reparented the moment it exits.
 descendants() {  # $1 = pid -> all descendant pids, depth first
   local kid
   for kid in $(pgrep -P "$1" 2>/dev/null); do
@@ -132,12 +140,20 @@ descendants() {  # $1 = pid -> all descendant pids, depth first
   done
 }
 stop_sessions() {
-  local root pids="" pid alive i
+  local root pids="" groups="" watcher pid alive i
   for root in $(tmux list-panes -a -F '#{pane_pid}' 2>/dev/null) \
               $([ -n "$TTYD_PID" ] && pgrep -P "$TTYD_PID" 2>/dev/null); do
     pids="$pids $(descendants "$root")"
   done
+  if [ -n "$STDIN_RUNNER_PID" ]; then
+    for watcher in $(pgrep -P "$STDIN_RUNNER_PID" 2>/dev/null); do
+      groups="$groups $(pgrep -P "$watcher" 2>/dev/null)"
+    done
+    kill -TERM "$STDIN_RUNNER_PID" 2>/dev/null
+  fi
   for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
+  for pid in $groups; do kill -TERM -- "-$pid" 2>/dev/null; done
+  pids="$pids $groups"
   # A browser (re)connecting now would spawn a fresh Claude that we then kill:
   # stop ttyd first when tmux holds the sessions (its ttyd children are only
   # tmux clients). Without tmux the pty IS the session, so ttyd waits.
@@ -168,7 +184,6 @@ stop_ttyd() {
 on_stop() {
   trap - EXIT TERM INT HUP
   info "Stop requested; winding down Claude sessions (up to ${STOP_GRACE_SECS}s)"
-  [ -n "$STDIN_RUNNER_PID" ] && kill -TERM "$STDIN_RUNNER_PID" 2>/dev/null  # no new headless run
   stop_sessions
   stop_ttyd
   exit 143
@@ -193,9 +208,17 @@ settings_init() {
     return 0
   fi
   # Must be an object, and .permissions (which every write below indexes into)
-  # must be an object or absent.
-  if jq -e 'type == "object" and ((.permissions // {}) | type == "object")' "$SETTINGS_FILE" > /dev/null 2>&1; then
-    return 0
+  # must be an object or absent. A wrong-typed .permissions alone is reset in
+  # place; the rest of the file (hooks, env, model, ...) is kept.
+  if jq -e 'type == "object"' "$SETTINGS_FILE" > /dev/null 2>&1; then
+    if jq -e '(.permissions // {}) | type == "object"' "$SETTINGS_FILE" > /dev/null 2>&1; then
+      return 0
+    fi
+    if settings_set 'del(.permissions)'; then
+      warn "settings.json had a \"permissions\" entry that is not an object; it was reset (everything else was kept)"
+      return 0
+    fi
+    warn "settings.json has a \"permissions\" entry that is not an object and could not be reset"
   fi
   local quarantine
   quarantine="$SETTINGS_FILE.corrupt.$(date +%s)"
@@ -298,13 +321,26 @@ check_avx() {
   warn "stop and start the VM. Verify with: grep -o -m1 avx2 /proc/cpuinfo"
 }
 
-# Probe the claude CLI once, keeping the evidence: the output and exit code
-# land in CLAUDE_PROBE_OUT/RC so check_claude can say WHY it failed (a SIGILL
-# from a missing CPU feature and a 30s hang look identical when both are sent
-# to /dev/null, and that difference is the whole diagnosis on AVX-less hosts).
+# Probe the claude CLI, keeping the evidence: stdout, stderr and the exit code
+# land in CLAUDE_PROBE_OUT/ERR/RC so check_claude can say WHY it failed (a
+# SIGILL from a missing CPU feature and a 30s hang look identical when both are
+# sent to /dev/null, and that difference is the whole diagnosis on AVX-less
+# hosts). stdout is kept apart because its first word is the version; a
+# warning on stderr must not be mistaken for one. The result is reused until
+# claude_changed says an install replaced the binary. `timeout -k` matters: a
+# deadlocked CLI that has installed a SIGTERM handler would otherwise never die.
+CLAUDE_PROBE_VALID=""
+claude_changed() { CLAUDE_PROBE_VALID=""; }
 claude_responds() {
-  CLAUDE_PROBE_OUT=$(timeout 30 claude --version < /dev/null 2>&1)
-  CLAUDE_PROBE_RC=$?
+  if [ "$CLAUDE_PROBE_VALID" != "true" ]; then
+    local errf
+    errf=$(mktemp 2>/dev/null || echo /tmp/claude-probe.err)
+    CLAUDE_PROBE_OUT=$(timeout -k 5 30 claude --version < /dev/null 2> "$errf")
+    CLAUDE_PROBE_RC=$?
+    CLAUDE_PROBE_ERR=$(cat "$errf" 2>/dev/null)
+    rm -f "$errf"
+    CLAUDE_PROBE_VALID=true
+  fi
   [ "$CLAUDE_PROBE_RC" -eq 0 ]
 }
 
@@ -323,6 +359,7 @@ reinstall_if_baked_cli_fails() {
   warn "here; this downloads several candidates and takes a few minutes."
   warn "It happens once per add-on update, not on every restart."
   "$INSTALL_CLAUDE" || err "No working Claude Code release found"
+  claude_changed
 }
 
 maybe_update_claude() {
@@ -351,9 +388,11 @@ maybe_update_claude() {
   else
     info "Updating Claude Code $installed -> $latest"
     timeout 300 npm install -g "@anthropic-ai/claude-code@$latest" || warn "Update failed; keeping the installed version"
-    if ! timeout 30 claude --version < /dev/null > /dev/null 2>&1; then
-      err "Claude Code $latest does not run here; rolling back to $installed"
+    claude_changed
+    if ! claude_responds; then
+      err "Claude Code $latest does not run here (exit $CLAUDE_PROBE_RC); rolling back to $installed"
       timeout 300 npm install -g "@anthropic-ai/claude-code@$installed" || err "Rollback failed"
+      claude_changed
     fi
   fi
 }
@@ -390,19 +429,19 @@ check_claude() {
       127) err "claude CLI not found on PATH (exit 127)" ;;
       *)   err "claude CLI failed (exit $CLAUDE_PROBE_RC)" ;;
     esac
-    [ -n "$CLAUDE_PROBE_OUT" ] && err "claude --version said: $(printf '%s' "$CLAUDE_PROBE_OUT" | tail -3 | tr '\n' ' ')"
+    [ -n "$CLAUDE_PROBE_OUT$CLAUDE_PROBE_ERR" ] && err "claude --version said: $(printf '%s\n%s' "$CLAUDE_PROBE_OUT" "$CLAUDE_PROBE_ERR" | grep . | tail -3 | tr '\n' ' ')"
     err "Skipping MCP setup and auto-launch; the terminal will still start so you can debug from inside the add-on"
   fi
 }
 
 configure_mcp() {
   if [ "$CLAUDE_OK" = "true" ]; then
-    timeout 30 claude mcp remove homeassistant -s user > /dev/null 2>&1 || true
-    timeout 30 claude mcp remove playwright -s user > /dev/null 2>&1 || true
+    timeout -k 5 30 claude mcp remove homeassistant -s user > /dev/null 2>&1 || true
+    timeout -k 5 30 claude mcp remove playwright -s user > /dev/null 2>&1 || true
   fi
 
   if [ "$CLAUDE_OK" = "true" ] && [ "$ENABLE_MCP" = "true" ]; then
-    if timeout 30 claude mcp add-json homeassistant '{"command":"hass-mcp"}' -s user; then
+    if timeout -k 5 30 claude mcp add-json homeassistant '{"command":"hass-mcp"}' -s user; then
       info "MCP configured with Home Assistant integration"
       local allowed='["mcp__homeassistant__get_version","mcp__homeassistant__get_entity","mcp__homeassistant__list_entities","mcp__homeassistant__search_entities_tool","mcp__homeassistant__domain_summary_tool","mcp__homeassistant__list_automations","mcp__homeassistant__get_history","mcp__homeassistant__get_error_log","Read(/homeassistant/**)","Read(/config/**)","Read(/share/**)","Read(/media/**)","Glob(/homeassistant/**)","Glob(/config/**)","Grep(/homeassistant/**)","Grep(/config/**)"]'
       # shellcheck disable=SC2016  # $tools is a jq variable
@@ -423,7 +462,7 @@ configure_mcp() {
   if [ "$CLAUDE_OK" = "true" ] && [ "$ENABLE_PLAYWRIGHT" = "true" ]; then
     local pw_json
     pw_json=$(jq -nc --arg host "$PLAYWRIGHT_HOST" '{command:"/usr/local/bin/playwright-mcp-launch", env:{PLAYWRIGHT_CDP_HOST:$host}}')
-    if timeout 30 claude mcp add-json playwright "$pw_json" -s user; then
+    if timeout -k 5 30 claude mcp add-json playwright "$pw_json" -s user; then
       if [ -n "$PLAYWRIGHT_HOST" ]; then
         info "Playwright MCP enabled (host override: $PLAYWRIGHT_HOST)"
       else

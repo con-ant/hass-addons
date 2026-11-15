@@ -390,7 +390,7 @@ What helps:
 
 Every boot starts with a `Claude Code add-on <version> starting` line and then a `[INFO] step: ...` marker per startup step (persistent config dir, options, update check, MCP setup, ...), ending in `Startup finished in Ns`. If the log stops after a marker, that step hung; if it ends with `Startup aborted ... during step '...'`, that step crashed and the add-on started a bare terminal so you can look around from inside. Set `debug_logging: true` to trace every command of the startup script, and turn it off again once the problem is found.
 
-Stopping or restarting the add-on sends a running Claude SIGTERM and gives it up to 10 seconds to exit before the terminal and tmux are torn down, so a session in the middle of a tool call is not killed outright.
+Stopping or restarting the add-on sends a running Claude SIGTERM (a terminal session or a headless task alike) and gives it up to 10 seconds to exit before the terminal and tmux are torn down, so a session in the middle of a tool call is not killed outright, and a headless task still reports `claudecode_run_finished`.
 
 ### Terminal not loading
 

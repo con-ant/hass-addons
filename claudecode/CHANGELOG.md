@@ -51,7 +51,9 @@ All notable changes to this project will be documented in this file.
   directory with a fake `claude`, `ttyd`, `npm` and stdin runner: the
   persistent dir and settings.json it leaves behind, the MCP registrations and
   ttyd command line, an unresponsive `claude`, the update-then-rollback path,
-  and the stop path (SIGTERM reaches Claude under tmux, exit 143)
+  a settings.json with a wrong-typed `permissions` entry, and the stop path
+  (SIGTERM reaches Claude under tmux and a headless task's process group,
+  exit 143)
 
 ### Changed
 - Startup moved out of the Dockerfile's 170-line `CMD` string into
@@ -61,15 +63,21 @@ All notable changes to this project will be documented in this file.
   step that fails warns and moves on, and if the script still dies the
   terminal starts anyway (`Startup aborted ... during step`) so the problem
   can be looked at from inside; settings.json is written atomically (a temp
-  file beside it, then rename) and a settings.json that no longer parses is
-  moved aside instead of breaking every `jq` write after it; a stop or
-  restart now reaches Claude: ttyd is no longer `exec`'d, so the script gets
-  the Supervisor's SIGTERM, passes it to the Claude processes under tmux and
-  ttyd, waits up to 10 s, then tears down tmux and ttyd and exits 143
-  (config.yaml `timeout: 30` gives it the room; the default 10 did not); a
-  `claude --version` failure says why (hang vs SIGILL vs not found); and the
-  `extra_npm_packages` install is bounded by a 300 s timeout like the update
-  is. The script takes `CLAUDECODE_START_*` overrides for its paths so the
+  file beside it, then rename), a settings.json that no longer parses is
+  moved aside instead of breaking every `jq` write after it, and one whose
+  `permissions` entry is not an object has just that entry reset, keeping the
+  rest; a stop or restart now reaches Claude: ttyd is no longer `exec`'d, so
+  the script gets the Supervisor's SIGTERM, passes it to the Claude processes
+  under tmux and ttyd and to the process group of a running headless task
+  (its watcher lives on to fire `claudecode_run_finished`), waits up to 10 s,
+  then tears down tmux and ttyd and exits 143 (config.yaml `timeout: 30`
+  gives it the room; the default 10 did not); `claude --version` is probed
+  once and the result reused until an install replaces the binary, with
+  `timeout -k` so a CLI that hangs with a SIGTERM handler installed still
+  dies, its stdout kept apart from stderr so a warning there is never taken
+  for the installed version, and a failure says why (hang vs SIGILL vs not
+  found); and the `extra_npm_packages` install is bounded by a 300 s timeout
+  like the update is. The script takes `CLAUDECODE_START_*` overrides for its paths so the
   tests can boot it in a scratch directory; the defaults are the add-on's. The
   baked-CLI smoke test that re-runs `install-claude.sh` on a host where the
   prebuilt image's Claude Code does not run is a step of its own (`baked Claude
