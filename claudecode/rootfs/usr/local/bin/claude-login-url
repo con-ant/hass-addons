@@ -23,16 +23,20 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 1
 fi
 
-# Scan every pane of the session, not just the current window's active pane:
-# the documented flow runs this from a second window (Ctrl+b c), which is the
-# current window by then, so a bare `-t "$SESSION"` would capture the shell this
-# command was typed into and never find the URL.
+# Scan the panes of the session, not just the current window's active pane: the
+# documented flow runs this from a second window (Ctrl+b c), which is the current
+# window by then, so a bare `-t "$SESSION"` would capture the shell this command
+# was typed into and never find the URL. That shell's own pane ($TMUX_PANE) is
+# skipped, since it may show an older URL (a `cat` of a previous file, say); of
+# the rest the first pane with a match wins, which is Claude's window (window 0)
+# whenever it shows one, and within a pane the last URL printed is the newest.
 url=""
 for pane in $(tmux list-panes -s -t "$SESSION" -F '#{pane_id}' 2>/dev/null); do
-    match=$(tmux capture-pane -p -J -t "$pane" -S -500 2>/dev/null \
+    [ "$pane" = "${TMUX_PANE:-}" ] && continue
+    url=$(tmux capture-pane -p -J -t "$pane" -S -500 2>/dev/null \
         | grep -oE "https://(claude\.(com|ai)|console\.anthropic\.com|platform\.claude\.com)[^[:space:]\"'\`)<>]*" \
         | tail -1)
-    [ -n "$match" ] && url="$match"
+    [ -n "$url" ] && break
 done
 
 if [ -z "$url" ]; then

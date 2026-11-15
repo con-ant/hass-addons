@@ -107,11 +107,12 @@ class TestStdinRunner(unittest.TestCase):
 
     def start(self, wait_ready=True):
         # Through bash: the Dockerfile sets the exec bit at build time, git does not keep it.
+        ready_before = len(self.events.of("claudecode_runner_ready"))
         self.proc = subprocess.Popen(["bash", str(RUNNER)], env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, start_new_session=True)
         self.addCleanup(self.stop)
         if wait_ready:
-            self.events.wait("claudecode_runner_ready")
+            self.events.wait("claudecode_runner_ready", n=ready_before + 1)
         return self.proc
 
     def stop(self):
@@ -141,6 +142,18 @@ class TestStdinRunner(unittest.TestCase):
         line = obj if isinstance(obj, str) else json.dumps(obj)
         self.proc.stdin.write(line + "\n")
         self.proc.stdin.flush()
+
+    def run_one(self, run_id):
+        """A fresh runner, one task with `run_id`, and its claudecode_run_finished event.
+
+        A fresh runner per task: the watcher subshell fires the finished event just before
+        it exits, so a task sent the moment the event shows up could still be rejected as busy.
+        """
+        self.stop()
+        self.start()
+        n = len(self.events.of("claudecode_run_finished")) + 1
+        self.send({"prompt": "x", "run_id": run_id})
+        return self.events.wait("claudecode_run_finished", n=n)[-1]
 
     def claude_calls(self):
         try:
@@ -190,26 +203,40 @@ class TestStdinRunner(unittest.TestCase):
         self.assertTrue(fin["success"])
         self.assertIn(r"-p from\ a\ file", self.claude_calls()[0])
 
-    def test_run_id_is_reduced_to_one_path_component(self):
-        # The id names the transcript: a traversal or a slash must not leave LOG_DIR.
-        self.start()
-        self.send({"prompt": "x", "run_id": "../../escape/me"})
-        fin = self.events.wait("claudecode_run_finished")[0]
-        self.assertEqual(fin["run_id"], "task.._.._escape_me")   # a dot-led id also gets the prefix
-        self.assertTrue(fin["log_path"].startswith(self.log_dir + "/task.._.._escape_me-"))
+    def test_run_id_names_the_log_file_through_a_sanitised_copy(self):
+        # The id names the transcript, so the file name keeps it to one path component and
+        # a sane length. The events still carry the id exactly as sent.
+        above = os.path.join(self.tmp, "escape")   # where an unsanitised "../escape/me" would land
+        os.mkdir(above)
+        fin = self.run_one("../escape/me")
+        self.assertEqual(fin["run_id"], "../escape/me")
+        self.assertTrue(fin["success"])
+        self.assertTrue(fin["log_path"].startswith(self.log_dir + "/task.._escape_me-"))   # dot-led: "task" prefix
         self.assertTrue(os.path.exists(fin["log_path"]))
-        self.assertFalse(os.path.exists(os.path.join(self.tmp, "escape")))   # nothing landed above LOG_DIR
-        self.send({"prompt": "x", "run_id": ".."})
-        fin = self.events.wait("claudecode_run_finished", n=2)[1]
-        self.assertEqual(fin["run_id"], "task..")
-        self.send({"prompt": "x", "run_id": ""})
-        fin = self.events.wait("claudecode_run_finished", n=3)[2]
-        self.assertEqual(fin["run_id"], "task")
+        self.assertEqual(os.listdir(above), [])
+        self.assertEqual(self.of_started()[-1]["log_path"], fin["log_path"])
+
+        fin = self.run_one("..")
+        self.assertEqual(fin["run_id"], "..")
+        self.assertTrue(fin["log_path"].startswith(self.log_dir + "/task..-"))
+
+        fin = self.run_one("")
+        self.assertEqual(fin["run_id"], "")
+        self.assertTrue(fin["log_path"].startswith(self.log_dir + "/task-"))
+
+        fin = self.run_one("x" * 300)   # longer than NAME_MAX: the redirect used to fail
+        self.assertEqual(fin["run_id"], "x" * 300)
+        self.assertTrue(fin["success"], fin)
+        self.assertTrue(fin["log_path"].startswith(self.log_dir + "/" + "x" * 100 + "-"))
+        self.assertTrue(os.path.exists(fin["log_path"]))
 
     def test_supervisor_url_override_needs_the_test_flag(self):
         # Without STDIN_RUNNER_TEST=1 the runner talks to http://supervisor only, so the
         # fake Supervisor sees nothing: the variable alone cannot redirect the token.
+        # No proxy either, so those requests fail on the spot instead of waiting on one.
         del self.env["STDIN_RUNNER_TEST"]
+        for k in [k for k in self.env if k.lower().endswith("_proxy")]:
+            del self.env[k]
         self.start(wait_ready=False)
         self.send({"prompt": "x", "run_id": "quiet"})
         self.assertTrue(wait_for(self.claude_calls, timeout=30), "claude never ran")

@@ -41,9 +41,9 @@ class TestClaudeLoginUrl(unittest.TestCase):
         self.assertTrue(wait_for(lambda: last in self.tmux("capture-pane", "-p", "-J", "-t", "claude").stdout),
                         "pane never showed the text")
 
-    def run_script(self):
+    def run_script(self, **env):
         # Through bash: the Dockerfile sets the exec bit at build time, git does not keep it.
-        rc, out, err = run_cli(["bash", SCRIPT, self.out], self.env, timeout=30)
+        rc, out, err = run_cli(["bash", SCRIPT, self.out], {**self.env, **env}, timeout=30)
         return subprocess.CompletedProcess([str(SCRIPT), self.out], rc, out, err)
 
     def test_wrapped_url_is_rejoined_and_saved_with_mode_600(self):
@@ -66,6 +66,21 @@ class TestClaudeLoginUrl(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(self.out, encoding="utf-8") as f:
             self.assertEqual(f.read().strip(), URL)
+
+    def test_own_window_showing_an_older_url_is_skipped(self):
+        # The second window may show an older URL (a `cat` of the previous file, say) while
+        # Claude's window has none yet. The helper runs in that window, so its own pane is
+        # skipped rather than mistaken for a fresh login URL.
+        self.start_session(BANNER)
+        r = self.tmux("new-window", "-t", "claude", "-P", "-F", "#{pane_id}",
+                      "printf '%s\\n' " + shlex.quote(OLDER) + "; sleep 120")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        own = r.stdout.strip()
+        self.assertTrue(wait_for(lambda: "older" in self.tmux("capture-pane", "-p", "-t", own).stdout))
+        r = self.run_script(TMUX_PANE=own)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("No login URL found", r.stderr)
+        self.assertFalse(os.path.exists(self.out))
 
     def test_newest_url_wins(self):
         self.start_session(OLDER, "...", URL)

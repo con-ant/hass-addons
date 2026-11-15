@@ -7,15 +7,19 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - `stdin-runner.sh` wrote the run's transcript to `${LOG_DIR}/${run_id}-<ts>.log`
   with `run_id` taken from the JSON line as-is, so a `run_id` of `../../x` named
-  a file outside `/config/task-logs`. The id is now reduced to one path component
+  a file outside `/config/task-logs`, and a very long one could not be opened at
+  all. The file name now uses a sanitised copy of the id: one path component
   (anything but `A-Za-z0-9_.-` becomes `_`; an empty or dot-led id gets the
-  `task` prefix), and the sanitised id is what the `claudecode_run_*` events
-  report. Only reachable through `hassio.addon_stdin`, i.e. by an automation
-  or a user who can already call Supervisor services
+  `task` prefix) of at most 100 characters. The `claudecode_run_*` events still
+  carry the id exactly as sent, so automations matching on it are unaffected;
+  `log_path` names the file. Only reachable through `hassio.addon_stdin`, i.e.
+  by an automation or a user who can already call Supervisor services
 - `claude-login-url` run from a second tmux window, as the README says to, never
   found the URL: `tmux capture-pane -t claude` targets the session's *current*
   window, which by then is the shell the command was typed into. It now scans
-  every pane of the session and keeps the newest match
+  the session's panes, skipping the one it runs in (which may show an older URL
+  from a previous attempt), and takes the first pane with a match, Claude's own
+  window whenever it shows one
 - `stdin-runner.sh` honours `STDIN_RUNNER_SUPERVISOR_URL` only together with
   `STDIN_RUNNER_TEST=1`, so the test-suite can point it at a fake Supervisor but
   a stray variable in the container's environment cannot redirect the events,

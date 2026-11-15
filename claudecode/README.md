@@ -131,7 +131,8 @@ service:
   `claudecode_run_finished` (`run_id`, `success`, `exit_code`,
   `duration_seconds`, `log_path`, `output_tail`).
 - Transcripts are written to the add-on config directory
-  (`task-logs/<run_id>-<timestamp>.log`).
+  (`task-logs/<run_id>-<timestamp>.log`, with the `run_id` reduced to one path
+  component of at most 100 characters; the events' `log_path` names the file).
 - Authentication reuses the login you completed in the web terminal.
 - Send `{"abort": true}` on the same channel to hard-kill the active
   run (finish event carries `aborted: true`); a task sent while another
