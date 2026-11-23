@@ -52,6 +52,7 @@ while :; do
 done
 """
 OLD, CURRENT, NEW = "2.1.320", "2.1.323", "2.1.324"
+PRERELEASE, NO_VERSION = "2.2.0-rc.1", "garbage"     # what `--version` may also answer with
 
 
 @unittest.skipUnless(shutil.which("cc") and shutil.which("pgrep"), "needs a C compiler and pgrep")
@@ -63,7 +64,7 @@ class TestUpdateWatcher(unittest.TestCase):
         src = os.path.join(cls.builds, "claude.c")
         with open(src, "w", encoding="utf-8") as f:
             f.write(FAKE_CLAUDE_C)
-        for v in (OLD, CURRENT, NEW):
+        for v in (OLD, CURRENT, NEW, PRERELEASE, NO_VERSION):
             subprocess.run(["cc", "-o", os.path.join(cls.builds, v), f'-DVERSION="{v}"', src], check=True)
 
     def setUp(self):
@@ -207,7 +208,9 @@ class TestUpdateWatcher(unittest.TestCase):
             self.install(CURRENT)                   # the 30-minute reinstall
             self.wait_log(f"Claude Code {CURRENT} was installed again", count=n)
             self.assert_left_alone(root, pid)
-        self.assertNotIn("[WARN]", self.logged())   # every Claude is on that release: nobody to name
+        # Every Claude here is on that release: none of them is named. (Not "no [WARN]": the watcher
+        # looks at every Claude on the machine, and a developer's own may be on another release.)
+        self.assertNotIn(f"pid {pid} on", self.logged())
         with open(self.cli_version, encoding="utf-8") as f:
             self.assertEqual(f.read().strip(), CURRENT)
 
@@ -272,12 +275,42 @@ class TestUpdateWatcher(unittest.TestCase):
         self.wait_log(f"Claude Code {CURRENT} is installed")
         self.install(CURRENT)
         self.wait_log(f"pid {stray.pid} on {OLD} since")
-        self.assertIn("not one this add-on restarts", self.logged())
+        self.assertRegex(self.logged(), rf"pid {stray.pid} on {OLD} since [^;]*\(started by hand: nothing restarts it")
         self.install(CURRENT)
         self.wait_log(f"Claude Code {CURRENT} was installed again", count=2)
         self.polls()
-        self.assertEqual(self.logged().count("[WARN]"), 1, self.logged())
+        self.assertEqual(self.logged().count(f"pid {stray.pid} on {OLD}"), 1, self.logged())
         self.assertIsNone(stray.poll())
+
+    def test_a_supervised_session_that_is_behind_is_named_as_one_the_addon_restarts(self):
+        root, pid = self.old_pane_with_turn_in_flight(self.t0 - 1000)   # behind, and not idle yet
+        self.install(CURRENT)
+        self.wait_log(f"pid {pid} on {OLD} since")
+        self.assertRegex(self.logged(), rf"pid {pid} on {OLD} since [^;]*\(terminal session, restarted once idle\)")
+        self.assertEqual(self.pane_claude(root), pid)
+
+    def test_a_prerelease_is_a_release_like_any_other(self):
+        self.install(PRERELEASE)
+        root = self.start_pane()
+        pid = self.pane_claude(root)
+        self.install(PRERELEASE)                    # the session's file is one the watcher never checked
+        self.pane(root, self.t0 - 2000)
+        self.start_watcher()
+        self.wait_log(f"Claude Code {PRERELEASE} is installed")
+        self.assert_left_alone(root, pid)
+
+    def test_an_answer_without_a_version_falls_back_to_the_file(self):
+        # Nothing to compare: the same file is left alone, another file is an update, as before con.39.
+        self.install(NO_VERSION)
+        root = self.start_pane()
+        pid = self.pane_claude(root)
+        self.pane(root, self.t0 - 2000)
+        self.start_watcher()
+        self.wait_log("version not recognised: garbage (Claude Code)")
+        self.assert_left_alone(root, pid)
+        self.install(NO_VERSION)
+        self.wait_log(f"Restarting the Claude session in pane %0 (pid {pid}")
+        self.assertNotIn("was installed again", self.logged())
 
     # ---- a turn in flight ------------------------------------------------------------------
     def old_pane_with_turn_in_flight(self, output):
@@ -308,7 +341,7 @@ class TestUpdateWatcher(unittest.TestCase):
     def test_output_poll_after_poll_is_a_turn_at_work(self):
         root, pid = self.old_pane_with_turn_in_flight("@BUSY@")
         self.set_clock(self.t0 + 3500)
-        self.polls(5)                               # still printing, nearly an hour in
+        self.polls(8)                               # still printing, nearly an hour in (LIVE_POLLS is 5)
         self.pane(root, self.t0 + 3500)             # then silence
         self.polls()
         self.set_clock(self.t0 + 5000)              # 25 minutes of it: quiet, but the turn worked within the hour

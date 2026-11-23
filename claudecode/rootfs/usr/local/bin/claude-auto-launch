@@ -158,7 +158,23 @@ if [ -n "$AUTO_LAUNCH_ARGS" ]; then
     check_login
   done
 else
+  # auto_launch_claude: new with no flags to pass (Remote Control off) lands
+  # here too: one claude, not supervised against crashes. The update watcher
+  # still moves it onto an update, so its mark has to be honoured here as
+  # well; without that the SIGTERM just ended the session.
   claude
+  while [ -n "$TMUX_PANE" ] && rm "$PANE_STATE/restart-for-update" 2>/dev/null; do
+    echo "[INFO] Restarting Claude Code onto the installed update (claude $(resume_args))" >&2
+    check_login
+    # shellcheck disable=SC2046  # resume_args is intentionally word-split
+    claude $(resume_args)
+  done
 fi
 
+# From here on this is a plain shell, and a claude typed into it is nobody's
+# to restart: the update watcher leaves it alone, so it stays on the release
+# it started with. Claude Code's updater then installs the channel's release
+# again every 30 minutes for as long as it runs (it compares the channel with
+# the release the process runs, not with the one installed).
+echo "[INFO] Claude exited; this is a plain shell now. A claude started from it is not moved onto updates: run 'exec claude-auto-launch' for the supervised session." >&2
 exec bash --login

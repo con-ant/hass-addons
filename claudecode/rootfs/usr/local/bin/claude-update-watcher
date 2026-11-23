@@ -31,9 +31,11 @@
 #     resume. A sign of life is a prompt, a key typed by an attached client,
 #     or output in LIVE_POLLS polls running, as a working Claude's spinner
 #     gives. Output now and then is not one: the updater above prints
-#     "Auto-updating" in the very session that is behind, every 30 minutes,
-#     which kept an interrupted turn looking alive for good, and the session
-#     behind, reinstalling;
+#     "Auto-updating" in the very session that is behind, every 30 minutes
+#     (seen live: the pane's window_activity moved 8 s after each install),
+#     which keeps an interrupted turn looking alive for good, and the session
+#     behind, reinstalling. Five polls, so that a slow install's start and
+#     end, minutes apart, do not add up to one;
 #   - the pane has been quiet for IDLE_SECS: nothing printed (tmux
 #     window_activity; Claude's spinner prints while it works) and nothing
 #     typed by an attached client (session_activity).
@@ -45,7 +47,7 @@
 POLL_SECS=${CLAUDE_UPDATE_POLL_SECS:-60}
 IDLE_SECS=${CLAUDE_UPDATE_IDLE_SECS:-900}
 STALE_TURN_SECS=${CLAUDE_UPDATE_STALE_TURN_SECS:-3600}
-LIVE_POLLS=${CLAUDE_UPDATE_LIVE_POLLS:-3}
+LIVE_POLLS=${CLAUDE_UPDATE_LIVE_POLLS:-5}
 PANES=${CLAUDE_PANE_STATE_DIR:-/run/claudecode/panes}
 PROCS=${CLAUDE_PROC_STATE_DIR:-/run/claudecode/procs}
 RC_PIDFILE=${CLAUDE_RC_SERVER_PIDFILE:-/run/claudecode/rc-server.pid}
@@ -71,10 +73,15 @@ signaled=" "  # pids already sent SIGTERM: a Claude winding down is not signalle
 ok_key=""     # the key of the installed binary that last answered --version
 reinstalled="" # set when the release already installed was installed again
 reported=""   # the Claude processes on another release last named in the log
-declare -A release_of             # binary key -> the release it answered --version with ("" = it did not)
+declare -A release_of asked_at    # binary key -> the release it answered --version with ("" = it did not), and when it was asked
+managed=" "   # this round's Claudes in panes that claude-auto-launch supervises
 declare -A seen_out streak live   # per pane: last output seen, polls running with new output, last sign of life
 
 is_release() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+# What `claude --version` printed -> the version: the first word of the first
+# line that starts with one, pre-releases included. Empty when there is none
+# (a warning ahead of the version is skipped; output without one names nothing).
+version_in() { printf '%s\n' "$1" | awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?$/ { print $1; exit }'; }
 remember_release() {  # $1 = version that answered --version
   local have
   is_release "$1" || return 0
@@ -102,7 +109,7 @@ remember_release() {  # $1 = version that answered --version
 # timeout under load) does not strand sessions until the next release; one
 # that keeps failing, like a release without AVX support, is logged once.
 installed_ok() {
-  local bin key out now
+  local bin key out now v
   bin=$(readlink -f "$(command -v claude)" 2>/dev/null) || return 1
   [ -x "$bin" ] || return 1
   key=$(stat -c '%i-%s-%Y' "$bin" 2>/dev/null) || return 1
@@ -114,13 +121,16 @@ installed_ok() {
   if out=$(timeout 30 "$bin" --version < /dev/null 2>&1); then
     verified="$key:ok"
     BIN=$bin
-    release_of[$key]=${out%% *}
-    if [ -n "$ok_key" ] && [ "$key" != "$ok_key" ] && [ "${out%% *}" = "$INSTALLED_VERSION" ]; then
+    # No version in the answer: INSTALLED_VERSION stays empty, which matches
+    # no session's release, so only the file itself counts as "on it".
+    v=$(version_in "$out")
+    release_of[$key]=$v
+    if [ -n "$v" ] && [ -n "$ok_key" ] && [ "$key" != "$ok_key" ] && [ "$v" = "$INSTALLED_VERSION" ]; then
       reinstalled=1
       info "Claude Code $INSTALLED_VERSION was installed again: the same release, so sessions already on it keep running"
     else
-      INSTALLED_VERSION=${out%% *}
-      info "Claude Code $INSTALLED_VERSION is installed; idle sessions on another release will be restarted onto it"
+      INSTALLED_VERSION=$v
+      info "Claude Code ${INSTALLED_VERSION:-(version not recognised: ${out%%$'\n'*})} is installed; idle sessions on another release will be restarted onto it"
     fi
     ok_key=$key
     remember_release "$INSTALLED_VERSION"
@@ -138,22 +148,24 @@ installed_ok() {
 # file that answered --version with the same release, which is what a session
 # runs after the release it is on was installed again. A binary this watcher
 # never checked (replaced within a poll of being installed) is asked through
-# /proc/<pid>/exe, which still reaches it once npm has deleted it. One that
-# cannot be asked counts as another release, as every other file did before.
+# /proc/<pid>/exe, which still reaches it once npm has deleted it (checked on
+# the add-on under its AppArmor profile). One that cannot be asked counts as
+# another release, as every other file did before; it is asked again after
+# BAD_RETRY_SECS, so one timeout under load is not held against it for good.
 # Leaves the release in PROC_RELEASE ("" = unknown). Not called in a
 # subshell: the answers are cached in release_of.
 on_installed() {  # $1 = pid
-  local key out
+  local key out now
   PROC_RELEASE=$INSTALLED_VERSION
   [ "/proc/$1/exe" -ef "$BIN" ] && return 0
   PROC_RELEASE=""
   key=$(stat -L -c '%i-%s-%Y' "/proc/$1/exe" 2>/dev/null) || return 1
-  if [ -z "${release_of[$key]+known}" ]; then
-    out=$(timeout 30 "/proc/$1/exe" --version < /dev/null 2>/dev/null)
-    out=${out%% *}
-    is_release "$out" || out=""
+  now=$(date +%s)
+  if [ -z "${release_of[$key]}" ] && [ $((now - ${asked_at[$key]:-0})) -ge "$BAD_RETRY_SECS" ]; then
+    out=$(version_in "$(timeout 30 "/proc/$1/exe" --version < /dev/null 2>/dev/null)")
     [ -e "/proc/$1/exe" ] || return 1   # it exited meanwhile: that is no answer about its binary
     release_of[$key]=$out
+    asked_at[$key]=$now
   fi
   PROC_RELEASE=${release_of[$key]}
   [ -n "$PROC_RELEASE" ] && [ "$PROC_RELEASE" = "$INSTALLED_VERSION" ]
@@ -187,8 +199,8 @@ server_idle() {  # $1 = server pid
   # through an intermediate process must not look like a server with none.
   for kid in $(descendants "$1"); do
     case $(readlink "/proc/$kid/exe" 2>/dev/null) in */@anthropic-ai/*) ;; *) continue ;; esac
-    lp=$(cat "$PROCS/$kid/last-prompt" 2>/dev/null || echo 0)
-    ls=$(cat "$PROCS/$kid/last-stop" 2>/dev/null || echo 0)
+    lp=$(cat "$PROCS/$kid/last-prompt" 2>/dev/null); lp=${lp:-0}
+    ls=$(cat "$PROCS/$kid/last-stop" 2>/dev/null); ls=${ls:-0}
     started=$(( BOOT + $(awk '{sub(/.*\) /, ""); print $20}' "/proc/$kid/stat" 2>/dev/null || echo 0) / HZ ))  # starttime; comm may hold spaces
     last=$lp; [ "$ls" -gt "$last" ] && last=$ls; [ "$started" -gt "$last" ] && last=$started
     if [ "$lp" -gt "$ls" ] && [ $((now - lp)) -lt "$STALE_TURN_SECS" ]; then return 1; fi
@@ -200,21 +212,25 @@ server_idle() {  # $1 = server pid
 # After the release already installed was installed again: name the Claude
 # processes that are on another one, since one of them asked for it and will
 # again in 30 minutes. The sessions this watcher supervises leave that list as
-# they go idle; a Claude started by hand in a shell stays until somebody
-# restarts it. Logged when the list changes, not every 30 minutes.
+# they go idle; a Claude started by hand stays until somebody restarts it
+# (seen on a real box: `claude --remote-control` typed into the terminal's
+# shell after the launcher's own Claude had exited, twelve days on 2.1.311,
+# reinstalling 2.1.323 every 30 minutes). A
+# headless run (-p) has no updater and is listed only so the list is whole.
+# Logged when the list changes, not every 30 minutes.
 old_claudes() {
-  local exe pid ppid kind started list="" rc_pids=""
+  local exe pid kind started list="" rc_pids=""
   [ -n "$rpid" ] && rc_pids="$rpid $(descendants "$rpid" | tr '\n' ' ')"
   for exe in /proc/[0-9]*/exe; do
     case $(readlink "$exe" 2>/dev/null) in */@anthropic-ai/*) ;; *) continue ;; esac
     pid=${exe#/proc/}; pid=${pid%/exe}
     on_installed "$pid" && continue
     [ -e "$exe" ] || continue
-    ppid=$(awk '{sub(/.*\) /, ""); print $2}' "/proc/$pid/stat" 2>/dev/null)
-    kind="not one this add-on restarts: exit it and start it again"
-    case $(tr '\0' ' ' < "/proc/$ppid/cmdline" 2>/dev/null) in
-      *claude-auto-launch*) kind="terminal session, restarted once idle" ;;
+    kind="started by hand: nothing restarts it, exit it and start it again"
+    case " $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" in
+      *" -p "*|*" --print "*) kind="a headless run, which ends by itself" ;;
     esac
+    case $managed in *" $pid "*) kind="terminal session, restarted once idle" ;; esac
     case " $rc_pids " in
       *" $pid "*) kind="Remote Control, restarted once its sessions are idle" ;;
     esac
@@ -245,6 +261,7 @@ while sleep "$POLL_SECS"; do
     [ "${sess_act:-0}" -gt "${live[$pane]}" ] && live[$pane]=$sess_act
   done
   installed_ok || continue
+  managed=" "
   for line in "${panes[@]}"; do
     read -r pane root win_act sess_act <<< "$line"
     case $(tr '\0' ' ' < "/proc/$root/cmdline" 2>/dev/null) in
@@ -252,13 +269,14 @@ while sleep "$POLL_SECS"; do
       *) continue ;;   # a shell or a claude started by hand: nobody would relaunch it
     esac
     pid=$(pane_claude "$root") || continue
+    managed="$managed$pid "
     case $signaled in *" $pid "*) continue ;; esac
     on_installed "$pid" && continue
     quiet=$(( now - (win_act > sess_act ? win_act : sess_act) ))
     [ "$quiet" -ge "$IDLE_SECS" ] || continue
     state=$PANES/${pane#%}
-    last_prompt=$(cat "$state/last-prompt" 2>/dev/null || echo 0)
-    last_stop=$(cat "$state/last-stop" 2>/dev/null || echo 0)
+    last_prompt=$(cat "$state/last-prompt" 2>/dev/null); last_prompt=${last_prompt:-0}
+    last_stop=$(cat "$state/last-stop" 2>/dev/null); last_stop=${last_stop:-0}
     alive=${live[$pane]}; [ "$last_prompt" -gt "$alive" ] && alive=$last_prompt
     if [ "$last_prompt" -gt "$last_stop" ] && [ $((now - alive)) -lt "$STALE_TURN_SECS" ]; then
       continue   # a turn is in flight
