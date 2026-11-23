@@ -37,6 +37,12 @@ watcher took every new file for an update.
   watcher never checked, the Remote Control server, the process named in the
   log, and the turn-in-flight rules
 
+### Changed
+- CI: the tests workflow runs on `ubuntu-24.04` instead of `ubuntu-latest`. The
+  label moved to 26.04, whose `timeout` (Rust coreutils) exits 124 when it is
+  sent SIGTERM, where GNU `timeout`, the one in the add-on image, dies of the
+  signal. Two `test_runner` abort tests failed there, on unchanged code
+
 ## [1.2.65-con.38] - 2026-11-11
 
 Claude Jobs on Fable fall back to Opus when the Fable usage limit is reached.
