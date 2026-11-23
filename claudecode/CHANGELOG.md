@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.39] - 2026-11-23
+
+Claude Code was being installed every 30 minutes at the release already
+installed (2.1.323, the stable channel's), and each time the idle sessions, the
+Remote Control server's among them, were restarted. Claude Code's updater
+compares the channel's release with the one its own process runs, not with the
+one installed (read in the 2.1.330 CLI), so a single session that is behind
+runs `npm install -g` for the channel's release every 30 minutes until it
+restarts. npm replaces the binary even when nothing changes, and the update
+watcher took every new file for an update.
+
+### Fixed
+- Update watcher: a session is restarted when it runs another release than the
+  installed one, not another file. The watcher keeps the release each binary
+  answered `--version` with, and asks a binary it never checked through
+  `/proc/<pid>/exe` (again after ten minutes if it got no answer). The same
+  release installed again restarts nothing, neither terminal sessions nor the
+  Remote Control server. An answer with no version in it falls back to
+  comparing files
+- Update watcher: a turn in flight no longer stays "in flight" because the pane
+  prints now and then. The session that is behind prints "Auto-updating" at
+  each of those installs, which is under the hour after which an interrupted
+  turn counts as over, so such a session was never moved on and went on
+  reinstalling. A turn now counts as alive for an hour after a prompt, a key
+  typed in the pane, or output in five polls running (a working Claude's
+  spinner); `CLAUDE_UPDATE_LIVE_POLLS` sets the five
+- Launcher: with `auto_launch_claude: new` and Remote Control off, an idle
+  session the watcher moved onto an update was ended instead of relaunched
+  (that setup runs one unsupervised `claude`, which ignored the watcher's
+  mark). It now relaunches on the same conversation
+- Session hook: the turn stamps are written atomically, so the watcher cannot
+  read one while it is empty; the watcher reads an empty stamp as 0
+
+### Added
+- Update watcher: when the installed release is installed again, the log names
+  the Claude processes on another release (pid, release, start time, and
+  whether it is a terminal session or Remote Control, which the add-on
+  restarts, a headless run, or one started by hand, which nothing restarts),
+  once per set of processes. On the box this was found on it was a
+  `claude --remote-control` typed into the terminal's shell twelve days
+  earlier, still on 2.1.311
+- Launcher: the shell it hands over to when Claude exits says that a `claude`
+  started from it is not moved onto updates, and that `exec claude-auto-launch`
+  brings the supervised session back
+- Tests: `test_update_watcher.py` runs the watcher against a stand-in claude,
+  tmux and clock: same release installed again, another release, a binary the
+  watcher never checked, a pre-release, an answer without a version, the
+  Remote Control server, the processes named in the log, and the
+  turn-in-flight rules
+
+### Changed
+- CI: the tests workflow runs on `ubuntu-24.04` instead of `ubuntu-latest`. The
+  label moved to 26.04, whose `timeout` (Rust coreutils) exits 124 when it is
+  sent SIGTERM, where GNU `timeout`, the one in the add-on image, dies of the
+  signal. Two `test_runner` abort tests failed there, on unchanged code
+
 ## [1.2.65-con.38] - 2026-11-11
 
 Claude Jobs on Fable fall back to Opus when the Fable usage limit is reached.

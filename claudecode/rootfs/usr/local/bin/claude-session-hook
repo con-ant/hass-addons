@@ -39,15 +39,15 @@ sid=$(jq -r '.session_id // empty' 2>/dev/null)
 ppid_of() {  # field 4 of /proc/<pid>/stat, counted after the comm, which may hold spaces
   awk '{sub(/.*\) /, ""); print $2}' "/proc/$1/stat" 2>/dev/null
 }
-stamp() {  # $1 = state dir
-  mkdir -p "$1" 2>/dev/null || return 0
-  case "$EVENT" in
-    prompt) date +%s > "$1/last-prompt" 2>/dev/null ;;
-    stop)   date +%s > "$1/last-stop" 2>/dev/null ;;
-  esac
-}
 put() {  # $1 = file, $2 = value; atomic within its directory
   printf '%s\n' "$2" > "$1.tmp" 2>/dev/null && mv -f "$1.tmp" "$1" 2>/dev/null
+}
+stamp() {  # $1 = state dir. Through put: the watcher must never read a stamp that is being rewritten as empty
+  mkdir -p "$1" 2>/dev/null || return 0
+  case "$EVENT" in
+    prompt) put "$1/last-prompt" "$(date +%s)" ;;
+    stop)   put "$1/last-stop" "$(date +%s)" ;;
+  esac
 }
 
 # The Claude process this hook runs for: the nearest ancestor executing the

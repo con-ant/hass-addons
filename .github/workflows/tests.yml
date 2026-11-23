@@ -4,6 +4,10 @@
 # the claude-login-url tests. Read-only:
 # nothing here can push, comment or publish. A pull request from a fork may wait for a maintainer's
 # approval before its first run (GitHub's default for outside contributors).
+# ubuntu-24.04, not ubuntu-latest: that label moved to 26.04, whose `timeout` is the Rust coreutils one.
+# It exits 124 when it is sent SIGTERM itself; GNU timeout, which the add-on image ships (apk coreutils)
+# and the job runner's exit-code table is written for, dies of the signal (143). Two test_runner abort
+# tests failed on 26.04 for that reason alone.
 name: tests
 
 on:
@@ -21,7 +25,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
