@@ -8,17 +8,32 @@
 # restarts it, so the session runs an old release indefinitely.
 #
 # Every POLL_SECS this looks at each tmux pane whose root is
-# claude-auto-launch. When the pane's claude is running an older binary than
+# claude-auto-launch. When the pane's claude is running another release than
 # the installed one, and the session is idle, it marks the pane and sends
 # claude SIGTERM; claude-auto-launch sees the mark and relaunches the new
 # release on the same conversation (claude-session-hook recorded its id).
 #
+# Another release, not another file: installing the release that is already
+# there replaces the binary all the same, and a session on it has nothing to
+# gain from a restart. That happens every 30 minutes while any Claude is on a
+# release older than the channel's: Claude Code's updater compares the channel
+# with the release its own process runs, not with the one installed, and runs
+# `npm install -g` again each time (read in the 2.1.330 CLI; npm replacing the
+# binary of an unchanged release checked with 2.1.323). Comparing files, as
+# this did up to con.38, restarted every idle session after each of those.
+#
 # Idle means both:
 #   - no turn in flight: the Stop hook stamped the last finished turn at or
-#     after the last prompt. An interrupted turn fires no Stop hook, so a pane
-#     that has been quiet for STALE_TURN_SECS counts as idle anyway. A turn
-#     parked on an unanswered permission prompt looks the same, so the
-#     question is dropped after that hour and asked again on resume;
+#     after the last prompt. An interrupted turn fires no Stop hook, so a turn
+#     that has shown no sign of life for STALE_TURN_SECS counts as over
+#     anyway. A turn parked on an unanswered permission prompt looks the
+#     same, so the question is dropped after that hour and asked again on
+#     resume. A sign of life is a prompt, a key typed by an attached client,
+#     or output in LIVE_POLLS polls running, as a working Claude's spinner
+#     gives. Output now and then is not one: the updater above prints
+#     "Auto-updating" in the very session that is behind, every 30 minutes,
+#     which kept an interrupted turn looking alive for good, and the session
+#     behind, reinstalling;
 #   - the pane has been quiet for IDLE_SECS: nothing printed (tmux
 #     window_activity; Claude's spinner prints while it works) and nothing
 #     typed by an attached client (session_activity).
@@ -30,6 +45,7 @@
 POLL_SECS=${CLAUDE_UPDATE_POLL_SECS:-60}
 IDLE_SECS=${CLAUDE_UPDATE_IDLE_SECS:-900}
 STALE_TURN_SECS=${CLAUDE_UPDATE_STALE_TURN_SECS:-3600}
+LIVE_POLLS=${CLAUDE_UPDATE_LIVE_POLLS:-3}
 PANES=${CLAUDE_PANE_STATE_DIR:-/run/claudecode/panes}
 PROCS=${CLAUDE_PROC_STATE_DIR:-/run/claudecode/procs}
 RC_PIDFILE=${CLAUDE_RC_SERVER_PIDFILE:-/run/claudecode/rc-server.pid}
@@ -52,6 +68,11 @@ BAD_RETRY_SECS=${CLAUDE_UPDATE_BAD_RETRY_SECS:-600}
 verified=""   # "<key>:ok" or "<key>:bad:<epoch>" for the installed binary last checked
 warned=""     # the key a "does not run here" warning was last logged for
 signaled=" "  # pids already sent SIGTERM: a Claude winding down is not signalled again
+ok_key=""     # the key of the installed binary that last answered --version
+reinstalled="" # set when the release already installed was installed again
+reported=""   # the Claude processes on another release last named in the log
+declare -A release_of             # binary key -> the release it answered --version with ("" = it did not)
+declare -A seen_out streak live   # per pane: last output seen, polls running with new output, last sign of life
 
 is_release() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 remember_release() {  # $1 = version that answered --version
@@ -92,10 +113,17 @@ installed_ok() {
   esac
   if out=$(timeout 30 "$bin" --version < /dev/null 2>&1); then
     verified="$key:ok"
-    INSTALLED_VERSION=${out%% *}
     BIN=$bin
+    release_of[$key]=${out%% *}
+    if [ -n "$ok_key" ] && [ "$key" != "$ok_key" ] && [ "${out%% *}" = "$INSTALLED_VERSION" ]; then
+      reinstalled=1
+      info "Claude Code $INSTALLED_VERSION was installed again: the same release, so sessions already on it keep running"
+    else
+      INSTALLED_VERSION=${out%% *}
+      info "Claude Code $INSTALLED_VERSION is installed; idle sessions on another release will be restarted onto it"
+    fi
+    ok_key=$key
     remember_release "$INSTALLED_VERSION"
-    info "Claude Code $INSTALLED_VERSION is installed; idle sessions on an older release will be restarted onto it"
   else
     verified="$key:bad:$now"
     if [ "$warned" != "$key" ]; then
@@ -104,6 +132,31 @@ installed_ok() {
     fi
     return 1
   fi
+}
+
+# Is that Claude on the installed release? The same file is; so is another
+# file that answered --version with the same release, which is what a session
+# runs after the release it is on was installed again. A binary this watcher
+# never checked (replaced within a poll of being installed) is asked through
+# /proc/<pid>/exe, which still reaches it once npm has deleted it. One that
+# cannot be asked counts as another release, as every other file did before.
+# Leaves the release in PROC_RELEASE ("" = unknown). Not called in a
+# subshell: the answers are cached in release_of.
+on_installed() {  # $1 = pid
+  local key out
+  PROC_RELEASE=$INSTALLED_VERSION
+  [ "/proc/$1/exe" -ef "$BIN" ] && return 0
+  PROC_RELEASE=""
+  key=$(stat -L -c '%i-%s-%Y' "/proc/$1/exe" 2>/dev/null) || return 1
+  if [ -z "${release_of[$key]+known}" ]; then
+    out=$(timeout 30 "/proc/$1/exe" --version < /dev/null 2>/dev/null)
+    out=${out%% *}
+    is_release "$out" || out=""
+    [ -e "/proc/$1/exe" ] || return 1   # it exited meanwhile: that is no answer about its binary
+    release_of[$key]=$out
+  fi
+  PROC_RELEASE=${release_of[$key]}
+  [ -n "$PROC_RELEASE" ] && [ "$PROC_RELEASE" = "$INSTALLED_VERSION" ]
 }
 
 # The pane's claude: the child of the claude-auto-launch root whose executable
@@ -144,30 +197,77 @@ server_idle() {  # $1 = server pid
   return 0
 }
 
+# After the release already installed was installed again: name the Claude
+# processes that are on another one, since one of them asked for it and will
+# again in 30 minutes. The sessions this watcher supervises leave that list as
+# they go idle; a Claude started by hand in a shell stays until somebody
+# restarts it. Logged when the list changes, not every 30 minutes.
+old_claudes() {
+  local exe pid ppid kind started list="" rc_pids=""
+  [ -n "$rpid" ] && rc_pids="$rpid $(descendants "$rpid" | tr '\n' ' ')"
+  for exe in /proc/[0-9]*/exe; do
+    case $(readlink "$exe" 2>/dev/null) in */@anthropic-ai/*) ;; *) continue ;; esac
+    pid=${exe#/proc/}; pid=${pid%/exe}
+    on_installed "$pid" && continue
+    [ -e "$exe" ] || continue
+    ppid=$(awk '{sub(/.*\) /, ""); print $2}' "/proc/$pid/stat" 2>/dev/null)
+    kind="not one this add-on restarts: exit it and start it again"
+    case $(tr '\0' ' ' < "/proc/$ppid/cmdline" 2>/dev/null) in
+      *claude-auto-launch*) kind="terminal session, restarted once idle" ;;
+    esac
+    case " $rc_pids " in
+      *" $pid "*) kind="Remote Control, restarted once its sessions are idle" ;;
+    esac
+    started=$(( BOOT + $(awk '{sub(/.*\) /, ""); print $20}' "/proc/$pid/stat" 2>/dev/null || echo 0) / HZ ))
+    list="$list pid $pid on ${PROC_RELEASE:-an unknown release} since $(date -d "@$started" '+%d %b %H:%M' 2>/dev/null || echo "$started") ($kind);"
+  done
+  [ "$list" = "$reported" ] && return 0
+  reported=$list
+  [ -n "$list" ] || return 0
+  warn "Claude Code $INSTALLED_VERSION was installed again because a Claude on another release asked for it, and will every 30 minutes until it restarts:${list%;}"
+}
+
 while sleep "$POLL_SECS"; do
-  installed_ok || continue
   now=$(date +%s)
-  while read -r pane root win_act sess_act; do
+  # Every pane's signs of life, on every poll (also while an update is being
+  # installed): a restart decision needs the history, not this round's glance.
+  mapfile -t panes < <(tmux list-panes -a -F '#{pane_id} #{pane_pid} #{window_activity} #{session_activity}' 2>/dev/null)
+  for line in "${panes[@]}"; do
+    read -r pane root win_act sess_act <<< "$line"
+    [ -n "${live[$pane]}" ] || live[$pane]=$now   # first seen: a full STALE_TURN_SECS before a turn counts as over
+    if [ "${win_act:-0}" -gt "${seen_out[$pane]:-0}" ]; then
+      streak[$pane]=$(( ${streak[$pane]:-0} + 1 ))
+    else
+      streak[$pane]=0
+    fi
+    seen_out[$pane]=${win_act:-0}
+    [ "${streak[$pane]}" -ge "$LIVE_POLLS" ] && live[$pane]=$now
+    [ "${sess_act:-0}" -gt "${live[$pane]}" ] && live[$pane]=$sess_act
+  done
+  installed_ok || continue
+  for line in "${panes[@]}"; do
+    read -r pane root win_act sess_act <<< "$line"
     case $(tr '\0' ' ' < "/proc/$root/cmdline" 2>/dev/null) in
       *claude-auto-launch*) ;;
       *) continue ;;   # a shell or a claude started by hand: nobody would relaunch it
     esac
     pid=$(pane_claude "$root") || continue
     case $signaled in *" $pid "*) continue ;; esac
-    [ "/proc/$pid/exe" -ef "$BIN" ] && continue   # already on the installed release
+    on_installed "$pid" && continue
     quiet=$(( now - (win_act > sess_act ? win_act : sess_act) ))
     [ "$quiet" -ge "$IDLE_SECS" ] || continue
     state=$PANES/${pane#%}
     last_prompt=$(cat "$state/last-prompt" 2>/dev/null || echo 0)
     last_stop=$(cat "$state/last-stop" 2>/dev/null || echo 0)
-    if [ "$last_prompt" -gt "$last_stop" ] && [ "$quiet" -lt "$STALE_TURN_SECS" ]; then
+    alive=${live[$pane]}; [ "$last_prompt" -gt "$alive" ] && alive=$last_prompt
+    if [ "$last_prompt" -gt "$last_stop" ] && [ $((now - alive)) -lt "$STALE_TURN_SECS" ]; then
       continue   # a turn is in flight
     fi
     # The installed release may have changed since the top of this round:
     # check it again (cached unless the file changed) so a session is only
     # ever moved onto a release that has answered --version.
     installed_ok || break
-    [ "/proc/$pid/exe" -ef "$BIN" ] && continue
+    on_installed "$pid" && continue
     mkdir -p "$state" 2>/dev/null && touch "$state/restart-for-update" 2>/dev/null || {
       warn "Cannot mark pane $pane for restart; leaving it on the older release"
       continue
@@ -178,12 +278,16 @@ while sleep "$POLL_SECS"; do
     else
       rm -f "$state/restart-for-update"   # it exited by itself meanwhile
     fi
-  done < <(tmux list-panes -a -F '#{pane_id} #{pane_pid} #{window_activity} #{session_activity}' 2>/dev/null)
+  done
 
   rpid=$(cat "$RC_PIDFILE" 2>/dev/null)
+  if [ -n "$reinstalled" ]; then
+    reinstalled=""
+    old_claudes
+  fi
   case $signaled in *" $rpid "*) rpid="" ;; esac
-  if [ -n "$rpid" ] && [ -e "/proc/$rpid/exe" ] && ! [ "/proc/$rpid/exe" -ef "$BIN" ] \
-     && server_idle "$rpid" && installed_ok && ! [ "/proc/$rpid/exe" -ef "$BIN" ]; then
+  if [ -n "$rpid" ] && [ -e "/proc/$rpid/exe" ] && ! on_installed "$rpid" \
+     && server_idle "$rpid" && installed_ok && ! on_installed "$rpid"; then
     info "Restarting the Remote Control server (pid $rpid) onto Claude Code ${INSTALLED_VERSION:-update}; its sessions are idle and reattach"
     echo "$rpid" 2>/dev/null > "$RC_MARK" \
       || warn "Cannot mark the Remote Control server's restart; its loop will take it for a crash and wait 30s"

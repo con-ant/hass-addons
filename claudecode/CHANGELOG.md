@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.65-con.39] - 2026-11-23
+
+Claude Code was being installed every 30 minutes at the release already
+installed (2.1.323, the stable channel's), and each time the idle sessions, the
+Remote Control server's among them, were restarted. Claude Code's updater
+compares the channel's release with the one its own process runs, not with the
+one installed (read in the 2.1.330 CLI), so a single session that is behind
+runs `npm install -g` for the channel's release every 30 minutes until it
+restarts. npm replaces the binary even when nothing changes, and the update
+watcher took every new file for an update.
+
+### Fixed
+- Update watcher: a session is restarted when it runs another release than the
+  installed one, not another file. The watcher keeps the release each binary
+  answered `--version` with, and asks a binary it never checked through
+  `/proc/<pid>/exe`. The same release installed again restarts nothing, neither
+  terminal sessions nor the Remote Control server
+- Update watcher: a turn in flight no longer stays "in flight" because the pane
+  prints now and then. The session that is behind prints "Auto-updating" at
+  each of those installs, which is under the hour after which an interrupted
+  turn counts as over, so such a session was never moved on and went on
+  reinstalling. A turn now counts as alive for an hour after a prompt, a key
+  typed in the pane, or output in three polls running (a working Claude's
+  spinner); `CLAUDE_UPDATE_LIVE_POLLS` sets the three
+
+### Added
+- Update watcher: when the installed release is installed again, the log names
+  the Claude processes on another release (pid, release, start time, and
+  whether the add-on restarts them), once per set of processes. A Claude
+  started by hand in a shell is the one nothing restarts
+- Tests: `test_update_watcher.py` runs the watcher against a stand-in claude,
+  tmux and clock: same release installed again, another release, a binary the
+  watcher never checked, the Remote Control server, the process named in the
+  log, and the turn-in-flight rules
+
 ## [1.2.65-con.38] - 2026-11-11
 
 Claude Jobs on Fable fall back to Opus when the Fable usage limit is reached.
